@@ -194,3 +194,26 @@ async def test_pending_inbox_with_messages(client: AsyncClient):
     assert data["reply_needed"] == 1
     assert "codex" in data["latest_senders"]
     assert len(data["latest_summary"]) == 2
+
+
+async def test_signature_middleware_valid_and_invalid(client: AsyncClient, tmp_path, monkeypatch):
+    from agent_bus.worker.auth import WorkerAuth
+
+    auth = WorkerAuth(keys_dir=tmp_path / "agents")
+    headers = auth.sign_operation("claude", "POST", "/tasks", {"task_id": "T99", "title": "Signed task"})
+
+    # 1. Valid signature
+    resp = await client.post("/tasks", json={"task_id": "T99", "title": "Signed task"}, headers=headers)
+    assert resp.status_code in (200, 201)
+
+    # 2. Tampered signature -> 401
+    bad_headers = dict(headers)
+    bad_headers["X-Agent-Signature"] = "00" * 64
+    resp_bad = await client.post("/tasks", json={"task_id": "T100", "title": "Bad task"}, headers=bad_headers)
+    assert resp_bad.status_code == 401
+    assert "Invalid Ed25519 signature" in resp_bad.json()["error"]
+
+    # 3. Enforce signatures (AGENT_BUS_ALLOW_UNSIGNED=0) -> missing headers rejected with 401
+    monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "0")
+    resp_no_sig = await client.post("/tasks", json={"task_id": "T101", "title": "No sig"})
+    assert resp_no_sig.status_code == 401

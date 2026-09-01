@@ -5,7 +5,8 @@ import json
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import os
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -19,6 +20,7 @@ from agent_bus.core.skills import SkillRegistry
 from agent_bus.core.tasks import TaskManager
 from agent_bus.reputation.database import Database
 from agent_bus.types import AgentInfo, AutonomyLevel, Envelope, MessageType
+from agent_bus.worker.auth import WorkerAuth
 
 
 class SendMessageRequest(BaseModel):
@@ -106,6 +108,47 @@ class MessageBus:
         self._setup_routes()
 
     def _setup_routes(self) -> None:
+        auth_validator = WorkerAuth()
+
+        @self.app.middleware("http")
+        async def verify_signature_middleware(request: Request, call_next):
+            allow_unsigned = os.environ.get("AGENT_BUS_ALLOW_UNSIGNED", "1") == "1"
+            if request.method in ("POST", "PUT", "DELETE"):
+                path = request.url.path
+                if not (path == "/register" or "/heartbeat" in path or path.startswith("/agents/")):
+                    agent_id = request.headers.get("x-agent-id")
+                    signature = request.headers.get("x-agent-signature")
+                    public_key = request.headers.get("x-agent-public-key")
+
+                    if agent_id and signature:
+                        body_bytes = await request.body()
+                        body_json = None
+                        if body_bytes:
+                            try:
+                                body_json = json.loads(body_bytes.decode())
+                            except Exception:
+                                pass
+
+                        async def receive():
+                            return {"type": "http.request", "body": body_bytes}
+
+                        request._receive = receive
+
+                        valid = auth_validator.verify_operation(
+                            agent_id=agent_id,
+                            method=request.method,
+                            path=path,
+                            body=body_json,
+                            signature_hex=signature,
+                            public_key_hex=public_key,
+                        )
+                        if not valid:
+                            return JSONResponse({"error": "Invalid Ed25519 signature"}, status_code=401)
+                    elif not allow_unsigned:
+                        return JSONResponse({"error": "Authentication required: missing signature"}, status_code=401)
+
+            return await call_next(request)
+
         # --- Agent endpoints ---
 
         @self.app.post("/register")

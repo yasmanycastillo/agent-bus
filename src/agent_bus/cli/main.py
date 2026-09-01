@@ -449,9 +449,11 @@ def show(ctx: click.Context):
 app.add_command(show)
 
 
-from agent_bus.cli.worker_cmds import worker  # noqa: E402
+from agent_bus.cli.worker_cmds import run_team, submit_goal, worker  # noqa: E402
 
 app.add_command(worker)
+app.add_command(run_team)
+app.add_command(submit_goal)
 
 
 @show.command("dashboard")

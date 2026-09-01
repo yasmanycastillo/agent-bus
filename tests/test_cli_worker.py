@@ -1,4 +1,4 @@
-"""Tests del comando CLI `agent-bus worker` (T3)."""
+"""Tests del comando CLI `agent-bus worker`, `run-team` y `submit` (T3 & T10)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from agent_bus.cli.worker_cmds import worker
+from agent_bus.cli.main import app
+from agent_bus.cli.worker_cmds import run_team, submit_goal, worker
 
 
 def test_worker_start_creates_pid_and_process(monkeypatch, tmp_path):
@@ -100,3 +101,33 @@ def test_worker_stop_stale_pid(monkeypatch, tmp_path):
     runner = CliRunner()
     result = runner.invoke(worker, ["stop", "--agent", "codex"], catch_exceptions=False)
     assert "no encontrado" in result.output
+
+
+def test_run_team_and_submit_cli(monkeypatch, tmp_path):
+    """Verifica que run-team y submit ejecuten correctamente."""
+    from agent_bus.cli import worker_cmds
+
+    monkeypatch.setattr(worker_cmds, "WORKERS_DIR", tmp_path)
+
+    runner = CliRunner()
+    # Test run-team
+    res_team = runner.invoke(
+        app,
+        ["run-team", "--agents", "claude,antigravity", "--mock"],
+        catch_exceptions=False,
+    )
+    assert res_team.exit_code == 0
+    assert "Preparando equipo" in res_team.output
+    assert "claude" in res_team.output
+    assert "antigravity" in res_team.output
+
+    # Clean up spawned workers
+    for agent in ("claude", "antigravity"):
+        pid_file = tmp_path / f"{agent}.pid"
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                os.kill(pid, 9)
+            except Exception:
+                pass
+            pid_file.unlink(missing_ok=True)
