@@ -1,6 +1,6 @@
 # agent-bus ⚡
 
-[![Tests](https://img.shields.io/badge/tests-184%20passed-brightgreen.svg)](https://github.com/yasmanycastillo/agent-bus)
+[![Tests](https://img.shields.io/badge/tests-190%20passed-brightgreen.svg)](https://github.com/yasmanycastillo/agent-bus)
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com)
 [![MCP](https://img.shields.io/badge/MCP-2024--11--05-orange.svg)](https://modelcontextprotocol.io)
@@ -156,7 +156,18 @@ uv run agent-bus worker start --agent claude # Iniciar daemon para un agente
 uv run agent-bus worker stop --agent claude  # Detener daemon
 ```
 
-### 4. Lanzar Equipo con Configuración Personalizada
+### 4. Sesión Interactiva que se Despierta Sola (`watch`)
+Deja tu terminal CLI escuchando el bus; cuando otro agente te escriba con `reply_needed`,
+tu sesión ejecuta un turno (`claude --resume <session_id> -p`) y responde sola:
+
+```bash
+uv run agent-bus watch --agent claude --cli claude
+```
+
+Alternativa MCP (recomendada, misma sesión sin subprocesos): conéctate con
+`wait_for_updates` — ver [docs/mcp-setup.md](docs/mcp-setup.md).
+
+### 5. Lanzar Equipo con Configuración Personalizada
 ```bash
 # Lanzar equipo con agentes específicos y worktrees sobre la rama main
 uv run agent-bus run-team --agents "claude,antigravity,codex" --base-ref main
@@ -173,6 +184,7 @@ uv run agent-bus run-team --agents "claude,antigravity,codex" --base-ref main
 | `agent-bus mcp-server` | Inicia el servidor MCP nativo sobre stdio (JSON-RPC 2.0) |
 | `agent-bus run-team` | Inicializa worktrees y arranca daemons de fondo |
 | `agent-bus submit "<meta>"` | Envía un objetivo global al equipo |
+| `agent-bus watch` | Despierta tu sesión interactiva ante mensajes reply_needed (thread_id → `--resume`) |
 | `agent-bus serve --daemon` | Inicia el servidor FastAPI como servicio de fondo |
 | `agent-bus serve --stop` | Detiene el servidor |
 | `agent-bus show` | Visualiza el dashboard del estado actual |
@@ -186,6 +198,23 @@ uv run agent-bus run-team --agents "claude,antigravity,codex" --base-ref main
 | `agent-bus work unlock <archivo>` | Libera el bloqueo de un archivo |
 | `agent-bus work msg <agente> "<texto>"` | Envía un mensaje directo al inbox de otro agente |
 | `agent-bus work decide "<titulo>" "<desc>"` | Registra un registro de decisión arquitectónica (ADR) |
+
+---
+
+## 🖥️ War Room Web (Panel Humano)
+
+El hub sirve una interfaz web para supervisar y dirigir al equipo sin usar la terminal:
+
+```
+http://localhost:8420/room
+```
+
+* **Kanban de tareas** por estado con reasignación en un clic (notifica al agente).
+* **Feed de eventos en vivo** (SSE global): mensajes, claims y decisiones según ocurren.
+* **Panel de aprobaciones**: los mensajes `reply_needed` dirigidos al humano se aprueban o rechazan desde la UI (la decisión llega al agente con `correlation_id`).
+* **Compositor de mensajes**: escribe a un agente específico o broadcast a todo el equipo.
+
+API subyacente: `GET/POST /room/api/*` (overview, assign, approve, message, pending-approvals).
 
 ---
 
@@ -205,7 +234,7 @@ export AGENT_BUS_AGENT_ID=antigravity
 
 ## 🧪 Suite de Pruebas
 
-`agent-bus` cuenta con una suite completa de 184 pruebas unitarias y de integración end-to-end:
+`agent-bus` cuenta con una suite completa de 190 pruebas unitarias y de integración end-to-end:
 
 ```bash
 uv run pytest
@@ -217,3 +246,5 @@ uv run pytest
 
 Para consultar el diseño técnico completo, flujo de diagramas de secuencia Mermaid, criptografía Ed25519 y modelo de consenso BFT, consulta:
 👉 **[`docs/autonomous_multi_agent_architecture.md`](docs/autonomous_multi_agent_architecture.md)**
+
+Para conectar tu CLI al bus vía MCP: 👉 **[`docs/mcp-setup.md`](docs/mcp-setup.md)**
