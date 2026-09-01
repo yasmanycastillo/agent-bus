@@ -296,11 +296,18 @@ class McpServer:
             try:
                 pending = (await client.get(f"/inbox/{agent_id}/pending")).json()
                 if pending.get("count", 0) > 0:
+                    # solo reply_needed (requieren acción) y acotado a 5 para
+                    # no saturar el contexto de la sesión despertada
                     inbox = (await client.get(f"/inbox/{agent_id}")).json()
+                    actionable = [
+                        m for m in inbox if m.get("reply_needed")
+                    ][:5] or inbox[-5:]
                     return {
                         "status": "pending_messages",
                         "count": pending["count"],
-                        "messages": inbox,
+                        "total_in_inbox": len(inbox),
+                        "messages": actionable,
+                        "hint": "usa read_messages para ver el inbox completo",
                     }
             except Exception:
                 pass
