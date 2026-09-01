@@ -31,7 +31,7 @@ def set_current_agent(agent_id: str) -> None:
     CURRENT_AGENT_FILE.write_text(agent_id)
 
 
-def print_dashboard(
+def generate_dashboard_renderable(
     status: dict,
     tasks: list[dict],
     inbox: list[dict],
@@ -39,23 +39,26 @@ def print_dashboard(
     decisions: list[dict],
     agents: list[dict],
     current_agent: str | None,
-) -> None:
+):
+    from rich.console import Group
+
     sections = []
 
     # Header
     agents_online = sum(1 for a in agents if a.get("status") == "online")
-    header = f"Server: online  Port: {status.get('port', '?')}  Agents: {agents_online} online"
+    ts = status.get("timestamp", "")[:19].replace("T", " ")
+    header = f"Server: [green]online[/green]  Agents: {agents_online}/{len(agents)} online  Time: {ts}"
     if current_agent:
-        header += f"\nCurrent agent: [cyan]{current_agent}[/cyan]"
-    sections.append(Panel(header, title="agent-bus", border_style="blue"))
+        header += f"\nCurrent agent: [cyan bold]{current_agent}[/cyan bold]"
+    sections.append(Panel(header, title="[bold blue]agent-bus top[/bold blue]", border_style="blue"))
 
     # Tasks
     if tasks:
-        table = Table(show_header=True, header_style="bold")
+        table = Table(show_header=True, header_style="bold", expand=True)
         table.add_column("ID", style="cyan", width=6)
         table.add_column("Tarea", style="green")
-        table.add_column("Owner", style="yellow", width=12)
-        table.add_column("Status", style="magenta", width=12)
+        table.add_column("Owner", style="yellow", width=14)
+        table.add_column("Status", style="magenta", width=14)
         for t in tasks[:10]:
             table.add_row(t["task_id"], t["title"], t["owner"], t["status"])
         sections.append(Panel(table, title="Tareas", border_style="green"))
@@ -64,7 +67,7 @@ def print_dashboard(
     if inbox:
         lines = []
         for m in inbox[:5]:
-            body_text = str(m.get("body", {}))[:50]
+            body_text = str(m.get("body", {}))[:60]
             lines.append(f"[yellow]{m['from_agent']}[/]: {body_text}")
         sections.append(Panel("\n".join(lines), title=f"Inbox ({len(inbox)})", border_style="yellow"))
 
@@ -74,7 +77,7 @@ def print_dashboard(
         for lk in locks:
             reason = f" ({lk['reason']})" if lk.get("reason") else ""
             lines.append(f"[red]{lk['file_path']}[/] -> {lk['locked_by']}{reason}")
-        sections.append(Panel("\n".join(lines), title="Locks", border_style="red"))
+        sections.append(Panel("\n".join(lines), title="Locks Activos", border_style="red"))
 
     # Decisions
     if decisions:
@@ -83,8 +86,22 @@ def print_dashboard(
             lines.append(f"[cyan]{d['decision_id']}[/] {d['title']}  ({d['decided_by']}, {d['created_at'][:10]})")
         sections.append(Panel("\n".join(lines), title="Decisiones", border_style="magenta"))
 
-    for section in sections:
-        console.print(section)
+    return Group(*sections)
+
+
+def print_dashboard(
+    status: dict,
+    tasks: list[dict],
+    inbox: list[dict],
+    locks: list[dict],
+    decisions: list[dict],
+    agents: list[dict],
+    current_agent: str | None,
+) -> None:
+    renderable = generate_dashboard_renderable(
+        status, tasks, inbox, locks, decisions, agents, current_agent
+    )
+    console.print(renderable)
 
 
 def print_tasks_table(tasks: list[dict]) -> None:

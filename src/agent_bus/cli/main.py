@@ -39,6 +39,37 @@ def _require_agent() -> str:
     return agent
 
 
+def _explain_error(resp) -> str:
+    """Traduce respuestas de error del bus a mensajes accionables."""
+    if resp.status_code == 422:
+        # validación pydantic: falta un campo o tiene tipo incorrecto
+        try:
+            details = resp.json().get("detail", [])
+            missing = [
+                f"'{d['loc'][-1]}'" for d in details if d.get("type") == "missing"
+            ]
+            if missing:
+                return f"Falta(n) parametro(s): {', '.join(missing)}"
+            return f"Parametros invalidos: {resp.text[:200]}"
+        except (ValueError, KeyError, TypeError):
+            return f"Parametros invalidos: {resp.text[:200]}"
+    if resp.status_code == 409:
+        try:
+            return resp.json().get("error", resp.text)
+        except ValueError:
+            return resp.text
+    if resp.status_code == 404:
+        return "No encontrado: verifica el id/path usado"
+    if resp.status_code == 405:
+        return f"Endpoint no soporta ese metodo ({resp.request.method})"
+    if resp.status_code >= 500:
+        return f"Error del servidor ({resp.status_code}). Revisa el log del bus."
+    try:
+        return resp.json().get("error", resp.text[:200])
+    except ValueError:
+        return resp.text[:200]
+
+
 def _ensure_global_config() -> None:
     config_dir = DEFAULT_CONFIG_DIR
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -242,7 +273,7 @@ def work_task(task_id: str, title: str, owner: str):
         if resp.status_code == 200:
             click.echo(f"Tarea {task_id} creada")
         else:
-            click.echo(f"Error: {resp.text}")
+            click.echo(f"Error: {_explain_error(resp)}")
 
 
 @work.command("claim")
@@ -255,7 +286,7 @@ def work_claim(task_id: str):
         if resp.status_code == 200:
             click.echo(f"Tarea {task_id} reclamada por {agent}")
         else:
-            click.echo(f"Error: {resp.json().get('error', resp.text)}")
+            click.echo(f"Error: {_explain_error(resp)}")
 
 
 @work.command("reassign")
@@ -268,7 +299,7 @@ def work_reassign(task_id: str, new_owner: str):
         if resp.status_code == 200:
             click.echo(f"Tarea {task_id} reasignada a {new_owner}")
         else:
-            click.echo(f"Error: {resp.json().get('error', resp.text)}")
+            click.echo(f"Error: {_explain_error(resp)}")
 
 
 @work.command("done")
@@ -280,7 +311,7 @@ def work_done(task_id: str):
         if resp.status_code == 200:
             click.echo(f"Tarea {task_id} completada")
         else:
-            click.echo(f"Error: {resp.json().get('error', resp.text)}")
+            click.echo(f"Error: {_explain_error(resp)}")
 
 
 @work.command("lock")
@@ -294,7 +325,7 @@ def work_lock(file_path: str, reason: str | None):
         if resp.status_code == 200:
             click.echo(f"Lock: {file_path}")
         else:
-            click.echo(f"Error: {resp.json().get('error', resp.text)}")
+            click.echo(f"Error: {_explain_error(resp)}")
 
 
 @work.command("unlock")
@@ -307,7 +338,7 @@ def work_unlock(file_path: str):
         if resp.status_code == 200:
             click.echo(f"Unlock: {file_path}")
         else:
-            click.echo(f"Error: {resp.json().get('error', resp.text)}")
+            click.echo(f"Error: {_explain_error(resp)}")
 
 
 @work.command("check")
@@ -409,7 +440,7 @@ def work_decide(title: str, what: str, context: str):
         if resp.status_code == 200:
             click.echo(f"Decision {did} registrada")
         else:
-            click.echo(f"Error: {resp.text}")
+            click.echo(f"Error: {_explain_error(resp)}")
 
 
 @work.command("kickoff")
@@ -426,7 +457,7 @@ def work_kickoff(step: int, result: str | None):
         if resp.status_code == 200:
             click.echo(f"Paso {step} ({resp.json()['name']}) completado")
         else:
-            click.echo(f"Error: {resp.json().get('error', resp.text)}")
+            click.echo(f"Error: {_explain_error(resp)}")
 
 
 # ═══════════════════════════════════════════
@@ -456,6 +487,11 @@ app.add_command(run_team)
 app.add_command(submit_goal)
 
 
+from agent_bus.cli.watch_cmds import watch  # noqa: E402
+
+app.add_command(watch)
+
+
 @show.command("dashboard")
 def show_dashboard():
     """Dashboard completo: agentes, tareas, inbox, locks, decisiones."""
@@ -476,6 +512,109 @@ def show_dashboard():
             agents=agents,
             current_agent=agent,
         )
+
+
+@app.command("top")
+@click.option("--interval", default=1.0, type=float, help="Intervalo de refresco en segundos")
+@click.option("--once", is_flag=True, default=False, help="Renderizar una sola vez y salir")
+def top_cmd(interval: float, once: bool):
+    """Dashboard interactivo TUI en tiempo real con Rich Live."""
+    import time
+    from rich.live import Live
+    from agent_bus.cli.display import console, generate_dashboard_renderable
+
+    def fetch_renderable():
+        agent = get_current_agent()
+        with _client() as client:
+            status = client.get("/status").json()
+            tasks = client.get("/tasks").json()
+            inbox = client.get(f"/inbox/{agent}").json() if agent else []
+            locks = client.get("/locks").json()
+            decisions = client.get("/decisions").json()
+            agents = client.get("/agents").json()
+            return generate_dashboard_renderable(
+                status=status,
+                tasks=[t for t in tasks if t["status"] != "done"],
+                inbox=inbox,
+                locks=locks,
+                decisions=decisions,
+                agents=agents,
+                current_agent=agent,
+            )
+
+    if once:
+        try:
+            console.print(fetch_renderable())
+        except Exception as exc:
+            click.echo(f"Error conectando con agent-bus: {exc}")
+        return
+
+    try:
+        with Live(fetch_renderable(), refresh_per_second=max(1, int(1 / interval)), console=console) as live:
+            while True:
+                time.sleep(interval)
+                live.update(fetch_renderable())
+    except KeyboardInterrupt:
+        pass
+    except Exception as exc:
+        click.echo(f"Dashboard detenido: {exc}")
+
+
+@app.command("quickstart")
+@click.option("--agents", default="claude,antigravity", help="Agentes a registrar e inicializar")
+@click.option("--mock", is_flag=True, default=False, help="Usar runners mock")
+def quickstart(agents: str, mock: bool):
+    """Onboarding en 1 solo paso: inicializa bus, registra agentes y lanza equipo."""
+    import subprocess
+    import time
+    from agent_bus.project import init_project
+
+    click.echo("✨ agent-bus Quickstart: Inicializando entorno multi-agente...\n")
+
+    # 1. Init project
+    project_path = init_project()
+    _ensure_global_config()
+    click.echo(f"  📁 Proyecto configurado en: {project_path}")
+
+    # 2. Start server daemon if not already online
+    server_online = False
+    try:
+        with _client() as client:
+            resp = client.get("/status")
+            if resp.status_code == 200:
+                server_online = True
+    except Exception:
+        server_online = False
+
+    if not server_online:
+        click.echo("  ⚡ Iniciando servidor agent-bus daemon...")
+        subprocess.run(["agent-bus", "serve", "--daemon"], check=False)
+        time.sleep(1.0)
+    else:
+        click.echo("  ⚡ Servidor agent-bus ya activo.")
+
+    # 3. Setup agents and protocols
+    agent_list = [a.strip() for a in agents.split(",") if a.strip()]
+    for ag in agent_list:
+        set_current_agent(ag)
+        try:
+            with _client() as client:
+                client.post("/register", json={"agent_id": ag, "display_name": ag.capitalize()})
+        except Exception:
+            pass
+    click.echo(f"  🤖 Agentes registrados: {', '.join(agent_list)}")
+
+    # 4. Run team
+    click.echo("  🚀 Lanzando equipo autónomo con worktrees y workers...")
+    cmd = ["agent-bus", "run-team", "--agents", agents]
+    if mock:
+        cmd.append("--mock")
+    subprocess.run(cmd, check=False)
+
+    click.echo("\n🎉 ¡Listo! El entorno multi-agente está completamente operativo.")
+    click.echo("   👉 Ver dashboard vivo:     agent-bus top")
+    click.echo("   👉 Enviar un objetivo:     agent-bus submit 'Tu requerimiento'")
+    click.echo("   👉 Monitorear logs:        agent-bus worker status")
 
 
 @show.command("tasks")
@@ -572,7 +711,7 @@ def work_handoff(task_id: str, to_agent: str, summary: str, files: str, question
             if summary:
                 click.echo(f"  Resumen: {summary}")
         else:
-            click.echo(f"Error: {resp.json().get('error', resp.text)}")
+            click.echo(f"Error: {_explain_error(resp)}")
 
 
 @work.command("context")
@@ -593,7 +732,7 @@ def work_context(update_field: tuple[str, str] | None):
             if resp.status_code == 200:
                 click.echo(f"Context actualizado: {field}")
             else:
-                click.echo(f"Error: {resp.text}")
+                click.echo(f"Error: {_explain_error(resp)}")
             return
 
         resp = client.get("/project/context")
