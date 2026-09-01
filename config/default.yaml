@@ -1,0 +1,31 @@
+bus:
+  host: "0.0.0.0"
+  port: 8420
+  heartbeat_interval_seconds: 30
+  heartbeat_miss_threshold: 3
+
+inbox:
+  max_age_days: 30
+  archive_read: false
+
+consensus:
+  default_rounds: 2
+  f: 1
+  lambda_threshold: 0.3
+  round_timeout_ms: 30000
+
+reputation:
+  decay_factor: 0.95
+  initial_score: 0.5
+  weights:
+    accuracy: 0.5
+    honesty: 0.3
+    energy: 0.2
+
+logging:
+  level: "INFO"
+  format: "json"
+
+keys:
+  private_key_path: "~/.agent-bus/private.key"
+  public_key_path: "~/.agent-bus/public.key"
