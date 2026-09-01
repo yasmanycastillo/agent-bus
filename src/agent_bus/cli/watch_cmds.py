@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 import click
+import httpx
 
 from agent_bus.config import DEFAULT_CONFIG_DIR
 from agent_bus.worker.client import BusEventClient
@@ -48,23 +49,35 @@ def extract_session_id(output: str) -> str | None:
     """Extrae el session_id de la salida JSON de `claude -p --output-format json`."""
     try:
         data = json.loads(output)
-        sid = data.get("session_id") or data.get("sessionId")
-        return sid if isinstance(sid, str) else None
+        if isinstance(data, dict):
+            sid = data.get("session_id") or data.get("sessionId")
+            return sid if isinstance(sid, str) else None
     except (json.JSONDecodeError, TypeError):
         return None
+    return None
+
+
+def extract_response_text(output: str) -> str:
+    """Extrae el texto de respuesta devuelto por el CLI."""
+    try:
+        data = json.loads(output)
+        if isinstance(data, dict):
+            return str(data.get("result") or data.get("response") or data.get("text") or "").strip()
+    except Exception:
+        pass
+    return output.strip()
 
 
 def build_prompt(message: dict) -> str:
     """Traduce un mensaje del bus a prompt para el agente interactivo."""
     sender = message.get("from_agent", "?")
     body = message.get("body") or {}
-    text = body.get("text", json.dumps(body, ensure_ascii=False))
+    text = body.get("text", json.dumps(body, ensure_ascii=False)) if isinstance(body, dict) else str(body)
     related = message.get("related_task")
     task_note = f" (relacionado con tarea {related})" if related else ""
     return (
         f"El agente '{sender}' te escribió por agent-bus{task_note}: \"{text}\"\n"
-        f"Responde ejecutando: agent-bus work msg {sender} \"<tu respuesta>\"\n"
-        f"Si no tienes nada que responder, no hagas nada."
+        f"Responde directamente al agente o ejecutando: agent-bus work msg {sender} \"<tu respuesta>\"\n"
     )
 
 
@@ -75,8 +88,9 @@ async def run_turn(
     cli: str = "claude",
     dry_run: bool = False,
     sessions_file: Path = SESSIONS_FILE,
+    bus_url: str = "http://localhost:8420",
 ) -> str | None:
-    """Ejecuta un turno del CLI por el mensaje dado; devuelve el session_id o None."""
+    """Ejecuta un turno del CLI por el mensaje dado, responde automáticamente al bus y devuelve el session_id."""
     thread_id = message.get("metadata", {}).get("thread_id") or message.get("message_id")
     prompt = build_prompt(message)
     session_id = session_map.get(thread_id)
@@ -99,10 +113,34 @@ async def run_turn(
         logger.error("CLI turn failed: %s", result.stderr[:200])
         return session_id
 
+    # 1. Guardar session_id
     new_session = extract_session_id(result.stdout)
     if new_session:
         session_map[thread_id] = new_session
         save_session_map(session_map, sessions_file)
+
+    # 2. Publicar respuesta generada automáticamente en el bus
+    reply_text = extract_response_text(result.stdout)
+    sender = message.get("from_agent")
+    if sender and reply_text:
+        try:
+            async with httpx.AsyncClient(base_url=bus_url.rstrip("/"), timeout=10.0) as client:
+                await client.post(
+                    "/messages",
+                    json={
+                        "from_agent": agent_id,
+                        "to_agent": sender,
+                        "message_type": "inbox",
+                        "body": {"text": reply_text},
+                        "reply_needed": False,
+                        "related_task": message.get("related_task"),
+                        "correlation_id": message.get("message_id"),
+                    },
+                )
+                logger.info("Respuesta enviada a '%s' por el bus.", sender)
+        except Exception as exc:
+            logger.warning("No se pudo enviar respuesta automática al bus: %s", exc)
+
     return new_session or session_id
 
 
@@ -123,17 +161,34 @@ def watch(agent_id: str | None, cli: str, bus_url: str, dry_run: bool, once: boo
             raise SystemExit(1)
 
     session_map = load_session_map()
+    seen_messages: set[str] = set()
+
     click.echo(f"👀 Watcheando el bus como '{agent_id}' (CLI: {cli})")
     click.echo("   Mensajes reply_needed despertarán la sesión. Ctrl+C para salir.")
 
     async def on_event(event: dict) -> None:
         nonlocal once
-        if not (event.get("reply_needed") or event.get("to_agent") == agent_id and event.get("reply_needed")):
+        msg_id = event.get("message_id")
+        if msg_id and msg_id in seen_messages:
+            return
+
+        if not (event.get("reply_needed") or (event.get("to_agent") == agent_id and event.get("reply_needed"))):
             return
         if event.get("to_agent") != agent_id:
             return
+
+        if msg_id:
+            seen_messages.add(msg_id)
+
         click.echo(f"  ⚡ {event.get('from_agent')}: {str(event.get('body'))[:60]}")
-        sid = await run_turn(agent_id, event, session_map, cli=cli, dry_run=dry_run)
+        sid = await run_turn(
+            agent_id,
+            event,
+            session_map,
+            cli=cli,
+            dry_run=dry_run,
+            bus_url=bus_url,
+        )
         if sid:
             click.echo(f"  ✅ turno completado (session {sid[:8]})")
         if once:

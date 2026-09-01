@@ -25,6 +25,14 @@ def test_extract_session_id():
     assert extract_session_id(json.dumps({"result": "ok"})) is None
 
 
+def test_extract_response_text():
+    from agent_bus.cli.watch_cmds import extract_response_text
+
+    out = json.dumps({"result": "Respuesta generada"})
+    assert extract_response_text(out) == "Respuesta generada"
+    assert extract_response_text("Texto plano") == "Texto plano"
+
+
 def test_build_prompt_incluye_remitente_y_tarea():
     msg = {
         "from_agent": "agy",
