@@ -4,10 +4,11 @@ import asyncio
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 import os
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -437,6 +438,11 @@ class MessageBus:
         # --- Handoff endpoints ---
 
         # --- War Room endpoints (capa humana) ---
+
+        @self.app.get("/room", response_class=HTMLResponse)
+        async def room_ui():
+            html_path = Path(__file__).parent.parent / "web" / "room.html"
+            return HTMLResponse(html_path.read_text())
 
         @self.app.get("/room/api/pending-approvals")
         async def room_pending_approvals():

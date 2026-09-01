@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>agent-bus — War Room</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#c9d1d9; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font:14px/1.5 ui-monospace,monospace; display:grid; grid-template-columns:340px 1fr; grid-template-rows:48px 1fr; height:100vh; }
+  header { grid-column:1/3; display:flex; align-items:center; gap:16px; padding:0 16px; background:var(--panel); border-bottom:1px solid var(--border); }
+  header h1 { font-size:16px; color:var(--accent); }
+  #status { margin-left:auto; font-size:12px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--ok); margin-right:4px; }
+  aside { background:var(--panel); border-right:1px solid var(--border); overflow-y:auto; padding:12px; }
+  main { display:grid; grid-template-rows:auto 1fr; overflow:hidden; }
+  #kanban { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; padding:12px; overflow-x:auto; }
+  .col { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px; min-height:120px; }
+  .col h3 { font-size:11px; text-transform:uppercase; color:var(--accent); margin-bottom:8px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:4px; padding:8px; margin-bottom:6px; font-size:12px; }
+  .card .owner { color:var(--warn); font-size:11px; }
+  .card select { width:100%; margin-top:6px; background:var(--bg); color:var(--text); border:1px solid var(--border); font-size:11px; }
+  #feed-wrap { display:flex; flex-direction:column; border-top:1px solid var(--border); min-height:0; }
+  #feed-wrap h2 { font-size:12px; padding:8px 12px; color:var(--accent); }
+  #feed { flex:1; overflow-y:auto; padding:0 12px 12px; font-size:12px; }
+  .evt { padding:4px 0; border-bottom:1px solid var(--border); opacity:.9; }
+  .evt time { color:#8b949e; margin-right:8px; font-size:11px; }
+  #composer { padding:12px; border-top:1px solid var(--border); background:var(--panel); }
+  #composer textarea { width:100%; height:54px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:8px; font:inherit; }
+  #composer .row { display:flex; gap:8px; margin-top:6px; }
+  #composer select, #composer button { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:6px 10px; font:inherit; }
+  #composer button { background:var(--accent); color:#0d1117; font-weight:bold; cursor:pointer; }
+  .approvals { margin:8px 0; padding:8px; border:1px solid var(--warn); border-radius:6px; }
+  .approvals button { margin-right:6px; cursor:pointer; }
+  h2.sec { margin:16px 0 8px; font-size:12px; color:var(--accent); }
+  .agent { display:flex; justify-content:space-between; padding:4px 0; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🚌 agent-bus — War Room</h1>
+  <span id="status"><span class="dot"></span>SSE conectado</span>
+</header>
+<aside>
+  <h2 class="sec">Aprobaciones pendientes (<span id="ap-count">0</span>)</h2>
+  <div id="approvals"></div>
+  <h2 class="sec">Agentes</h2>
+  <div id="agents"></div>
+  <h2 class="sec">Locks activos</h2>
+  <div id="locks"></div>
+</aside>
+<main>
+  <div id="kanban"></div>
+  <div id="feed-wrap">
+    <h2>📡 Feed en vivo</h2>
+    <div id="feed"></div>
+    <div id="composer">
+      <textarea id="msg-text" placeholder="Mensaje del humano..."></textarea>
+      <div class="row">
+        <select id="msg-to"><option value="*">Broadcast</option></select>
+        <label><input type="checkbox" id="msg-reply"> requiere respuesta</label>
+        <button onclick="sendMessage()">Enviar</button>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+const api = (p, opts) => fetch(p, {headers:{'Content-Type':'application/json'}, ...opts}).then(r => r.json());
+const $ = id => document.getElementById(id);
+
+const COLS = ['pending','in_progress','in_review','blocked','done'];
+
+function renderOverview(d) {
+  // kanban
+  const kb = $('kanban'); kb.innerHTML = '';
+  for (const col of COLS) {
+    const div = document.createElement('div'); div.className = 'col';
+    div.innerHTML = `<h3>${col} (${d.tasks.filter(t=>t.status===col).length})</h3>`;
+    for (const t of d.tasks.filter(t=>t.status===col)) {
+      const card = document.createElement('div'); card.className = 'card';
+      card.innerHTML = `<b>${t.task_id}</b> ${t.title}<div class="owner">${t.owner}</div>`;
+      const sel = document.createElement('select');
+      sel.innerHTML = '<option value="">reasignar…</option>' +
+        d.agents.map(a=>`<option value="${a.agent_id}">${a.agent_id}</option>`).join('');
+      sel.onchange = () => sel.value && api('/room/api/assign', {method:'POST', body:JSON.stringify({task_id:t.task_id, agent_id:sel.value})}).then(loadOverview);
+      card.appendChild(sel); div.appendChild(card);
+    }
+    kb.appendChild(div);
+  }
+  // agentes
+  $('agents').innerHTML = d.agents.map(a=>`<div class="agent"><span>${a.agent_id}</span><span>${a.status}</span></div>`).join('') || '<i>ninguno</i>';
+  // locks
+  $('locks').innerHTML = d.locks.map(l=>`<div class="agent"><span>${l.file_path}</span><span>${l.agent_id}</span></div>`).join('') || '<i>ninguno</i>';
+}
+
+async function renderApprovals() {
+  const aps = await api('/room/api/pending-approvals');
+  $('ap-count').textContent = aps.length;
+  $('approvals').innerHTML = '';
+  for (const m of aps.slice(0,5)) {
+    const div = document.createElement('div'); div.className = 'approvals';
+    div.innerHTML = `<b>${m.from_agent}</b>: ${JSON.stringify(m.body).slice(0,120)}<br>`;
+    for (const dec of ['approve','reject']) {
+      const b = document.createElement('button'); b.textContent = dec;
+      b.onclick = () => api('/room/api/approve', {method:'POST', body:JSON.stringify({message_id:m.message_id, decision:dec, note:''})}).then(renderApprovals);
+      div.appendChild(b);
+    }
+    $('approvals').appendChild(div);
+  }
+}
+
+function loadOverview(){ api('/room/api/overview').then(renderOverview); }
+
+function sendMessage() {
+  const text = $('msg-text').value.trim(); if (!text) return;
+  api('/room/api/message', {method:'POST', body:JSON.stringify({to_agent:$('msg-to').value, text, reply_needed:$('msg-reply').checked})});
+  $('msg-text').value = '';
+}
+
+// feed SSE global
+const es = new EventSource('/events/all');
+es.onopen = () => $('status').innerHTML = '<span class="dot"></span>SSE conectado';
+es.onerror = () => $('status').innerHTML = '⚠ desconectado';
+es.addEventListener('message', e => {
+  try {
+    const ev = JSON.parse(e.data);
+    const div = document.createElement('div'); div.className = 'evt';
+    div.innerHTML = `<time>${new Date().toLocaleTimeString()}</time><b>${ev.from_agent||'?'}</b> → ${ev.to_agent||'*'}: ${JSON.stringify(ev.body).slice(0,140)}`;
+    const feed = $('feed'); feed.prepend(div);
+    loadOverview(); renderApprovals(); refreshAgentOptions();
+  } catch {}
+});
+
+function refreshAgentOptions(){
+  api('/room/api/overview').then(d => {
+    const cur = $('msg-to').value;
+    $('msg-to').innerHTML = '<option value="*">Broadcast</option>' + d.agents.map(a=>`<option value="${a.agent_id}">${a.agent_id}</option>`).join('');
+    $('msg-to').value = cur;
+  });
+}
+
+loadOverview(); renderApprovals(); refreshAgentOptions();
+setInterval(loadOverview, 15000);
+</script>
+</body>
+</html>
