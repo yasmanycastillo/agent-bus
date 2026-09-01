@@ -436,6 +436,133 @@ class MessageBus:
 
         # --- Handoff endpoints ---
 
+        # --- War Room endpoints (capa humana) ---
+
+        @self.app.get("/room/api/pending-approvals")
+        async def room_pending_approvals():
+            """Mensajes dirigidos al humano que requieren su decisión."""
+            try:
+                human_inbox = await self.inbox.get_inbox("human")
+            except Exception:
+                human_inbox = []
+            return [m.model_dump(mode="json") for m in human_inbox if m.reply_needed]
+
+        @self.app.post("/room/api/approve")
+        async def room_approve(req: dict):
+            """Aprobar/rechazar/responder una solicitud del humano; notifica al agente."""
+            message_id = req.get("message_id", "")
+            decision = req.get("decision", "")  # approve | reject | respond
+            note = req.get("note", "")
+            agent = req.get("agent", "")
+
+            msg = await self.inbox.get_message("human", message_id)
+            if not msg:
+                return JSONResponse({"error": "Message not found"}, status_code=404)
+
+            await self.inbox.archive("human", message_id)
+
+            envelope = Envelope(
+                from_agent="human",
+                to_agent=msg.from_agent,
+                message_type=MessageType.INBOX,
+                body={
+                    "type": "approval_decision",
+                    "decision": decision,
+                    "note": note,
+                    "original": str(msg.body),
+                },
+                reply_needed=False,
+                correlation_id=message_id,
+            )
+            msg_id = await self.inbox.deliver(envelope)
+            await self._push_to_agent(msg.from_agent, envelope)
+            return {"status": "notified", "message_id": msg_id, "agent": msg.from_agent}
+
+        @self.app.post("/room/api/assign")
+        async def room_assign(req: dict):
+            """Asignar una tarea a un agente desde el War Room; notifica al agente."""
+            task_id = req.get("task_id", "")
+            agent_id = req.get("agent_id", "")
+            if not task_id or not agent_id:
+                return JSONResponse({"error": "task_id and agent_id required"}, status_code=400)
+
+            task = await self.tasks.get(task_id)
+            if not task:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            await self.db.conn.execute(
+                "UPDATE tasks SET owner = ?, status = 'in_progress', updated_at = ? WHERE task_id = ?",
+                (agent_id, now_iso, task_id),
+            )
+            await self.db.conn.commit()
+
+            envelope = Envelope(
+                from_agent="human",
+                to_agent=agent_id,
+                message_type=MessageType.INBOX,
+                body={
+                    "type": "task_assigned",
+                    "task_id": task_id,
+                    "title": task.title,
+                    "detail": req.get("note", "El humano te asignó esta tarea desde el War Room."),
+                },
+                reply_needed=True,
+                related_task=task_id,
+            )
+            msg_id = await self.inbox.deliver(envelope)
+            await self._push_to_agent(agent_id, envelope)
+            return {"status": "assigned", "task_id": task_id, "agent": agent_id, "message_id": msg_id}
+
+        @self.app.post("/room/api/message")
+        async def room_message(req: dict):
+            """Mensaje del humano a un agente (o broadcast con to_agent='*')."""
+            to_agent = req.get("to_agent", "")
+            text = req.get("text", "")
+            if not text:
+                return JSONResponse({"error": "text required"}, status_code=400)
+
+            envelope = Envelope(
+                from_agent="human",
+                to_agent=None if to_agent in ("*", "") else to_agent,
+                message_type=MessageType.INBOX if to_agent not in ("*", "") else MessageType.BROADCAST,
+                body={"text": text},
+                reply_needed=bool(req.get("reply_needed", False)),
+                related_task=req.get("related_task"),
+            )
+            if envelope.to_agent:
+                msg_id = await self.inbox.deliver(envelope)
+                await self._push_to_agent(envelope.to_agent, envelope)
+                return {"status": "delivered", "message_id": msg_id}
+            agents = await self.registry.list_all()
+            results = []
+            for a in agents:
+                if a.agent_id == "human":
+                    continue
+                env_copy = envelope.model_copy(update={"to_agent": a.agent_id})
+                results.append(await self.inbox.deliver(env_copy))
+                await self._push_to_agent(a.agent_id, env_copy)
+            return {"status": "broadcast", "message_ids": results}
+
+        @self.app.get("/room/api/overview")
+        async def room_overview():
+            """Snapshot completo para el dashboard del War Room."""
+            tasks = await self.tasks.list_all()
+            agents = await self.registry.list_all()
+            locks = await self.locks.list_locks()
+            decisions = await self.decisions.list_all()
+            try:
+                human_inbox = await self.inbox.get_inbox("human")
+            except Exception:
+                human_inbox = []
+            return {
+                "tasks": [t.model_dump(mode="json") for t in tasks],
+                "agents": [a.model_dump(mode="json") for a in agents],
+                "locks": [l.model_dump(mode="json") for l in locks],
+                "decisions": [d.model_dump(mode="json") for d in decisions],
+                "pending_approvals": len([m for m in human_inbox if m.reply_needed]),
+            }
+
         @self.app.post("/tasks/{task_id}/handoff")
         async def handoff_task(task_id: str, req: dict):
             from_agent = req.get("from_agent", "")
