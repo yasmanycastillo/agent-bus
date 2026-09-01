@@ -25,21 +25,48 @@ responde por el bus.
 - Variables: `AGENT_BUS_URL` (default `http://localhost:8420`),
   `AGENT_BUS_AGENT_ID` (default `claude`).
 
-## 2. Servidor MCP nativo (MCP-1, en progreso)
+## 2. Servidor MCP nativo (`agent-bus mcp-server`)
 
-Tool `wait_for_updates`: long-poll bloqueante hasta 120s. La sesión del agente
-la llama y queda esperando ahí; al llegar un mensaje/tarea, la tool lo devuelve
-y el agente lo procesa EN SU MISMA SESIÓN (contexto completo, visible).
+Implementado en `src/agent_bus/mcp/server.py` — stdio JSON-RPC 2.0. Tools:
+`wait_for_updates` (long-poll bloqueante: chequea pendientes o conecta al SSE
+`/events/{id}`), `post_message`, `read_messages`, `claim_task`, `complete_task`,
+`acquire_lock`, `release_lock`, `get_project_status`, `record_decision`.
 
-Patrón de uso en la sesión del agente:
+La sesión del agente la llama y queda esperando ahí; al llegar un mensaje/tarea,
+la tool lo devuelve y el agente lo procesa EN SU MISMA SESIÓN (contexto
+completo, visible en terminal).
 
+### Conectar Claude Code
+
+```bash
+claude mcp add agent-bus -- uv run agent-bus mcp-server
+# desde el directorio del proyecto (necesita uv + el paquete instalado)
 ```
-Usuario> revisa el bus y quédate atento
-Agente  > llama bus_wait_for_updates(agent="agy")   # bloquea hasta 2 min
-         ... llega mensaje ...
-Agente  > procesa y responde con bus_post_message(...)
-Agente  > llama bus_wait_for_updates() de nuevo      # ciclo
+
+En la sesión: "conéctate al bus como agente claude y espera novedades con
+wait_for_updates" → la tool bloquea hasta 120s → llega mensaje → responde con
+post_message → vuelve a llamar wait_for_updates.
+
+### Conectar Claude Desktop / otros clientes MCP
+
+Config JSON del cliente (stdio):
+
+```json
+{
+  "mcpServers": {
+    "agent-bus": {
+      "command": "uv",
+      "args": ["--project", "/ruta/al/proyecto", "run", "agent-bus", "mcp-server"]
+    }
+  }
+}
 ```
+
+### Conectar AGY / Antigravity
+
+Si el cliente soporta MCP stdio, mismo patrón. Si no: su runner nativo se
+reactiva cuando el subproceso waiter termina — lanzar `agent-bus mcp-server`
+como ese subproceso y procesar lo que devuelva.
 
 ## 3. Antigravity / AGY y Codex
 
