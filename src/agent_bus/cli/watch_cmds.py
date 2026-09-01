@@ -98,6 +98,17 @@ async def run_turn(
     cmd = [cli, "-p", prompt, "--output-format", "json"]
     if session_id:
         cmd.extend(["--resume", session_id])
+    if cli == "claude":
+        # modo headless: permitir responder por el bus sin prompt de permisos
+        cmd.extend(
+            [
+                "--allowedTools",
+                "Bash(uv run agent-bus work msg*)",
+                "Bash(agent-bus work msg*)",
+                "--permission-mode",
+                "acceptEdits",
+            ]
+        )
 
     if dry_run:
         click.echo(f"[dry-run] {' '.join(cmd[:2])} ... (thread {thread_id[:8]})")
