@@ -173,12 +173,12 @@ def watch(agent_id: str | None, cli: str, bus_url: str, dry_run: bool, once: boo
 
     session_map = load_session_map()
     seen_messages: set[str] = set()
+    bus_client = BusEventClient(agent_id, bus_url=bus_url)
 
     click.echo(f"👀 Watcheando el bus como '{agent_id}' (CLI: {cli})")
     click.echo("   Mensajes reply_needed despertarán la sesión. Ctrl+C para salir.")
 
     async def on_event(event: dict) -> None:
-        nonlocal once
         msg_id = event.get("message_id")
         if msg_id and msg_id in seen_messages:
             return
@@ -203,9 +203,11 @@ def watch(agent_id: str | None, cli: str, bus_url: str, dry_run: bool, once: boo
         if sid:
             click.echo(f"  ✅ turno completado (session {sid[:8]})")
         if once:
-            raise SystemExit(0)
+            bus_client.stop()
+
+    bus_client.on_event = on_event
 
     try:
-        asyncio.run(BusEventClient(agent_id, bus_url=bus_url, on_event=on_event).start())
+        asyncio.run(bus_client.start())
     except KeyboardInterrupt:
         click.echo("\nWatcher detenido")

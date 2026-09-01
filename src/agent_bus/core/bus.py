@@ -103,7 +103,8 @@ class MessageBus:
         self.skills = SkillRegistry(db)
         self.kickoff = KickoffManager(db)
         self.app = FastAPI(title="agent-bus", version="0.1.0")
-        self._sse_queues: dict[str, asyncio.Queue[str]] = defaultdict(asyncio.Queue)
+        self._sse_subscribers: dict[str, set[asyncio.Queue[str]]] = defaultdict(set)
+        self._global_sse_subscribers: set[asyncio.Queue[str]] = set()
         self._ws_connections: dict[str, WebSocket] = {}
         self._setup_routes()
 
@@ -245,16 +246,37 @@ class MessageBus:
             await self.inbox.archive(agent_id, message_id)
             return {"status": "archived"}
 
-        @self.app.get("/events/{agent_id}")
-        async def sse_stream(agent_id: str):
+        @self.app.get("/events/all")
+        async def sse_all_stream():
+            queue: asyncio.Queue[str] = asyncio.Queue()
+            self._global_sse_subscribers.add(queue)
+
             async def event_generator():
-                queue = self._sse_queues[agent_id]
                 try:
                     while True:
                         data = await queue.get()
                         yield {"event": "message", "data": data}
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, GeneratorExit):
                     pass
+                finally:
+                    self._global_sse_subscribers.discard(queue)
+
+            return EventSourceResponse(event_generator())
+
+        @self.app.get("/events/{agent_id}")
+        async def sse_stream(agent_id: str):
+            queue: asyncio.Queue[str] = asyncio.Queue()
+            self._sse_subscribers[agent_id].add(queue)
+
+            async def event_generator():
+                try:
+                    while True:
+                        data = await queue.get()
+                        yield {"event": "message", "data": data}
+                except (asyncio.CancelledError, GeneratorExit):
+                    pass
+                finally:
+                    self._sse_subscribers[agent_id].discard(queue)
 
             return EventSourceResponse(event_generator())
 
@@ -532,8 +554,10 @@ class MessageBus:
 
     async def _push_to_agent(self, agent_id: str, envelope: Envelope) -> None:
         data = envelope.model_dump_json()
-        if agent_id in self._sse_queues:
-            await self._sse_queues[agent_id].put(data)
+        for q in list(self._sse_subscribers.get(agent_id, set())):
+            await q.put(data)
+        for q in list(self._global_sse_subscribers):
+            await q.put(data)
         if agent_id in self._ws_connections:
             try:
                 await self._ws_connections[agent_id].send_text(data)
