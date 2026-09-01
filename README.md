@@ -1,8 +1,9 @@
 # agent-bus ⚡
 
-[![Tests](https://img.shields.io/badge/tests-165%20passed-brightgreen.svg)](https://github.com/yasmanycastillo/agent-bus)
+[![Tests](https://img.shields.io/badge/tests-184%20passed-brightgreen.svg)](https://github.com/yasmanycastillo/agent-bus)
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com)
+[![MCP](https://img.shields.io/badge/MCP-2024--11--05-orange.svg)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
 **Protocolo y bus de eventos distribuido para la orquestación autónoma de equipos multi-agente de Inteligencia Artificial.**
@@ -15,17 +16,25 @@
 
 ```mermaid
 flowchart TD
-    Human["👤 Humano"] -->|"agent-bus quickstart / submit"| Bus["⚡ agent-bus Hub (FastAPI + SSE + SQLite)"]
+    Human["👤 Humano / Web UI"] -->|"agent-bus quickstart / submit"| Bus["⚡ agent-bus Hub (FastAPI + SSE Pub/Sub + SQLite)"]
+
+    subgraph "Clientes Interactivos (MCP Hooks)"
+        MCP1["💻 Claude Code (MCP Server)"]
+        MCP2["💻 Antigravity IDE (MCP Server)"]
+    end
 
     subgraph "Aislamiento por Git Worktrees"
         WT1[".worktrees/claude (rama agent/claude)"]
         WT2[".worktrees/antigravity (rama agent/antigravity)"]
     end
 
-    subgraph "Workers Autónomos en Background"
-        D1["🤖 WorkerDaemon (Claude Code)"]
-        D2["🤖 WorkerDaemon (Antigravity/AGY)"]
+    subgraph "Workers Autónomos Headless"
+        D1["🤖 WorkerDaemon (Claude Runner)"]
+        D2["🤖 WorkerDaemon (Antigravity Runner)"]
     end
+
+    Bus <-->|"JSON-RPC stdio / wait_for_updates"| MCP1
+    Bus <-->|"JSON-RPC stdio / wait_for_updates"| MCP2
 
     Bus -->|"SSE Push Instantáneo"| D1
     Bus -->|"SSE Push Instantáneo"| D2
@@ -43,24 +52,66 @@ flowchart TD
     Integrator -->|"Tests fallan -> Feedback al autor"| Bus
 ```
 
-1. **Bucle Multi-Agente 100% Autónomo**:
-   * Los agentes reciben asignaciones de tareas y consultas urgentes vía push por **Server-Sent Events (SSE)**.
+1. **Integración Nativa MCP (Model Context Protocol)**:
+   * Servidor MCP integrado sobre JSON-RPC 2.0 `stdio` con la herramienta bloqueante `wait_for_updates`.
+   * Permite que las sesiones interactivas de **Claude Code** y **Antigravity** esperen eventos del bus y respondan **dentro de su propia consola activa**, preservando todo el contexto conversacional.
+2. **Bucle Multi-Agente 100% Autónomo**:
+   * Los agentes reciben asignaciones de tareas y consultas urgentes vía push por **Server-Sent Events (SSE Pub/Sub)**.
    * Ejecución headless desacoplada de la terminal con reanudación de sesiones (`--resume <session_id>`).
-2. **Aislamiento en Git Worktrees**:
+3. **Aislamiento en Git Worktrees**:
    * Cada agente trabaja en su propio directorio `.worktrees/<agent_id>` y rama `agent/<agent_id>`, eliminando cualquier riesgo de colisión o sobreescritura de archivos en disco.
-3. **Integrador Autónomo (Rol Tech Lead)**:
+4. **Integrador Autónomo (Rol Tech Lead)**:
    * [`BranchIntegrator`](src/agent_bus/worker/integrator.py) valida automáticamente la suite de tests en la rama del agente antes de fusionar.
    * Si los tests pasan, ejecuta el merge a `main`. Si fallan o hay conflictos, envía feedback detallado al autor con hasta 2 reintentos antes de alertar al humano.
-4. **Soporte Multi-Modelo y Multi-CLI**:
+5. **Soporte Multi-Modelo y Multi-CLI**:
    * Conectores nativos para **Claude Code** (`claude -p`), **Antigravity / AGY** (`agy --prompt`), **Aider / Codex** (`aider --message`), **Grok / xAI** y ejecutores personalizados.
-5. **Seguridad Criptográfica Ed25519**:
+6. **Seguridad Criptográfica Ed25519**:
    * Claves asimétricas por agente (`~/.agent-bus/agents/<id>.key`) con middleware en el Hub que verifica firmas canónicas en operaciones de escritura.
-6. **Resiliencia & Circuit Breakers**:
+7. **Resiliencia & Circuit Breakers**:
    * Límite de turnos e intercambios por tarea (`TaskTurnBreaker`), control de presupuesto de tokens (`BudgetBreaker`), detección de locks expirados (`StaleLockDetector`) y resolución de deadlocks por ciclos de espera (`detect_deadlock`).
-7. **Notificaciones Externas**:
-   * Alertas nativas de escritorio (`notify-send` en Linux / `osascript` en macOS) y Webhooks (Telegram, Slack, Discord) cuando un objetivo se completa o se bloquea.
 8. **Dashboard TUI en Tiempo Real (`top`)**:
    * Monitor interactivo de terminal construido con Rich Live para observar a los agentes, tareas, locks y decisiones en vivo.
+
+---
+
+## 🔌 Servidor MCP Nativo (Model Context Protocol)
+
+`agent-bus` incluye un servidor MCP oficial para que cualquier asistente de IA interactivo se conecte directamente al bus.
+
+### Herramientas MCP Disponibles
+
+| Herramienta | Descripción |
+| :--- | :--- |
+| `wait_for_updates(agent_id, timeout)` | **Long-poll reactivo**: bloquea la sesión en espera de eventos SSE del bus sin gastar tokens hasta que otro agente envíe un mensaje |
+| `post_message(from_agent, to_agent, text, ...)` | Envía mensajes directos o respuestas a otros agentes |
+| `read_messages(agent_id)` | Consulta el inbox y mensajes pendientes del agente |
+| `claim_task(task_id, agent_id)` | Reclama una tarea disponible en el backlog |
+| `complete_task(task_id, agent_id)` | Marca una tarea como finalizada |
+| `acquire_lock(file_path, agent_id, reason)` | Bloquea un archivo antes de editarlo para evitar colisiones |
+| `release_lock(file_path, agent_id)` | Libera el bloqueo de un archivo |
+| `get_project_status()` | Consulta el estado global del servidor, agentes y tareas |
+| `record_decision(title, what, decided_by)` | Registra una decisión de arquitectura compartida (ADR) |
+
+### Cómo Conectar tu Entorno al Servidor MCP
+
+#### 1. Claude Code
+Agrega el servidor MCP ejecutando en tu terminal:
+```bash
+claude mcp add agent-bus -- uv run agent-bus mcp-server
+```
+
+#### 2. Claude Desktop / Cursor / Antigravity / Zed
+Agrega la siguiente configuración a tu archivo `mcp.json` o `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "agent-bus": {
+      "command": "uv",
+      "args": ["run", "agent-bus", "mcp-server"]
+    }
+  }
+}
+```
 
 ---
 
@@ -119,6 +170,7 @@ uv run agent-bus run-team --agents "claude,antigravity,codex" --base-ref main
 | :--- | :--- |
 | `agent-bus quickstart` | Onboarding en 1 paso (inicializa bus, agentes y workers) |
 | `agent-bus top` | Dashboard TUI interactivo en tiempo real con Rich Live |
+| `agent-bus mcp-server` | Inicia el servidor MCP nativo sobre stdio (JSON-RPC 2.0) |
 | `agent-bus run-team` | Inicializa worktrees y arranca daemons de fondo |
 | `agent-bus submit "<meta>"` | Envía un objetivo global al equipo |
 | `agent-bus serve --daemon` | Inicia el servidor FastAPI como servicio de fondo |
@@ -153,7 +205,7 @@ export AGENT_BUS_AGENT_ID=antigravity
 
 ## 🧪 Suite de Pruebas
 
-`agent-bus` cuenta con una suite completa de pruebas unitarias y de integración end-to-end:
+`agent-bus` cuenta con una suite completa de 184 pruebas unitarias y de integración end-to-end:
 
 ```bash
 uv run pytest
