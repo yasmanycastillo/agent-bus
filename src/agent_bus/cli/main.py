@@ -760,7 +760,14 @@ def start(host: str, port: int):
 
     _ensure_global_config()
     click.echo(f"Iniciando agent-bus en {host}:{port}")
-    uvicorn.run("agent_bus.core.bus:create_app", host=host, port=port, factory=True, reload=False)
+@app.command("mcp-server")
+@click.option("--bus-url", default="http://localhost:8420", help="URL del hub agent-bus")
+def mcp_server_cmd(bus_url: str):
+    """Iniciar el servidor MCP de agent-bus sobre stdio (JSON-RPC 2.0)."""
+    import asyncio
+    from agent_bus.mcp.server import run_mcp_server
+
+    asyncio.run(run_mcp_server(bus_url=bus_url))
 
 
 if __name__ == "__main__":
