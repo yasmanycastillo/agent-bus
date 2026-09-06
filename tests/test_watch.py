@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import httpx
 
 import pytest
 from click.testing import CliRunner
@@ -16,6 +17,19 @@ from agent_bus.cli.watch_cmds import (
     save_session_map,
     watch,
 )
+
+
+@pytest.fixture
+def watch_bus(monkeypatch):
+    import agent_bus.cli.watch_cmds as watch_module
+    def configure(message):
+        def handler(request):
+            if request.method == "GET":
+                return httpx.Response(200, json={**message, "acknowledged": False})
+            return httpx.Response(200, json={"message_id": "reply"})
+        monkeypatch.setattr(watch_module, "async_bus_client", lambda *args, **kwargs:
+                            httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs))
+    return configure
 
 
 def test_extract_session_id():
@@ -43,7 +57,9 @@ def test_build_prompt_incluye_remitente_y_tarea():
     assert "agy" in prompt
     assert "JWT o cookie" in prompt
     assert "T2" in prompt
-    assert "agent-bus work msg agy" in prompt
+    assert "texto final" in prompt
+    assert "No envíes ni confirmes" in prompt
+    assert "agent-bus work msg" not in prompt
 
 
 def test_session_map_persistencia(tmp_path):
@@ -65,7 +81,7 @@ async def test_run_turn_dry_run(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_turn_registra_session_del_cli(tmp_path, monkeypatch):
+async def test_run_turn_registra_session_del_cli(tmp_path, monkeypatch, watch_bus):
     """El session_id que devuelve el CLI se guarda en el mapping del thread."""
     import agent_bus.cli.watch_cmds as wc
     import shutil as shutil_mod
@@ -79,7 +95,7 @@ async def test_run_turn_registra_session_del_cli(tmp_path, monkeypatch):
 
     class FakeResult:
         returncode = 0
-        stdout = json.dumps({"session_id": "sess-new"})
+        stdout = json.dumps({"session_id": "sess-new", "result": "Reviewed"})
         stderr = ""
 
     async def fake_run(*a, **kw):
@@ -88,7 +104,8 @@ async def test_run_turn_registra_session_del_cli(tmp_path, monkeypatch):
     def fake_which(cli):
         return "/usr/bin/claude"
 
-    monkeypatch.setattr(wc.subprocess, "run", lambda *a, **kw: FakeResult())
+    monkeypatch.setattr(wc, "_run_cli", fake_run)
+    watch_bus(msg)
     monkeypatch.setattr(wc.shutil, "which", fake_which)
 
     smap = {}
@@ -99,7 +116,7 @@ async def test_run_turn_registra_session_del_cli(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_turn_reusa_session_del_thread(tmp_path, monkeypatch):
+async def test_run_turn_reusa_session_del_thread(tmp_path, monkeypatch, watch_bus):
     """Con session existente, el turno usa --resume."""
     import agent_bus.cli.watch_cmds as wc
 
@@ -107,17 +124,18 @@ async def test_run_turn_reusa_session_del_thread(tmp_path, monkeypatch):
 
     class FakeResult:
         returncode = 0
-        stdout = json.dumps({"session_id": "sess-old"})
+        stdout = json.dumps({"session_id": "sess-old", "result": "Reviewed"})
         stderr = ""
 
-    def fake_run(cmd, *a, **kw):
+    async def fake_run(cmd, *a, **kw):
         captured["cmd"] = cmd
         return FakeResult()
 
-    monkeypatch.setattr(wc.subprocess, "run", fake_run)
+    monkeypatch.setattr(wc, "_run_cli", fake_run)
     monkeypatch.setattr(wc.shutil, "which", lambda c: "/usr/bin/claude")
 
-    msg = {"from_agent": "agy", "body": {"text": "hola"}, "metadata": {"thread_id": "t1"}}
+    msg = {"message_id": "m1", "from_agent": "agy", "body": {"text": "hola"}, "metadata": {"thread_id": "t1"}}
+    watch_bus(msg)
     smap = {"t1": "sess-old"}
     sid = await run_turn("claude", msg, smap, dry_run=False, sessions_file=tmp_path / "s.json")
     assert sid == "sess-old"

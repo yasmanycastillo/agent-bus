@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import hashlib
+import time
 from typing import Any
 
 import httpx
@@ -41,6 +43,8 @@ class WorkerDaemon:
         self._client: httpx.AsyncClient | None = None
         self._sse_client: BusEventClient | None = None
         self._wake_event: asyncio.Event = asyncio.Event()
+        self._message_cursor: str | None = None
+        self._message_retry_after: dict[str, float] = {}
 
     async def start(self) -> None:
         """Starts the autonomous worker daemon loop."""
@@ -128,18 +132,27 @@ class WorkerDaemon:
         if not self._client:
             return
 
-        # 1. Check pending inbox messages requiring reply (High Priority)
-        inbox_resp = await self._client.get(f"/inbox/{self.agent_id}/pending")
-        if inbox_resp.status_code == 200:
-            pending_data = inbox_resp.json()
-            if pending_data.get("reply_needed", 0) > 0:
-                messages_resp = await self._client.get(f"/inbox/{self.agent_id}")
-                if messages_resp.status_code == 200:
-                    messages = messages_resp.json()
-                    for msg in messages:
-                        if msg.get("reply_needed"):
-                            await self._handle_urgent_message(msg)
-                            return
+        self._message_retry_after = {
+            key: deadline for key, deadline in self._message_retry_after.items()
+            if deadline > time.monotonic()
+        }
+        # A bounded page of persisted deliveries survives disconnects and restarts.
+        params = {"limit": 10, "reply_needed": "true"}
+        if self._message_cursor:
+            params["cursor"] = self._message_cursor
+        messages_resp = await self._client.get(f"/inbox/{self.agent_id}/messages", params=params)
+        messages_resp.raise_for_status()
+        page = messages_resp.json()
+        self._message_cursor = page.get("next_cursor")
+        processed = False
+        for message in page["messages"]:
+            message_id = message["message_id"]
+            if time.monotonic() < self._message_retry_after.get(message_id, 0):
+                continue
+            await self._handle_urgent_message(message)
+            processed = True
+        if processed:
+            return
 
         # 2. Check for assigned / in_progress tasks owned by this agent
         tasks_resp = await self._client.get("/tasks", params={"owner": self.agent_id, "status": "in_progress"})
@@ -165,27 +178,64 @@ class WorkerDaemon:
                     await self._handle_active_task(claim_resp.json())
                     return
 
+    async def _record_message_failure(self, message_id: str, error: str) -> None:
+        self._message_retry_after[message_id] = time.monotonic() + max(3.0, self.poll_interval_seconds)
+        if not self._client:
+            return
+        try:
+            response = await self._client.post(
+                f"/inbox/{self.agent_id}/{message_id}/fail", json={"error": error[:500]},
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            logger.warning("Could not record message failure: %s", exc)
+
     async def _handle_urgent_message(self, message: dict[str, Any]) -> RunnerResult:
-        logger.info(f"Agent '{self.agent_id}' processing urgent message from '{message.get('from_agent')}'")
-        await self._set_agent_status(AgentStatus.BUSY, work={"type": "reply", "message_id": message.get("message_id")})
-
-        decisions = await self._fetch_recent_decisions()
-        thread_id = message.get("correlation_id") or message.get("message_id")
-
-        prompt = self.runner.assemble_prompt(
-            message=message,
-            decisions=decisions,
-            extra_instructions="Respond directly to the sender's question using `agent-bus work msg`.",
-        )
-
-        result = await self.runner.execute_turn(prompt, thread_id=thread_id)
-
-        # Archive processed message
-        if self._client and message.get("message_id"):
-            await self._client.post(f"/inbox/{self.agent_id}/{message['message_id']}/archive")
-
-        await self._set_agent_status(AgentStatus.ONLINE, work=None)
-        return result
+        message_id = message["message_id"]
+        if not self._client:
+            return RunnerResult(success=False, output="", error="Bus client unavailable")
+        try:
+            state = await self._client.get(f"/inbox/{self.agent_id}/{message_id}")
+            state.raise_for_status()
+            message = state.json()
+            if message.get("acknowledged"):
+                self._message_retry_after.pop(message_id, None)
+                return RunnerResult(success=True, output="", metadata={"already_acknowledged": True})
+            await self._set_agent_status(AgentStatus.BUSY, work={"type": "reply", "message_id": message_id})
+            prompt = self.runner.assemble_prompt(
+                message=message,
+                decisions=await self._fetch_recent_decisions(),
+                extra_instructions=(
+                    "Return your reply as the final response text. The worker will send it "
+                    "and acknowledge this message. Do not send or acknowledge it yourself via CLI or MCP."
+                ),
+            )
+            thread_id = message.get("conversation_id") or message.get("correlation_id") or message_id
+            result = await self.runner.execute_turn(prompt, thread_id=thread_id)
+            if not result.success:
+                await self._record_message_failure(message_id, result.error or "Runner failed")
+                return result
+            if not result.output.strip():
+                raise ValueError("Runner returned no reply text")
+            key = "worker-reply:" + message_id
+            if len(key) > 128:
+                key = "worker-reply:" + hashlib.sha256(message_id.encode()).hexdigest()
+            response = await self._client.post(
+                f"/inbox/{self.agent_id}/{message_id}/reply",
+                json={"body": {"text": result.output}, "idempotency_key": key,
+                      "reply_needed": False, "acknowledge": True},
+            )
+            response.raise_for_status()
+            self._message_retry_after.pop(message_id, None)
+            return result
+        except asyncio.CancelledError:
+            await asyncio.shield(self._record_message_failure(message_id, "Runner cancelled"))
+            raise
+        except Exception as exc:
+            await self._record_message_failure(message_id, str(exc))
+            return RunnerResult(success=False, output="", error=str(exc))
+        finally:
+            await self._set_agent_status(AgentStatus.ONLINE, work=None)
 
     async def _handle_active_task(self, task: dict[str, Any]) -> RunnerResult:
         task_id = task.get("task_id", "")

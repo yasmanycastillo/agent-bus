@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import hashlib
+import time
 import shutil
 import subprocess
 from pathlib import Path
@@ -81,8 +83,43 @@ def build_prompt(message: dict) -> str:
     task_note = f" (relacionado con tarea {related})" if related else ""
     return (
         f"El agente '{sender}' te escribió por agent-bus{task_note}: \"{text}\"\n"
-        f"Responde directamente al agente o ejecutando: agent-bus work msg {sender} \"<tu respuesta>\"\n"
+        "Devuelve tu respuesta como texto final. El watcher la enviará y confirmará el mensaje. "
+        "No envíes ni confirmes el mensaje por CLI o MCP.\n"
     )
+
+
+async def _run_cli(cmd: list[str], agent_id: str) -> subprocess.CompletedProcess:
+    """Keep the event loop responsive and reap the CLI on cancellation or timeout."""
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env=worker_environment(agent_id),
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        if process.returncode is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+        raise
+    return subprocess.CompletedProcess(
+        cmd, process.returncode, stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+    )
+
+
+async def _record_failure(client, agent_id: str, message_id: str, error: str) -> None:
+    try:
+        response = await client.post(f"/inbox/{agent_id}/{message_id}/fail", json={"error": error[:500]})
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Could not record watcher failure: %s", exc)
 
 
 async def run_turn(
@@ -94,70 +131,122 @@ async def run_turn(
     sessions_file: Path | None = None,
     bus_url: str = "http://localhost:8420",
 ) -> str | None:
-    """Ejecuta un turno del CLI por el mensaje dado, responde automáticamente al bus y devuelve el session_id."""
-    thread_id = message.get("metadata", {}).get("thread_id") or message.get("message_id")
-    prompt = build_prompt(message)
-    session_id = session_map.get(thread_id)
-
-    cmd = [cli, "-p", prompt, "--output-format", "json"]
-    if session_id:
-        cmd.extend(["--resume", session_id])
-    if cli == "claude":
-        # modo headless: permitir responder por el bus sin prompt de permisos
-        cmd.extend(
-            [
-                "--allowedTools",
-                "Bash(uv run agent-bus work msg*)",
-                "Bash(agent-bus work msg*)",
-                "--permission-mode",
-                "acceptEdits",
-            ]
-        )
-
+    """Send one durable reply and acknowledge only after the CLI succeeds."""
+    message_id = message["message_id"]
     if dry_run:
-        click.echo(f"[dry-run] {' '.join(cmd[:2])} ... (thread {thread_id[:8]})")
-        return session_id
-
-    binary = shutil.which(cli)
-    if not binary:
-        logger.error("CLI '%s' not found in PATH", cli)
+        click.echo(f"[dry-run] {cli} -p ... (message {message_id[:8]})")
         return None
-
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=worker_environment(agent_id))
-    if result.returncode != 0:
-        logger.error("CLI turn failed: %s", result.stderr[:200])
-        return session_id
-
-    # 1. Guardar session_id
-    new_session = extract_session_id(result.stdout)
-    if new_session:
-        session_map[thread_id] = new_session
-        save_session_map(session_map, sessions_file)
-
-    # 2. Publicar respuesta generada automáticamente en el bus
-    reply_text = extract_response_text(result.stdout)
-    sender = message.get("from_agent")
-    if sender and reply_text:
+    async with async_bus_client(agent_id, base_url=bus_url.rstrip("/"), timeout=10.0) as client:
         try:
-            async with async_bus_client(agent_id, base_url=bus_url.rstrip("/"), timeout=10.0) as client:
-                response = await client.post(
-                    "/messages",
-                    json={
-                        "from_agent": agent_id,
-                        "to_agent": sender,
-                        "message_type": "inbox",
-                        "body": {"text": reply_text},
-                        "reply_needed": False,
-                        "related_task": message.get("related_task"),
-                        "correlation_id": message.get("message_id"),
-                    },
-                )
-                response.raise_for_status()
-                logger.info("Respuesta enviada a '%s' por el bus.", sender)
+            response = await client.get(f"/inbox/{agent_id}/{message_id}")
+            response.raise_for_status()
+            message = response.json()
+            if message.get("acknowledged"):
+                return None
+            thread_id = (message.get("conversation_id") or (message.get("metadata") or {}).get("thread_id")
+                         or message_id)
+            session_id = session_map.get(thread_id)
+            binary = shutil.which(cli)
+            if not binary:
+                raise RuntimeError(f"CLI '{cli}' not found in PATH")
+            cmd = [binary, "-p", build_prompt(message), "--output-format", "json"]
+            if session_id:
+                cmd.extend(["--resume", session_id])
+            result = await _run_cli(cmd, agent_id)
+            if result.returncode != 0:
+                raise RuntimeError(f"CLI turn failed ({result.returncode}): {result.stderr[:200]}")
+            try:
+                output_data = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                output_data = None
+            if isinstance(output_data, dict) and output_data.get("is_error"):
+                raise RuntimeError("CLI returned an error result")
+            new_session = extract_session_id(result.stdout)
+            if new_session:
+                session_map[thread_id] = new_session
+                save_session_map(session_map, sessions_file)
+            reply_text = extract_response_text(result.stdout)
+            if not reply_text:
+                raise ValueError("CLI returned no reply text")
+            key = "watch-reply:" + message_id
+            if len(key) > 128:
+                key = "watch-reply:" + hashlib.sha256(message_id.encode()).hexdigest()
+            response = await client.post(
+                f"/inbox/{agent_id}/{message_id}/reply",
+                json={"body": {"text": reply_text}, "idempotency_key": key,
+                      "reply_needed": False, "acknowledge": True},
+            )
+            response.raise_for_status()
+            logger.info("Reply delivered and message acknowledged: %s", message_id)
+            return new_session or session_id
+        except asyncio.CancelledError:
+            await asyncio.shield(_record_failure(client, agent_id, message_id, "CLI turn cancelled"))
+            raise
         except Exception as exc:
-            logger.warning("No se pudo enviar respuesta automática al bus: %s", exc)
+            await _record_failure(client, agent_id, message_id, str(exc))
+            logger.warning("Watcher left message pending: %s", exc)
+            return None
 
-    return new_session or session_id
+
+class PendingMessageWatcher:
+    """SSE wakes bounded polling; persisted delivery state decides what to execute."""
+    def __init__(self, agent_id: str, *, cli: str = "claude", bus_url: str = "http://localhost:8420",
+                 dry_run: bool = False, sessions_file: Path | None = None):
+        self.agent_id = agent_id
+        self.cli = cli
+        self.bus_url = bus_url
+        self.dry_run = dry_run
+        self.sessions_file = sessions_file or get_config_dir() / "watch" / agent_id / "sessions.json"
+        self.session_map = load_session_map(self.sessions_file)
+        self.cursor: str | None = None
+        self.retry_after: dict[str, float] = {}
+        self.wake = asyncio.Event()
+
+    async def on_event(self, event: dict) -> None:
+        # Events are hints only; never execute unverified event payloads.
+        self.wake.set()
+
+    async def poll_once(self, *, limit: int = 10) -> None:
+        params = {"limit": limit, "reply_needed": "true"}
+        if self.cursor:
+            params["cursor"] = self.cursor
+        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10) as client:
+            response = await client.get(f"/inbox/{self.agent_id}/messages", params=params)
+            response.raise_for_status()
+            page = response.json()
+        self.cursor = page.get("next_cursor")
+        for message in page["messages"]:
+            message_id = message["message_id"]
+            if time.monotonic() < self.retry_after.get(message_id, 0):
+                continue
+            try:
+                await run_turn(self.agent_id, message, self.session_map, cli=self.cli,
+                               dry_run=self.dry_run, sessions_file=self.sessions_file, bus_url=self.bus_url)
+            finally:
+                self.retry_after[message_id] = time.monotonic() + 3
+        # Retain only unexpired backoff entries; no durable retry ledger is claimed.
+        self.retry_after = {key: value for key, value in self.retry_after.items() if value > time.monotonic()}
+
+    async def run(self, *, once: bool = False) -> None:
+        events = BusEventClient(self.agent_id, bus_url=self.bus_url, on_event=self.on_event)
+        event_task = asyncio.create_task(events.start())
+        try:
+            while True:
+                self.wake.clear()
+                try:
+                    await self.poll_once(limit=1 if once else 10)
+                except Exception as exc:
+                    logger.warning("Pending inbox unavailable: %s", exc)
+                if once:
+                    return
+                try:
+                    await asyncio.wait_for(self.wake.wait(), timeout=3)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            events.stop()
+            event_task.cancel()
+            await asyncio.gather(event_task, return_exceptions=True)
 
 
 @click.command(name="watch")
@@ -178,45 +267,10 @@ def watch(agent_id: str | None, cli: str, bus_url: str, dry_run: bool, once: boo
 
     # Fail immediately for missing/mismatched credentials, including dry-run.
     worker_environment(agent_id)
-    session_file = get_config_dir() / "watch" / agent_id / "sessions.json"
-    session_map = load_session_map(session_file)
-    seen_messages: set[str] = set()
-    bus_client = BusEventClient(agent_id, bus_url=bus_url)
-
+    watcher = PendingMessageWatcher(agent_id, cli=cli, bus_url=bus_url, dry_run=dry_run)
     click.echo(f"👀 Watcheando el bus como '{agent_id}' (CLI: {cli})")
-    click.echo("   Mensajes reply_needed despertarán la sesión. Ctrl+C para salir.")
-
-    async def on_event(event: dict) -> None:
-        msg_id = event.get("message_id")
-        if msg_id and msg_id in seen_messages:
-            return
-
-        if not (event.get("reply_needed") or (event.get("to_agent") == agent_id and event.get("reply_needed"))):
-            return
-        if event.get("to_agent") != agent_id:
-            return
-
-        if msg_id:
-            seen_messages.add(msg_id)
-
-        click.echo(f"  ⚡ {event.get('from_agent')}: {str(event.get('body'))[:60]}")
-        sid = await run_turn(
-            agent_id,
-            event,
-            session_map,
-            cli=cli,
-            dry_run=dry_run,
-            bus_url=bus_url,
-            sessions_file=session_file,
-        )
-        if sid:
-            click.echo(f"  ✅ turno completado (session {sid[:8]})")
-        if once:
-            bus_client.stop()
-
-    bus_client.on_event = on_event
-
+    click.echo("   Consulta persistida y SSE activos. Ctrl+C para salir.")
     try:
-        asyncio.run(bus_client.start())
+        asyncio.run(watcher.run(once=once))
     except KeyboardInterrupt:
         click.echo("\nWatcher detenido")

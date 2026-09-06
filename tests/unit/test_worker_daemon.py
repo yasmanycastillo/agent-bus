@@ -21,8 +21,10 @@ async def test_bus(tmp_path):
     registry = AgentRegistry()
     inbox = InboxManager(db)
     bus = MessageBus(db=db, registry=registry, inbox=inbox)
-    yield bus
-    await db.close()
+    try:
+        yield bus
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio
@@ -60,9 +62,15 @@ async def test_worker_daemon_processes_urgent_message(test_bus):
         assert len(executed_prompts) == 1
         assert "Are you online?" in executed_prompts[0]
 
-        # Verify message was archived
+        # Reply and acknowledgement are committed together.
         pending = await test_bus.inbox.get_inbox("worker_bob")
         assert len(pending) == 0
+        replies = await test_bus.inbox.get_inbox("alice")
+        assert len(replies) == 1
+        assert replies[0].correlation_id == env.message_id
+        assert replies[0].body["text"] == "I am online!"
+        await daemon._handle_urgent_message(env.model_dump(mode="json"))
+        assert len(executed_prompts) == 1
 
 
 @pytest.mark.asyncio
