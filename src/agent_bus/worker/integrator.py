@@ -9,6 +9,8 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from agent_bus.security import async_bus_client
+from agent_bus.worker.execution import ExecutionGuard
+from agent_bus.worker.worktrees import WorktreeManager
 
 logger = logging.getLogger("agent_bus.worker.integrator")
 
@@ -67,6 +69,22 @@ class BranchIntegrator:
                 target_branch=target_branch, test_cmd=test_cmd,
             ))
         return results
+
+    async def run_once(self, test_cmd: list[str] | None = None, target_branch: str = "main") -> list[IntegratorResult]:
+        """Process the conventional ``.worktrees/<owner>`` queue once."""
+        manager = WorktreeManager(self.repo_dir)
+        return await self.process_pending(
+            lambda task: manager.path_for(str(task.get("owner", ""))),
+            test_cmd=test_cmd,
+            target_branch=target_branch,
+        )
+
+    async def run_forever(self, poll_interval_seconds: float = 5.0, test_cmd: list[str] | None = None) -> None:
+        """Run a serialized integration loop guarded per repository."""
+        with ExecutionGuard(self.agent_id, kind="integrator"):
+            while True:
+                await self.run_once(test_cmd=test_cmd)
+                await asyncio.sleep(poll_interval_seconds)
 
     async def run_tests(self, worktree_dir: Path, test_cmd: list[str] | None = None) -> tuple[bool, str]:
         """Runs test suite inside candidate worktree directory."""
