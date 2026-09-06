@@ -16,6 +16,58 @@ Convertir agent-bus en un MCP confiable para comunicar y coordinar agentes que t
 
 ## Estado conocido
 
+### Estado operativo actual — endurecimiento P0
+
+- `main` permanece limpio en `9d7b702`; está nueve commits por delante de
+  `origin/main` y no recibió todavía el endurecimiento descrito aquí.
+- El código candidato llega hasta `ca651a0` en `integration/p0-hardening`; la rama
+  contiene después el registro documental actual en `.worktrees/p0-integration`.
+  No hacer merge ni push mientras el gate siga rojo.
+- Se orquestaron tres proveedores reales: Codex para autorización, Claude para
+  integración Git y AGY para la primera solución transaccional. La revisión
+  independiente rechazó iteraciones intermedias; Codex sustituyó y endureció la
+  solución transaccional, y Claude corrigió el integrador en ciclos posteriores.
+- El MCP fue el plano de coordinación: registró `P0-AUTHZ`, `P0-TRANSACTIONS` y
+  `P0-INTEGRATOR`, mensajes, decisión arquitectónica y locks. Los CLIs, procesos y
+  worktrees fueron el plano de ejecución; la revisión independiente fue el gate.
+- El candidato corrige bloqueo de tareas ajenas, spoofing de reviews, commits
+  cruzados en SQLite y publicación Git de un estado distinto al revisado/probado.
+- Las transacciones usan conexiones dedicadas y reintentan la operación completa
+  ante `SQLITE_BUSY/LOCKED`; soportan archivo y URI de memoria compartida, y
+  esperan trabajos en vuelo al cancelar o cerrar.
+- `BranchIntegrator` fija candidato/base por SHA, prueba el commit combinado,
+  mantiene refs temporales por invocación, publica con actualización coherente del
+  checkout y reporta reconciliación si el commit ya se publicó pero falla el bus.
+- Última suite completa sobre `ca651a0`: **1137 passed, 2 failed, 2 warnings**.
+  Los dos fallos son expectativas de pruebas incompatibles con el contrato final:
+  una prueba nueva usa un bus sin credenciales y otra todavía espera que el ID
+  persistido sea distinto del ID autoritativo reportado.
+- No existe todavía aprobación independiente del HEAD posterior a corregir esas
+  dos pruebas. El gate anterior de `c2343af` no basta porque precede a los fixes
+  finales `9eea7f8` y `ca651a0`.
+- El entorno raíz fue resincronizado y vuelve a importar MCP/OpenTelemetry. El
+  error anterior de colección por ausencia de `opentelemetry` está resuelto.
+- El hub y los tres listeners actualmente registrados siguen siendo procesos del
+  código anterior. Deben reiniciarse de forma coordinada después del merge; tres
+  agentes `online` no demuestra por sí solo que tres workers estén ejecutando.
+
+Pendiente inmediato, en orden:
+
+1. Adaptar las dos pruebas al bus autenticado y al `review_id` autoritativo.
+2. Ejecutar pruebas dirigidas, Ruff de archivos modificados y `git diff --check`.
+3. Ejecutar la suite completa desde el candidato y exigir cero fallos.
+4. Someter el HEAD exacto a una revisión independiente fail-closed.
+5. Fast-forward a `main`, verificar de nuevo desde `main` y sólo entonces cerrar
+   las tres tareas P0 del bus.
+6. Reiniciar hub/listeners y validar el estado MCP real contra el código nuevo.
+7. Abordar T-20 (cuotas/presupuesto) y T-21 (consola React); T-22 permanece
+   bloqueada hasta completar ambas.
+
+Limitaciones que continúan: presupuesto monetario y cuotas no están conectados al
+runtime; reintentos/recuperación de algunos workers siguen necesitando persistencia;
+Mypy estricto y Ruff global mantienen deuda histórica; el piloto de tres CLIs no
+equivale todavía a autonomía desatendida reproducible mediante `run-team` stock.
+
 - Paquete Python `agent-bus`, versión declarada 0.1.0; Python >=3.12.
 - Hub FastAPI, persistencia SQLite/aiosqlite, avisos SSE y endpoint WebSocket.
 - CLI Click, servidor MCP stdio mediante SDK oficial Python 2.1.1, workers y runners de CLIs.

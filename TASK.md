@@ -22,7 +22,7 @@ T-01 habilita validaciones reproducibles. T-01 a T-15 estabilizan el core; T-16 
 | T-03 | P0 | Claim atómico de tareas | T-01 | completada | codex-claims |
 | T-04 | P0 | Adquisición atómica de locks | T-01 | completada | codex-locks |
 | T-05 | P0 | Identidad y credenciales confiables | T-01 | completada | codex-security / codex-clients |
-| T-06 | P0 | Autorización de operaciones | T-03, T-05 | completada | codex-policy |
+| T-06 | P0 | Autorización de operaciones | T-03, T-05 | en validación (endurecimiento P0) | codex-policy / codex |
 | T-07 | P1 | Contrato de decisiones | T-01; cierre de identidad: T-05/T-06 | completada | codex-integrator |
 | T-08 | P1 | Confirmación, respuestas e idempotencia | T-02, T-05, T-06 | completada | codex-integrator / codex-t08-storage / codex-t08-clients / codex-t08-workers |
 | T-09 | P1 | Eventos recuperables y espera acotada | T-08 | completada | codex-integrator / codex-t09-storage / codex-t09-server / codex-t09-clients |
@@ -31,14 +31,57 @@ T-01 habilita validaciones reproducibles. T-01 a T-15 estabilizan el core; T-16 
 | T-12 | P1 | Renovación y alcance de locks | T-04, T-11 | completada | codex-integrator / codex-t12-storage / codex-t12-paths / codex-t12-clients |
 | T-13 | P1 | Validación con dos clientes reales | T-01 a T-12 | completada | codex-integrator / codex-t13-acceptance |
 | T-14 | P2 | Workers recuperables y adaptadores | T-13 | completada | codex-integrator / codex-t14-worker |
-| T-15 | P2 | Integración Git verificada | T-14 | completada | codex-integrator / codex-t15-integrator |
+| T-15 | P0 | Integración Git verificada | T-14 | en validación (endurecimiento P0) | codex-integrator / claude |
 | T-16 | P1 | Piloto real de operación end-to-end | T-15 | completada | codex-integrator |
 | T-17 | P1 | Contrato de tareas, dependencias y DAG | T-16 | completada | codex-t17-dag |
 | T-18 | P1 | HermesOrchestrator HTTP y conexión de Hermes Agent | T-17 | completada (publicación mediante puente validado) | codex |
-| T-19 | P1 | Gatekeeper de revisión y autorización de merge | T-17 | completada | codex-t19-gatekeeper |
+| T-19 | P0 | Gatekeeper de revisión y autorización de merge | T-17 | en validación (endurecimiento P0) | codex-t19-gatekeeper / codex / claude |
 | T-20 | P1 | Cuotas, presupuesto y métricas de consumo | T-16 | pendiente | — |
 | T-21 | P1 | Consola local React integrada | T-16 | pendiente | — |
-| T-22 | P2 | Integraciones SDLC y capacidades enterprise | T-17, T-20, T-21 | pendiente | — |
+| T-22 | P2 | Integraciones SDLC y capacidades enterprise | T-17, T-20, T-21 | bloqueada por T-20/T-21 | — |
+
+## Tramo P0 de autorización, transacciones e integración — en validación
+
+Base protegida: `main` en `9d7b702`. El código candidato de
+`integration/p0-hardening` llega hasta `ca651a0`; la rama contiene después este
+registro documental. El candidato no está fusionado ni publicado. Las tareas reales del
+bus `P0-AUTHZ`, `P0-TRANSACTIONS` y `P0-INTEGRATOR` continúan `in_progress` hasta
+completar el gate y fusionar.
+
+Implementado en worktrees separados con Codex, Claude y AGY, seguido de revisión
+independiente y corrección cruzada:
+
+- [x] `/tasks/{id}/block` exige propietario o administrador de forma atómica.
+- [x] `/reviews` exige principal incluso en modo unsigned; identidad, sesión,
+  fecha e ID de revisión son autoritativos del servidor.
+- [x] Inbox, transferencias y revisiones usan transacciones SQLite independientes;
+  URI en memoria, contención, rollback, cancelación y cierre tienen regresiones.
+- [x] El integrador fija candidato y base por SHA, prueba el estado combinado,
+  publica sin `reset --hard` destructivo y distingue conflicto de reconciliación
+  posterior a publicación.
+- [x] Persistencia de review, criterios, feedback, bloqueo y `done` falla cerrado
+  ante respuestas HTTP no exitosas.
+- [x] Ruff de los archivos modificados, `git diff --check` y build de wheel/sdist
+  pasaron. La rama transaccional final pasó 1066 pruebas y 403 dirigidas.
+- [ ] Corregir `test_persisted_review_id_visible_via_http`: usar `secure_bus.url`
+  y una identidad administrativa autenticada, no `live_bus_url` sin credenciales.
+- [ ] Corregir `test_branch_integrator_require_approval_approve`: el `review_id`
+  persistido debe ser igual al reportado por `IntegratorResult.metadata`, no distinto.
+- [ ] Repetir las pruebas dirigidas. Último resultado combinado: **532 ejecutadas,
+  530 aprobadas y 2 fallidas** en la selección dirigida.
+- [ ] Repetir `uv run --no-sync python -m pytest -q`. Último resultado completo
+  sobre `ca651a0`: **1137 aprobadas, 2 fallidas y 2 warnings**.
+- [ ] Ejecutar un gate independiente nuevo sobre el HEAD posterior a esas dos
+  correcciones. El gate de `c2343af` quedó obsoleto tras `9eea7f8` y `ca651a0`.
+- [ ] Si todo queda verde, avanzar `main` por fast-forward, repetir smoke/suite
+  desde `main`, marcar las tres tareas P0 como `done` y registrar los SHAs finales.
+- [ ] Reiniciar coordinadamente el hub/listeners para cargar el código nuevo y
+  comprobar salud, identidad, tareas y ausencia de locks. Integrar código no
+  actualiza automáticamente el proceso que sigue ejecutándose.
+
+Deuda explícitamente fuera de este tramo: el gate global de Mypy sigue sin estar
+verde por cientos de errores históricos; deben separarse baseline y errores nuevos.
+Ruff global también conserva deuda previa, aunque los archivos de este tramo pasan.
 
 ## T-01 — Pruebas aisladas y contratos
 
