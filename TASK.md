@@ -13,7 +13,7 @@ Base: [evaluación inicial](docs/evaluacion-mcp.md). Contexto: [context.md](cont
 
 ## Orden recomendado
 
-T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/T-06 y T-07. Continuar con T-08/T-09/T-10/T-11/T-12. Cerrar el MVP con T-13. T-14/T-15 son posteriores.
+T-01 habilita validaciones reproducibles. T-01 a T-15 estabilizan el core; T-16 en adelante convierten el core en una operación de producto. El orden posterior prioriza probar un proyecto real, formalizar el DAG y ofrecer una consola local antes de integrar Hermes o capacidades enterprise.
 
 | ID | Prioridad | Trabajo | Dependencias | Estado | Responsable |
 | --- | --- | --- | --- | --- | --- |
@@ -32,6 +32,13 @@ T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/
 | T-13 | P1 | Validación con dos clientes reales | T-01 a T-12 | completada | codex-integrator / codex-t13-acceptance |
 | T-14 | P2 | Workers recuperables y adaptadores | T-13 | completada | codex-integrator / codex-t14-worker |
 | T-15 | P2 | Integración Git verificada | T-14 | completada | codex-integrator / codex-t15-integrator |
+| T-16 | P1 | Piloto real de operación end-to-end | T-15 | pendiente | — |
+| T-17 | P1 | Contrato de tareas, dependencias y DAG | T-16 | pendiente | — |
+| T-18 | P1 | HermesOrchestrator y salidas estructuradas | T-17 | pendiente | — |
+| T-19 | P1 | Gatekeeper de revisión y autorización de merge | T-17 | pendiente | — |
+| T-20 | P1 | Cuotas, presupuesto y métricas de consumo | T-16 | pendiente | — |
+| T-21 | P1 | Consola local React integrada | T-16 | pendiente | — |
+| T-22 | P2 | Integraciones SDLC y capacidades enterprise | T-17, T-20, T-21 | pendiente | — |
 
 ## T-01 — Pruebas aisladas y contratos
 
@@ -190,6 +197,65 @@ El runner incorpora adaptador Codex nativo y persistencia opcional del mapa de s
 ### Registro de T-15
 
 `BranchIntegrator` ahora rechaza worktrees candidatos sucios, ramas inexistentes, candidato igual al destino o checkout objetivo incorrecto antes de mutar Git. Comprueba los códigos de salida de merge, commit y abort; ante un fallo aborta y devuelve estado no integrado. Pruebas unitarias: `3 passed`; validación de regresión ejecutada junto con el flujo del integrador.
+
+## T-16 — Piloto real de operación end-to-end
+
+Ejecutar `onboard` en un repositorio de prueba y demostrar el flujo completo con al menos un proveedor real y un worker mock de respaldo.
+
+- [ ] El proyecto tiene hub, credenciales, worktrees, workers e integrador aislados.
+- [ ] `submit → claim → commit → in_review → tests → merge → done` queda registrado y es recuperable tras reiniciar un proceso.
+- [ ] Se conserva evidencia de tiempos, errores, reintentos y SHA integrado sin secretos.
+
+## T-17 — Contrato de tareas, dependencias y DAG
+
+Extender las tareas con criterios de aceptación, comando de pruebas, dependencias y un grafo acíclico persistente.
+
+- [ ] Las dependencias se validan atómicamente y los ciclos son rechazados.
+- [ ] Crear/reintentar un desglose es idempotente mediante una clave de operación.
+- [ ] El worker recibe sólo tareas desbloqueadas y el dashboard muestra la cadena de dependencias.
+
+## T-18 — HermesOrchestrator y salidas estructuradas
+
+Crear un adaptador configurable para endpoints OpenAI-compatible, vLLM, Ollama y OpenRouter. Hermes debe ser reemplazable y no una dependencia del bus.
+
+- [ ] La configuración no contiene secretos en Git.
+- [ ] El desglose exige JSON Schema validado antes de publicar tareas.
+- [ ] Un fallo de inferencia deja el objetivo pendiente o bloqueado con motivo observable.
+
+## T-19 — Gatekeeper de revisión y autorización de merge
+
+Separar la evaluación del diff y las pruebas de la decisión de integración.
+
+- [ ] El gatekeeper devuelve `approve`, `changes_requested` o `blocked` con razón y evidencia.
+- [ ] `BranchIntegrator` no fusiona si falta aprobación cuando la política del proyecto la exige.
+- [ ] La decisión queda auditada con agente, sesión, SHA y resultados de pruebas.
+
+## T-20 — Cuotas, presupuesto y métricas de consumo
+
+Persistir límites por agente, tarea y proyecto, junto con tokens, duración, proveedor y modelo.
+
+- [ ] Superar un límite detiene el trabajo sin bucle silencioso.
+- [ ] El estado de presupuesto es visible por API, CLI y consola React.
+- [ ] Los datos permiten calcular coste y tiempo por tarea sin exponer prompts o credenciales.
+
+## T-21 — Consola local React integrada
+
+Construir una aplicación React servida por el proyecto para supervisar y operar el bus desde el navegador. Debe ser local-first, usar la API autenticada existente y no introducir un segundo estado de coordinación.
+
+- [ ] La aplicación se inicia con un comando del proyecto (`agent-bus ui` o equivalente) y funciona sin SaaS externo.
+- [ ] Muestra agentes, tareas, estados, worktrees, locks, mensajes, integraciones, errores y consumo.
+- [ ] Permite crear/enviar tareas, reasignar tareas, pausar/reanudar workers y aprobar o rechazar acciones que requieran intervención humana.
+- [ ] Las acciones peligrosas exigen confirmación, identidad autenticada y muestran una explicación antes de ejecutarse.
+- [ ] La actualización en tiempo real usa SSE/WebSocket existente; al reconectar recupera el estado desde la API.
+- [ ] Hay pruebas de rutas críticas: crear tarea, aprobar merge, bloquear agente, reconectar y perder permisos.
+
+## T-22 — Integraciones SDLC y capacidades enterprise
+
+Integrar GitHub/GitLab/Jira, SSO/RBAC empresarial, auditoría exportable y despliegue air-gapped después de validar T-17 a T-21.
+
+- [ ] Cada integración tiene límites de permisos, reintentos e idempotencia.
+- [ ] La auditoría puede exportarse y verificarse fuera del proceso.
+- [ ] Existe una instalación reproducible sin servicios externos para entornos air-gapped.
 
 ## Registro de avance
 
