@@ -14,6 +14,10 @@ class LockError(Exception):
     pass
 
 
+class LockBusyError(LockError):
+    """No mutation occurred: retry after another database transaction completes."""
+
+
 class LockManager:
     """Leases on caller-canonicalized paths, fenced by a unique acquisition ID."""
 
@@ -49,7 +53,7 @@ class LockManager:
         """
         def transaction(connection):
             if connection.in_transaction:
-                raise RuntimeError("Lock mutation requires a committed database")
+                raise LockBusyError("Lock mutation requires a committed database; retry shortly")
             connection.execute("SAVEPOINT lock_lease")
             try:
                 # Reserve SQLite write ownership before sampling the clock: a

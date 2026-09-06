@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from agent_bus.core.locks import LockError, LockManager
+from agent_bus.core.locks import LockBusyError, LockError, LockManager
 from agent_bus.reputation.database import Database
 
 
@@ -181,7 +181,7 @@ async def test_legacy_four_column_locks_expire_once_and_migration_preserves_othe
 async def test_pending_transaction_is_neither_committed_nor_modified(tmp_db, clock):
     manager = LockManager(tmp_db, clock=clock)
     await tmp_db.conn.execute("INSERT INTO reputation(agent_id) VALUES ('uncommitted')")
-    with pytest.raises(RuntimeError, match="committed"):
+    with pytest.raises(LockBusyError, match="committed"):
         await manager.acquire("a.py", "alice")
     assert not await tmp_db.conn.execute_fetchall("SELECT * FROM locks")
     await tmp_db.conn.rollback()
@@ -189,8 +189,32 @@ async def test_pending_transaction_is_neither_committed_nor_modified(tmp_db, clo
     lock = await manager.acquire("a.py", "alice")
     for operation in (manager.release, manager.renew):
         await tmp_db.conn.execute("INSERT INTO reputation(agent_id) VALUES ('uncommitted')")
-        with pytest.raises(RuntimeError, match="committed"):
+        with pytest.raises(LockBusyError, match="committed"):
             await operation("a.py", "alice", acquisition_id=lock.acquisition_id)
         await tmp_db.conn.rollback()
         assert await manager.get_lock("a.py") == lock
         assert not await tmp_db.conn.execute_fetchall("SELECT * FROM reputation")
+
+
+async def test_clock_is_sampled_only_after_sqlite_write_ownership(tmp_db, clock):
+    # Sampling inside the callback alone is insufficient if its first write then
+    # blocks behind another connection until after the lease has expired.
+    other = sqlite3.connect(tmp_db.db_path, timeout=0, check_same_thread=False)
+    sampled = False
+    def reserved_clock():
+        nonlocal sampled
+        try:
+            other.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            assert "locked" in str(exc)
+            sampled = True
+        else:
+            other.rollback()
+            pytest.fail("Clock was sampled without SQLite write ownership")
+        return clock.now
+    try:
+        lease = await LockManager(tmp_db, clock=reserved_clock).acquire("a.py", "alice")
+        assert sampled
+        assert lease.expires_at.timestamp() == clock.now + 300
+    finally:
+        other.close()
