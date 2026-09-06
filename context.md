@@ -18,7 +18,7 @@ Convertir agent-bus en un MCP confiable para comunicar y coordinar agentes que t
 
 - Paquete Python `agent-bus`, versión declarada 0.1.0; Python >=3.12.
 - Hub FastAPI, persistencia SQLite/aiosqlite, avisos SSE y endpoint WebSocket.
-- CLI Click, servidor MCP stdio implementado manualmente, workers y runners de CLIs.
+- CLI Click, servidor MCP stdio mediante SDK oficial Python 2.1.1, workers y runners de CLIs.
 - Worktrees, integrador Git, consenso y reputación existen como componentes; su presencia no demuestra un flujo autónomo completo.
 - Diagnóstico inicial: prototipo aprovechable, pendiente de corregir entrega, exclusión e identidad.
 - Suite histórica del diagnóstico: 189 aprobadas, 1 fallida; la prueba de espera MCP dependía de `localhost:8420`. Esa dependencia se corrigió en T-01.
@@ -56,7 +56,7 @@ Decisión: sesiones Bearer locales persistentes, provisionadas por el operador d
 
 El token puede reutilizarse hasta revocación/vencimiento; por sí solo no aporta anti-replay por solicitud ni idempotencia. T-08 implementa esta última para envíos con clave, como se describe abajo. Tareas y locks continúan asociados al nombre del agente, sin leases por sesión (T-11/T-12). Compartir usuario Unix con acceso a todas las credenciales o a la base no protege frente a un agente malicioso.
 
-La suite legacy usa compatibilidad explícita; las pruebas nuevas de seguridad usan sesiones estrictas. La aceptación automatizada incluye provisión CLI y clientes MCP en proceso contra un hub efímero; no demuestra todavía interoperabilidad externa stdio ni el navegador completo (T-10/T-13).
+La suite legacy usa compatibilidad explícita; las pruebas nuevas de seguridad usan sesiones estrictas. La aceptación automatizada incluye provisión CLI y clientes MCP en proceso contra un hub efímero; la prueba de procesos stdio reales se incorpora en T-10; la aceptación con aplicaciones externas y navegador completo sigue en T-13.
 
 Worktrees de la tanda: `codex-security`, `codex-policy`, `codex-clients` e integrador. Se integran commits revisados y se verifica el código combinado antes de actualizar `main`; no se activa el integrador Git autónomo.
 
@@ -71,13 +71,13 @@ Validación de T-08: **374 pruebas aprobadas** en 65,92 s sobre `a774a8c`, con d
 - Worker/watcher usan almacenamiento como fuente de pendientes y SSE como aviso. Un fallo conserva la entrega y registra error; un éxito guarda respuesta+ack. Claude `is_error` con exit0 no es éxito; cancelar recoge el subproceso directo.
 - Retención: se conservan secuencias y registros de idempotencia aunque se limpien entregas confirmadas; responder requiere que el padre siga disponible. HTTP sin clave es compatibilidad, sin garantía de idempotencia de request.
 
-No hay ejecución exactamente una vez de efectos externos ni exclusión entre procesos del mismo agente (T-11/T-14). T-09 incorpora plazo total y recuperación; la cancelación concurrente por JSON-RPC/stdio sigue en T-10. La aceptación con clientes MCP externos por stdio sigue en T-13.
+No hay ejecución exactamente una vez de efectos externos ni exclusión entre procesos del mismo agente (T-11/T-14). T-09 incorpora plazo total y recuperación; T-10 incorpora cancelación concurrente por JSON-RPC/stdio. La aceptación con clientes MCP externos por stdio sigue en T-13.
 
 Worktrees: `codex-t08-storage`, `codex-t08-clients`, `codex-t08-workers` e integrador. Se integran commits revisados manualmente a `main`; los listeners permanecen activos y el hub de coordinación previo no se reinició.
 
 ## T-09: eventos recuperables y espera acotada
 
-Validación combinada: **446 pruebas aprobadas** en **96,03 s** sobre `85773c1`, con dos avisos de deprecación WebSocket. T-08 se publicó en `origin/main` hasta `063ce22` antes de iniciar esta tanda. Contrato de T-09 en [events.md](docs/events.md). Próxima tarea: **T-10**, SDK MCP y transporte stdio.
+Validación combinada: **446 pruebas aprobadas** en **96,03 s** sobre `85773c1`, con dos avisos de deprecación WebSocket. T-08 se publicó en `origin/main` hasta `063ce22` antes de iniciar esta tanda. Contrato de T-09 en [events.md](docs/events.md). T-10 se describe a continuación.
 
 - Cada entrega y su evento se guardan atómicamente. Hay secuencia global durable, cursores firmados por ámbito y migración de pendientes una sola vez. Un mensaje eliminado conserva su marca de entrega y no se puede recrear mediante un envío legacy con el mismo ID.
 - Retención global de eventos: siete días o 10 000 registros; no elimina pendientes. Un cursor vencido devuelve un cursor nuevo y exige recorrer el inbox. El tráfico de otros agentes también puede hacer vencer un cursor personal.
@@ -86,9 +86,24 @@ Validación combinada: **446 pruebas aprobadas** en **96,03 s** sobre `85773c1`,
 - MCP captura cursor antes de consultar pendientes, cierra la ventana de suscripción y usa un plazo total de 1–120 segundos. Devuelve códigos explícitos para cursor, conexión, autenticación y protocolo. Un evento histórico confirmado no se presenta como trabajo nuevo.
 - Worker y panel guardan el cursor en memoria al reconectar, procesan checkpoints/reset y recuperan pendientes. El parser SSE compartido tiene framing multilínea, límite de frame y cesión al event loop para mantener cancelación/plazos.
 
-La cancelación de la coroutine está comprobada; el transporte stdio actual aún procesa secuencialmente y requiere T-10. La aceptación con clientes MCP externos y navegador completo sigue en T-13. Los listeners se mantienen activos y el hub de coordinación previo conserva su proceso anterior: integrar código no migra ese servicio.
+Al cerrar T-09 quedaba pendiente el transporte stdio concurrente; T-10 lo incorpora. La aceptación con clientes MCP externos y navegador completo sigue en T-13. Los listeners se mantienen activos y el hub de coordinación previo conserva su proceso anterior: integrar código no migra ese servicio.
 
 Worktrees: `codex-t09-storage`, `codex-t09-server`, `codex-t09-clients` e integrador. Ver el registro de TASK.md para commits y validación combinada final.
+
+## T-10: SDK MCP y transporte stdio
+
+Validación combinada: **493 pruebas aprobadas** en **109,70 s** sobre `7fad883`, dos avisos de deprecación WebSocket. Antes de esta tanda, T-09 se publicó en `origin/main` hasta `7fa6b54`. La siguiente tarea es **T-11**, aislamiento por proyecto y sesión. Configuración y contrato en [mcp-setup.md](docs/mcp-setup.md).
+
+- SDK oficial Python `mcp==2.1.1`, con lock reproducible. Se usa `mcp.server.Server` para preservar once herramientas y dejar negociación, protocolo, concurrencia y cancelación al SDK. Se elimina el dispatcher manual y `PROTOCOL_VERSION`.
+- La API Python de pruebas es `Client(McpServer(...).sdk_server())`; desaparece `handle_request`. Se conserva `execute_tool` como lógica de aplicación.
+- JSON Schema 2020-12 valida antes de vincular actores. Schemas seguros excluyen identidad y rechazan propiedades adicionales. Los resultados llevan el mismo JSON en texto y `structuredContent`; fallos de herramienta tienen `isError: true`, separados de errores JSON-RPC.
+- `wait_for_updates` admite solicitudes paralelas y cancelación por ID sin confirmar pendientes. Cancelar no revierte una mutación ya persistida; mantener las claves de idempotencia.
+- La E/S por threads del SDK podía quedarse viva con stdout roto o saturado. `mcp/transport.py` usa tuberías asyncio cancelables y termina la conexión al recibir EOF, conservando parser/serializador del SDK. Descriptores privados separan protocolo de impresiones accidentales; cada línea entrante está limitada a 4 MiB. La capa traduce fallos de validación del SDK a respuestas -32700/-32600, evitando descartarlos sin responder.
+- CLI `--bus-url` prevalece sobre `AGENT_BUS_URL`; default loopback. Falla en stderr si faltan credenciales, sin iniciar automáticamente el hub.
+
+Pruebas de transporte en Linux con un cliente SDK real y peer JSON-RPC independiente: protocolo moderno `2026-07-28`, handshake `2024-11-05` y `2025-06-18`, envío/lectura autenticados, concurrencia, cancelación, cierre de SSE y del proceso. No acreditan todavía Windows, dos aplicaciones MCP externas ni reactivación de sus TUI (T-13). Ver TASK.md para el resultado final de la suite y commits.
+
+El entorno de validación de esta tanda es `.worktrees/codex-integrator/.venv`, instalado con `uv sync --extra dev`; usar `uv run --locked pytest -q`. La `.venv` raíz y el hub de coordinación previo no se actualizaron: sus listeners siguen activos. Preparar las dependencias con `uv sync --locked --extra dev` al activar el nuevo código.
 
 ## Orientación acordada para el trabajo
 
@@ -98,11 +113,11 @@ El usuario aceptó el diagnóstico y pidió convertirlo en documentación y tare
 - Conservar SQLite inicialmente y usar SSE para avisar, con recuperación desde almacenamiento.
 - Asociar proyecto, agente y sesión a cada conexión; derivar la identidad del contexto autenticado.
 - Entrega al menos una vez, confirmación explícita e idempotencia; no prometer exactamente una vez para efectos externos.
-- Adoptar un SDK MCP mantenido; elegir SDK y versiones compatibles durante la implementación.
+- Usar el SDK oficial MCP; T-10 fija 2.1.1 y verifica negociación con las revisiones indicadas.
 - Diferenciar comunicación MCP, reactivación de sesión y ejecución headless; validar cada cliente.
 - Posponer consenso BFT, reputación y merges autónomos hasta estabilizar el núcleo.
 
-El esquema definitivo de entregas, las versiones del SDK y los dos clientes iniciales siguen pendientes de concretar; las sesiones locales se describen arriba. Registrar esas decisiones y sus motivos al implementarlas.
+Entregas, sesiones y versión del SDK están definidos en las secciones anteriores. Elegir y verificar las dos aplicaciones cliente sigue pendiente de T-13. Registrar esas decisiones y sus motivos al implementarlas.
 
 ## Mapa del código
 

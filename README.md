@@ -3,7 +3,7 @@
 [![Tests](https://img.shields.io/badge/tests-pytest-brightgreen.svg)](TASK.md)
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com)
-[![MCP](https://img.shields.io/badge/MCP-2024--11--05-orange.svg)](https://modelcontextprotocol.io)
+[![MCP](https://img.shields.io/badge/MCP_Python_SDK-2.1.1-orange.svg)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
 **Protocolo y bus de eventos distribuido para la orquestación autónoma de equipos multi-agente de Inteligencia Artificial.**
@@ -78,7 +78,7 @@ flowchart TD
 
 ## 🔌 Servidor MCP Nativo (Model Context Protocol)
 
-`agent-bus` incluye un servidor MCP oficial para que cualquier asistente de IA interactivo se conecte directamente al bus.
+`agent-bus` usa el SDK oficial Python `mcp==2.1.1` para exponer el bus por stdio, con solicitudes concurrentes y cancelación. Los contratos y el alcance comprobado están en [mcp-setup.md](docs/mcp-setup.md).
 
 ### Herramientas MCP Disponibles
 

@@ -26,7 +26,7 @@ T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/
 | T-07 | P1 | Contrato de decisiones | T-01; cierre de identidad: T-05/T-06 | completada | codex-integrator |
 | T-08 | P1 | Confirmación, respuestas e idempotencia | T-02, T-05, T-06 | completada | codex-integrator / codex-t08-storage / codex-t08-clients / codex-t08-workers |
 | T-09 | P1 | Eventos recuperables y espera acotada | T-08 | completada | codex-integrator / codex-t09-storage / codex-t09-server / codex-t09-clients |
-| T-10 | P1 | SDK MCP y pruebas stdio | T-05, T-07, T-08, T-09 | pendiente | — |
+| T-10 | P1 | SDK MCP y pruebas stdio | T-05, T-07, T-08, T-09 | completada | codex-integrator / codex-t10-stdio / codex-t10-contracts |
 | T-11 | P1 | Aislamiento por proyecto y sesión | T-05, T-06 | pendiente | — |
 | T-12 | P1 | Renovación y alcance de locks | T-04, T-11 | pendiente | — |
 | T-13 | P1 | Validación con dos clientes reales | T-01 a T-12 | pendiente | — |
@@ -127,11 +127,11 @@ Persistir secuencia/cursor de eventos y usar SSE como señal. Cerrar la ventana 
 
 Elegir SDK mantenido y versiones compatibles con clientes objetivo. Migrar el transporte preservando los contratos corregidos; no basta con cambiar `PROTOCOL_VERSION`.
 
-- [ ] Un cliente MCP de prueba realiza initialize, tools/list y tools/call sobre un proceso stdio real.
-- [ ] Una espera activa permite atender otra solicitud y puede cancelarse.
-- [ ] EOF y cierre durante una espera liberan los recursos del proceso.
-- [ ] stdout contiene exclusivamente mensajes del protocolo; logs van a stderr.
-- [ ] Errores de herramienta y de protocolo se distinguen y los schemas se validan.
+- [x] Un cliente MCP de prueba realiza initialize, tools/list y tools/call sobre un proceso stdio real.
+- [x] Una espera activa permite atender otra solicitud y puede cancelarse.
+- [x] EOF y cierre durante una espera liberan los recursos del proceso.
+- [x] stdout contiene exclusivamente mensajes del protocolo; logs van a stderr.
+- [x] Errores de herramienta y de protocolo se distinguen y los schemas se validan.
 - [x] Cada conexión deriva su identidad de configuración/credenciales, sin remitente libre elegido por el modelo. Implementado antes del SDK en T-05; conservarlo al migrar.
 
 ## T-11 — Proyecto y sesión
@@ -234,4 +234,22 @@ Validación final: **446 passed**, dos avisos de deprecación WebSocket, en **96
 
 La revisión cruzada corrigió el evento confirmado que acompañaba a pendientes distintos, la recreación legacy de una entrega purgada y el registro prematuro del suscriptor. Contrato y límites de retención, errores y recuperación en [events.md](docs/events.md).
 
-**Siguiente tarea: T-10**, SDK MCP y transporte stdio; la cancelación concurrente por JSON-RPC y aceptación con clientes externos siguen pendientes. El hub de coordinación previo no se reinició; los listeners permanecen activos y las pruebas usaron servicios efímeros.
+**Al cerrar T-09, siguiente tarea: T-10**, completada en el registro siguiente. La aceptación con aplicaciones externas sigue pendiente de T-13. El hub de coordinación previo no se reinició; los listeners permanecen activos y las pruebas usaron servicios efímeros.
+
+
+## Registro de T-10
+
+Completada el 2026-09-06 con subagentes y worktrees separados; integración manual a `main` después de probar el conjunto. Antes de comenzar se publicó T-09 en `origin/main` hasta `7fa6b54`.
+
+- `f34662e` (origen `6ec6104`): pruebas mediante el cliente SDK, validación de schemas, errores de herramienta/protocolo y vínculo de identidad; conserva escenarios HTTP reales de las tandas anteriores.
+- `718143f`: SDK oficial Python `mcp==2.1.1`, dependencias fijadas en `uv.lock`, servidor de bajo nivel, resultados estructurados y textuales, validación antes de vincular identidad, CLI con URL explícita/entorno y tuberías cancelables para stdio.
+- `910e854`: errores de validación entregados por el SDK se convierten a respuestas JSON-RPC -32700/-32600, en lugar de descartarse sin respuesta.
+- `7fad883` (origen `0fea789`): nueve escenarios con procesos CLI reales, cliente SDK y peer JSON-RPC independiente contra hub y credenciales efímeros.
+
+Validación final: **493 passed**, dos avisos de deprecación WebSocket, en **109,70 s** sobre `7fad883`. Comando desde el integrador: `uv run --locked pytest -q`, usando su `.venv` preparada mediante `uv sync --extra dev`. `ruff check --select F,E9` sobre MCP y los contratos nuevos, y `git diff --check`, limpios. El entorno raíz del hub previo no se sincronizó durante esta tanda.
+
+La aceptación automatizada verifica SDK 2.1.1/moderno `2026-07-28`, initialize legacy `2024-11-05` y `2025-06-18`, listado/llamada de herramientas, envío/lectura autenticados, espera concurrente, cancelación por ID que libera SSE, EOF/stdout roto, salida saturada, JSON malformado y límite de entrada de 4 MiB sin ejecutar el mensaje. Los tests no usan el bus de coordinación real.
+
+La revisión y las reproducciones detectaron bloqueos del transporte por lectura/escritura en threads, espera indefinida de drain tras EOF y descarte silencioso de errores de entrada. La capa local conserva el parser/serializador del SDK y corrige esos cierres/respuestas; no reintroduce un dispatcher JSON-RPC propio. El contrato y el cambio de API Python se documentan en [mcp-setup.md](docs/mcp-setup.md).
+
+**Siguiente tarea: T-11**, aislamiento por proyecto y sesión. La aceptación con dos aplicaciones cliente externas, sus mecanismos de reactivación y navegador completo sigue en T-13; estas pruebas de procesos se ejecutaron en Linux. El hub previo y los listeners permanecen activos, sin migrar ese servicio automáticamente.
