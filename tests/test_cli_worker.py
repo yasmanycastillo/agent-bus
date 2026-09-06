@@ -141,3 +141,5 @@ def test_run_team_and_submit_cli(monkeypatch, tmp_path, live_bus_url, spawned_pr
         catch_exceptions=False,
     )
     assert res_submit.exit_code == 0
+    assert "Objetivo transmitido" in res_submit.output
+    assert "Error comunicando" not in res_submit.output
