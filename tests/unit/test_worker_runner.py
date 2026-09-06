@@ -108,7 +108,7 @@ async def test_codex_uses_native_exec_and_resume(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider, expected", [
-    ("agy", ["--prompt", "hello", "--output-format", "json"]),
+    ("agy", ["--prompt", "hello", "--output-format", "stream-json"]),
     ("grok", ["-p", "hello", "--output-format", "json", "--no-alt-screen", "--no-plan"]),
 ])
 async def test_real_provider_adapters_use_headless_commands(monkeypatch, provider, expected):
@@ -116,7 +116,9 @@ async def test_real_provider_adapters_use_headless_commands(monkeypatch, provide
     calls = []
     async def fake_subprocess(cmd, timeout, thread_id=None):
         calls.append(cmd)
-        return RunnerResult(True, '{"sessionId":"sid"}', session_id="sid")
+        output = ('{"event":"result","result":{"conversation_id":"sid","status":"SUCCESS","response":"ok"}}'
+                  if provider == "agy" else '{"sessionId":"sid"}')
+        return RunnerResult(True, output, session_id="sid")
     runner = AgentRunner(provider, provider=provider)
     monkeypatch.setattr(runner, "_run_subprocess", fake_subprocess)
     await runner.execute_turn("hello", thread_id="t")
