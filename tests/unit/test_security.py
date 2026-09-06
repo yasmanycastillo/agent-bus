@@ -7,7 +7,7 @@ import time
 import httpx
 import pytest
 
-from agent_bus.reputation.database import Database
+from agent_bus.reputation.database import Database, ProjectMismatchError
 from agent_bus.security import (
     AuthenticationError, SessionStore, async_bus_client, load_session, sync_bus_client,
 )
@@ -26,9 +26,10 @@ async def test_sessions_persist_hashes_expire_revoke_and_project(tmp_db):
     await other.initialize()
     try:
         assert await SessionStore(other).authenticate(session["token"]) == principal
-        with pytest.raises(AuthenticationError):
+        with pytest.raises(ProjectMismatchError):
             await SessionStore(other, "other").authenticate(session["token"])
-        assert not await SessionStore(other, "other").revoke(session["session_id"])
+        with pytest.raises(ProjectMismatchError):
+            await SessionStore(other, "other").revoke(session["session_id"])
         assert await store.revoke(session["session_id"])
         assert not await store.revoke(session["session_id"])
         with pytest.raises(AuthenticationError):

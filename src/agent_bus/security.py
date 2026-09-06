@@ -19,7 +19,7 @@ from pathlib import Path
 
 import httpx
 
-from agent_bus.config import get_config_dir, load_config
+from agent_bus.config import get_bus_url, get_config_dir, load_config
 from agent_bus.reputation.database import Database
 
 
@@ -59,6 +59,7 @@ class SessionStore:
             raise AuthenticationError("Invalid session role")
         if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= 2592000:
             raise AuthenticationError("Session TTL must be between 1 and 2592000 seconds")
+        await self.db.bind_project(self.project_id)
         token = secrets.token_urlsafe(32)
         session_id = secrets.token_hex(16)
         expires_at = time.time() + ttl_seconds
@@ -72,6 +73,7 @@ class SessionStore:
                     project_id=self.project_id, role=role, expires_at=expires_at)
 
     async def authenticate(self, token: str) -> Principal:
+        await self.db.bind_project(self.project_id)
         if not isinstance(token, str) or not 43 <= len(token) <= 256:
             raise AuthenticationError("Invalid session")
         rows = await self.db.conn.execute_fetchall(
@@ -84,6 +86,7 @@ class SessionStore:
         return Principal(**dict(rows[0]))
 
     async def revoke(self, session_id: str) -> bool:
+        await self.db.bind_project(self.project_id)
         validate_id(session_id)
         rows = await self.db.conn.execute_fetchall(
             "UPDATE sessions SET revoked = 1 WHERE session_id = ? AND project_id = ? AND revoked = 0 RETURNING session_id",
@@ -102,13 +105,13 @@ def resolve_agent_id(agent_id: str | None = None) -> str | None:
     return validate_id(selected) if selected else None
 
 
-def _validate_session(session: dict, agent_id: str | None) -> dict:
+def _validate_session(session: dict, agent_id: str | None, project_id: str | None = None) -> dict:
     try:
         for key in ("agent_id", "session_id", "project_id"):
             validate_id(session[key])
         if agent_id and session["agent_id"] != agent_id:
             raise AuthenticationError("Session identity does not match requested agent")
-        if session["project_id"] != load_config().bus.project_id:
+        if session["project_id"] != (project_id if project_id is not None else load_config().bus.project_id):
             raise AuthenticationError("Session belongs to another project")
         if session["role"] not in ("agent", "admin"):
             raise AuthenticationError("Invalid session role")
@@ -122,9 +125,10 @@ def _validate_session(session: dict, agent_id: str | None) -> dict:
     return dict(session)
 
 
-def load_session(agent_id: str | None = None, *, session_file: Path | None = None) -> dict:
-    selected = resolve_agent_id(agent_id)
+def load_session(agent_id: str | None = None, *, session_file: Path | None = None, project_id: str | None = None) -> dict:
     explicit = session_file or os.environ.get("AGENT_BUS_SESSION_FILE")
+    selected = agent_id or os.environ.get("AGENT_BUS_AGENT_ID") or os.environ.get("AGENT_ID")
+    selected = validate_id(selected) if selected else (None if explicit else resolve_agent_id())
     if not explicit and not selected:
         raise AuthenticationError("Select an agent or configure AGENT_BUS_SESSION_FILE")
     path = Path(explicit) if explicit else get_config_dir() / "credentials" / f"{selected}.json"
@@ -144,19 +148,30 @@ def load_session(agent_id: str | None = None, *, session_file: Path | None = Non
     finally:
         if fd is not None:
             os.close(fd)
-    return _validate_session(session, selected)
+    return _validate_session(session, selected, project_id)
 
 
 def _origin(url: httpx.URL) -> tuple:
     return url.scheme, url.host, url.port
 
 
-def _client_options(agent_id: str | None, session: dict | None, kwargs: dict, asynchronous: bool) -> dict:
+def _client_options(agent_id: str | None, session: dict | None, kwargs: dict, asynchronous: bool, project_id: str | None = None) -> dict:
     options = dict(kwargs)
-    options.setdefault("base_url", "http://localhost:8420")
+    options["base_url"] = get_bus_url(options.get("base_url"))
+    project_id = validate_id(project_id if project_id is not None else load_config().bus.project_id)
+    headers = httpx.Headers(options.pop("headers", None))
+    headers["X-Agent-Bus-Project"] = project_id
+    options["headers"] = headers
     if session is None and not os.environ.get("AGENT_BUS_SESSION_FILE") and os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") == "1":
+        hooks = {name: list(values) for name, values in options.pop("event_hooks", {}).items()}
+        def project_guard(request):
+            request.headers["X-Agent-Bus-Project"] = project_id
+        async def async_project_guard(request):
+            project_guard(request)
+        hooks.setdefault("request", []).insert(0, async_project_guard if asynchronous else project_guard)
+        options["event_hooks"] = hooks
         return options
-    credential = _validate_session(session, resolve_agent_id(agent_id)) if session is not None else load_session(agent_id)
+    credential = _validate_session(session, agent_id or session.get("agent_id"), project_id) if session is not None else load_session(agent_id, project_id=project_id)
     # A loopback URL must not send its bearer token through an ambient proxy.
     options.setdefault("trust_env", False)
     base = httpx.URL(options["base_url"])
@@ -174,6 +189,7 @@ def _client_options(agent_id: str | None, session: dict | None, kwargs: dict, as
     hooks = {name: list(values) for name, values in options.pop("event_hooks", {}).items()}
 
     def guard(request):
+        request.headers["X-Agent-Bus-Project"] = project_id
         if _origin(request.url) != _origin(base):
             raise AuthenticationError("Refusing to forward session to another origin")
         if credential["expires_at"] <= time.time():
@@ -196,9 +212,9 @@ class _BearerAuth(httpx.Auth):
         yield request
 
 
-def sync_bus_client(agent_id: str | None = None, *, session: dict | None = None, **kwargs) -> httpx.Client:
-    return httpx.Client(**_client_options(agent_id, session, kwargs, False))
+def sync_bus_client(agent_id: str | None = None, *, session: dict | None = None, project_id: str | None = None, **kwargs) -> httpx.Client:
+    return httpx.Client(**_client_options(agent_id, session, kwargs, False, project_id))
 
 
-def async_bus_client(agent_id: str | None = None, *, session: dict | None = None, **kwargs) -> httpx.AsyncClient:
-    return httpx.AsyncClient(**_client_options(agent_id, session, kwargs, True))
+def async_bus_client(agent_id: str | None = None, *, session: dict | None = None, project_id: str | None = None, **kwargs) -> httpx.AsyncClient:
+    return httpx.AsyncClient(**_client_options(agent_id, session, kwargs, True, project_id))

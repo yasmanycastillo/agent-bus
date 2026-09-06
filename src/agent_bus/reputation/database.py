@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import aiosqlite
 import secrets
+import re
 from pathlib import Path
 
 
 INBOX_SCHEMA = """
+CREATE TABLE IF NOT EXISTS project_metadata (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    project_id TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS inbox (
     message_id TEXT NOT NULL,
     from_agent TEXT NOT NULL,
@@ -163,9 +169,14 @@ CREATE INDEX IF NOT EXISTS idx_tasks_owner ON tasks(owner);
 """
 
 
+class ProjectMismatchError(ValueError):
+    """A database belongs to a different project; no cross-project adoption."""
+
+
 class Database:
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, project_id: str | None = None) -> None:
         self.db_path = db_path
+        self.project_id = project_id
         self._connection: aiosqlite.Connection | None = None
 
     async def initialize(self) -> None:
@@ -174,10 +185,48 @@ class Database:
         self._connection.row_factory = aiosqlite.Row
         try:
             await self._connection.executescript(SCHEMA)
+            if self.project_id is not None:
+                await self.bind_project(self.project_id)
             await self._migrate_inbox_deliveries()
         except BaseException:
             await self.close()
             raise
+
+    async def bind_project(self, project_id: str) -> None:
+        """Adopt an unbound legacy database once, or verify its durable owner.
+
+        The entire check/write runs in one aiosqlite worker callback. Independent
+        connections serialize first adoption with BEGIN IMMEDIATE. A first bind
+        never commits another caller's pending transaction.
+        """
+        if not isinstance(project_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", project_id):
+            raise ValueError("Invalid project identity")
+
+        def binding(connection):
+            def existing():
+                row = connection.execute("SELECT project_id FROM project_metadata WHERE singleton = 1").fetchone()
+                if row is not None and row[0] != project_id:
+                    raise ProjectMismatchError("Database belongs to another project")
+                return row is not None
+
+            if existing():
+                return
+            if connection.in_transaction:
+                raise RuntimeError("First project binding requires a committed database")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                if not existing():
+                    if connection.execute("SELECT 1 FROM sessions WHERE project_id != ? LIMIT 1", (project_id,)).fetchone():
+                        raise ProjectMismatchError("Existing sessions belong to another project")
+                    connection.execute("INSERT INTO project_metadata(singleton, project_id) VALUES (1, ?)", (project_id,))
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+        # Private driver access is confined here to keep transaction ownership
+        # indivisible with respect to other coroutines on this shared connection.
+        await self.conn._execute(binding, self.conn._conn)
 
     async def _migrate_inbox_deliveries(self) -> None:
         # Serialize schema inspection and migration across hub initializations.
