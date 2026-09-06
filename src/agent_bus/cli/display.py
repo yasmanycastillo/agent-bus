@@ -65,8 +65,15 @@ def generate_dashboard_renderable(
         table.add_column("Tarea", style="green")
         table.add_column("Owner", style="yellow", width=14)
         table.add_column("Status", style="magenta", width=14)
+        table.add_column("Depends On", style="blue", width=16)
         for t in tasks[:10]:
-            table.add_row(t["task_id"], t["title"], t["owner"], t["status"])
+            deps = ", ".join(t.get("depends_on") or [])
+            st = t.get("status", "")
+            if st == "blocked":
+                status_str = "[bold red]blocked[/bold red]"
+            else:
+                status_str = st
+            table.add_row(t["task_id"], t["title"], t["owner"], status_str, deps or "-")
         sections.append(Panel(table, title="Tareas", border_style="green"))
 
     # Inbox
@@ -116,10 +123,17 @@ def print_tasks_table(tasks: list[dict]) -> None:
     table.add_column("Tarea", style="green")
     table.add_column("Owner", style="yellow")
     table.add_column("Status", style="magenta")
+    table.add_column("Depends On", style="blue")
     table.add_column("Locked files", style="dim")
     for t in tasks:
         files = ", ".join(t.get("locked_files", []))
-        table.add_row(t["task_id"], t["title"], t["owner"], t["status"], files or "-")
+        deps = ", ".join(t.get("depends_on") or [])
+        st = t.get("status", "")
+        if st == "blocked":
+            status_str = "[bold red]blocked[/bold red]"
+        else:
+            status_str = st
+        table.add_row(t["task_id"], t["title"], t["owner"], status_str, deps or "-", files or "-")
     console.print(table)
 
 

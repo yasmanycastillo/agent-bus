@@ -328,10 +328,34 @@ def work_as(agent_id: str):
 @click.argument("task_id")
 @click.argument("title")
 @click.option("--owner", default="free", help="Owner inicial")
-def work_task(task_id: str, title: str, owner: str):
+@click.option("--description", default=None, help="Descripcion")
+@click.option("--depends-on", "-d", multiple=True, help="IDs de tareas de las que depende")
+@click.option("--criteria", "-c", multiple=True, help="Criterios de aceptacion")
+@click.option("--test-cmd", default=None, help="Comando de pruebas")
+@click.option("--operation-key", default=None, help="Clave de operacion (idempotencia)")
+def work_task(
+    task_id: str,
+    title: str,
+    owner: str,
+    description: str | None,
+    depends_on: tuple[str, ...],
+    criteria: tuple[str, ...],
+    test_cmd: str | None,
+    operation_key: str | None,
+):
     """Crear una tarea."""
     with _client() as client:
-        resp = client.post("/tasks", json={"task_id": task_id, "title": title, "owner": owner})
+        payload = {
+            "task_id": task_id,
+            "title": title,
+            "owner": owner,
+            "description": description,
+            "depends_on": list(depends_on),
+            "acceptance_criteria": list(criteria),
+            "test_cmd": [test_cmd] if test_cmd else None,
+            "operation_key": operation_key,
+        }
+        resp = client.post("/tasks", json=payload)
         if resp.status_code == 200:
             click.echo(f"Tarea {task_id} creada")
         else:

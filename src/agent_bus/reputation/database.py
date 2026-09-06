@@ -125,8 +125,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     status TEXT DEFAULT 'pending',
     locked_files TEXT DEFAULT '[]',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    acceptance_criteria TEXT DEFAULT '[]',
+    test_cmd TEXT,
+    depends_on TEXT DEFAULT '[]',
+    operation_key TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_tasks_operation_key ON tasks(operation_key);
 
 CREATE TABLE IF NOT EXISTS decisions (
     decision_id TEXT PRIMARY KEY,
@@ -192,6 +197,7 @@ class Database:
                 await self.bind_project(self.project_id)
             await self._migrate_inbox_deliveries()
             await self._migrate_lock_leases()
+            await self._migrate_tasks()
         except BaseException:
             await self.close()
             raise
@@ -295,6 +301,26 @@ class Database:
                 "UPDATE locks SET expires_at=0 WHERE session_id IS NULL OR acquisition_id IS NULL OR expires_at IS NULL"
             )
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_locks_expiry ON locks(expires_at)")
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_tasks(self) -> None:
+        """Ensure tasks table has acceptance_criteria, test_cmd, depends_on, operation_key columns."""
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row["name"] for row in await self.conn.execute_fetchall("PRAGMA table_info(tasks)")}
+            new_cols = [
+                ("acceptance_criteria", "TEXT DEFAULT '[]'"),
+                ("test_cmd", "TEXT"),
+                ("depends_on", "TEXT DEFAULT '[]'"),
+                ("operation_key", "TEXT"),
+            ]
+            for name, col_def in new_cols:
+                if name not in columns:
+                    await self.conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {col_def}")
+            await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_operation_key ON tasks(operation_key)")
             await self.conn.commit()
         except BaseException:
             await self.conn.rollback()

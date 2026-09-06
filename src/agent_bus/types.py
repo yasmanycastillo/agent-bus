@@ -89,6 +89,10 @@ class Task(BaseModel):
     owner: str = "free"
     status: TaskStatus = TaskStatus.PENDING
     locked_files: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    test_cmd: list[str] | None = None
+    depends_on: list[str] = Field(default_factory=list)
+    operation_key: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
