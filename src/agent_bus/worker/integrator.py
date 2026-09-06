@@ -4,7 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -40,6 +40,33 @@ class BranchIntegrator:
         self.agent_id = agent_id
         self.max_retries_per_task = max_retries_per_task
         self._retry_counts: dict[str, int] = {}  # task_id -> retry count
+
+    async def process_pending(
+        self,
+        worktree_for: Callable[[dict[str, Any]], Path | Awaitable[Path]],
+        test_cmd: list[str] | None = None,
+        target_branch: str = "main",
+    ) -> list[IntegratorResult]:
+        """Consume the durable ``in_review`` queue once, serially.
+
+        The resolver owns the project policy for mapping a task to its dedicated
+        checkout; the integrator never guesses a worktree from an agent name.
+        """
+        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=30.0) as client:
+            response = await client.get("/tasks", params={"status": "in_review"})
+            response.raise_for_status()
+            tasks = response.json()
+        results: list[IntegratorResult] = []
+        for task in tasks:
+            worktree = worktree_for(task)
+            if asyncio.iscoroutine(worktree):
+                worktree = await worktree
+            branch = str(task.get("candidate_branch") or f"agent/{task.get('owner', '')}")
+            results.append(await self.integrate_task(
+                task["task_id"], task.get("owner", "unknown"), Path(worktree), branch,
+                target_branch=target_branch, test_cmd=test_cmd,
+            ))
+        return results
 
     async def run_tests(self, worktree_dir: Path, test_cmd: list[str] | None = None) -> tuple[bool, str]:
         """Runs test suite inside candidate worktree directory."""

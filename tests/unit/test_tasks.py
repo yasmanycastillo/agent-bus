@@ -43,6 +43,15 @@ async def test_complete(tmp_db: Database):
     assert completed.status == TaskStatus.DONE
 
 
+async def test_submit_review_moves_owned_work_to_integration_queue(tmp_db: Database):
+    tm = TaskManager(tmp_db)
+    await tm.create("T-review", "Review me", owner="claude")
+    reviewed = await tm.submit_review("T-review", actor="claude")
+    assert reviewed is not None
+    assert reviewed.status == TaskStatus.IN_REVIEW
+    assert await tm.submit_review("T-review", actor="claude") is None
+
+
 async def test_list_with_filters(tmp_db: Database):
     tm = TaskManager(tmp_db)
     await tm.create("T1", "Task 1", owner="claude")

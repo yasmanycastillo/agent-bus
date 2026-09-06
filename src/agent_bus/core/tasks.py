@@ -88,6 +88,18 @@ class TaskManager:
         await self._db.conn.commit()
         return self._row_to_task(rows[0]) if rows else None
 
+    async def submit_review(self, task_id: str, actor: str | None = None) -> Task | None:
+        """Move owned work to the serialized integration queue."""
+        now = datetime.now(timezone.utc).isoformat()
+        condition = " AND owner = ?" if actor else ""
+        params = (now, task_id, actor) if actor else (now, task_id)
+        rows = await self._db.conn.execute_fetchall(
+            "UPDATE tasks SET status = 'in_review', updated_at = ? "
+            "WHERE task_id = ? AND status = 'in_progress'" + condition + " RETURNING *", params,
+        )
+        await self._db.conn.commit()
+        return self._row_to_task(rows[0]) if rows else None
+
     async def lock_files(self, task_id: str, paths: list[str], actor: str | None = None) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
         condition = " AND owner = ? AND status != 'done'" if actor else ""

@@ -215,7 +215,7 @@ class MessageBus:
                             actors.append("decided_by")
                         if path == "/register" or path.startswith("/locks/") or (
                             len(parts) == 3 and parts[0] == "tasks"
-                            and parts[2] in ("claim", "done", "lock-files")
+                            and parts[2] in ("claim", "done", "review", "lock-files")
                         ):
                             actors.append("agent_id")
                         if path.startswith("/kickoff/step/"):
@@ -479,6 +479,14 @@ class MessageBus:
         async def complete_task(task_id: str, request: Request):
             principal = request.state.principal
             task = await self.tasks.complete(task_id, actor=principal.agent_id if principal else None)
+            if not task:
+                return await self._task_failure(task_id, principal)
+            return task.model_dump(mode="json")
+
+        @self.app.post("/tasks/{task_id}/review")
+        async def review_task(task_id: str, request: Request):
+            principal = request.state.principal
+            task = await self.tasks.submit_review(task_id, actor=principal.agent_id if principal else None)
             if not task:
                 return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
