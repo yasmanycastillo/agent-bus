@@ -6,11 +6,11 @@
 [![MCP](https://img.shields.io/badge/MCP_Python_SDK-2.1.1-orange.svg)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
-**Protocolo y bus de eventos distribuido para la orquestación autónoma de equipos multi-agente de Inteligencia Artificial.**
+**Bus local de comunicación y coordinación entre agentes, con interfaz MCP.**
 
-`agent-bus` permite que múltiples agentes de IA (**Claude Code**, **Antigravity / AGY**, **OpenAI Codex**, **Grok**, **Aider**) colaboren en un mismo proyecto de código en tiempo real, de forma **completamente autónoma y sin requerir un humano como mensajero manual entre terminales**.
+`agent-bus` permite que varios agentes intercambien mensajes, reclamen tareas y coordinen archivos dentro de un proyecto. El hub conserva las entregas mientras los clientes están desconectados; cada aplicación necesita consultar o mantener una espera activa para procesarlas.
 
-> Estado: prototipo en estabilización. Las garantías verificadas y pendientes están en [TASK.md](TASK.md); la autonomía y compatibilidad con clientes externos requieren todavía la aceptación de T-13.
+> Estado y evidencias: [TASK.md](TASK.md) y [aceptación con clientes reales](docs/acceptance-t13.md). Los workers recuperables y la integración Git autónoma siguen pendientes de T-14/T-15.
 
 Guía de [proyectos y sesiones](docs/projects.md): runtime compartido entre worktrees, hubs separados por proyecto e identidades independientes por sesión de proveedor.
 
@@ -24,7 +24,7 @@ flowchart TD
 
     subgraph "Clientes Interactivos (MCP Hooks)"
         MCP1["💻 Claude Code (MCP Server)"]
-        MCP2["💻 Antigravity IDE (MCP Server)"]
+        MCP2["💻 Codex CLI (cliente MCP)"]
     end
 
     subgraph "Aislamiento por Git Worktrees"
@@ -49,7 +49,7 @@ flowchart TD
     D1 -->|"Commits locales"| WT1
     D2 -->|"Commits locales"| WT2
 
-    WT1 -->|"Tests & Merge"| Integrator["🛡️ BranchIntegrator (Tech Lead)"]
+    WT1 -->|"Tests & Merge"| Integrator["BranchIntegrator: aceptación pendiente T-15"]
     WT2 -->|"Tests & Merge"| Integrator
 
     Integrator -->|"Tests verdes -> Merge limpio"| Main["🌿 Rama main"]
@@ -58,21 +58,21 @@ flowchart TD
 
 1. **Integración Nativa MCP (Model Context Protocol)**:
    * Servidor MCP integrado sobre JSON-RPC 2.0 `stdio` con la herramienta bloqueante `wait_for_updates`.
-   * Permite que las sesiones interactivas de **Claude Code** y **Antigravity** esperen eventos del bus y respondan **dentro de su propia consola activa**, preservando todo el contexto conversacional.
-2. **Bucle Multi-Agente 100% Autónomo**:
+   * Claude Code y Codex CLI pueden consultar y procesar el bus mediante sus herramientas MCP. Consultar la matriz de T-13 para las versiones, modelos y mecanismos ejercitados.
+2. **Recepción de eventos y ejecución headless**:
    * Los agentes reciben asignaciones de tareas y consultas urgentes vía push por **Server-Sent Events (SSE Pub/Sub)**.
-   * Ejecución headless desacoplada de la terminal con reanudación de sesiones (`--resume <session_id>`).
+   * Los clientes admiten ejecución sin TUI. Reanudar un proceso requiere una nueva invocación explícita; un evento SSE no inicia por sí mismo un cliente terminado.
 3. **Aislamiento en Git Worktrees**:
-   * Cada agente trabaja en su propio directorio `.worktrees/<agent_id>` y rama `agent/<agent_id>`, eliminando cualquier riesgo de colisión o sobreescritura de archivos en disco.
+   * Cada agente puede trabajar en `.worktrees/<agent_id>` y `agent/<agent_id>`. Los archivos físicos quedan separados; recursos compartidos, merges y editores externos siguen requiriendo coordinación.
 4. **Integrador Autónomo (Rol Tech Lead)**:
    * [`BranchIntegrator`](src/agent_bus/worker/integrator.py) valida automáticamente la suite de tests en la rama del agente antes de fusionar.
    * Si los tests pasan, ejecuta el merge a `main`. Si fallan o hay conflictos, envía feedback detallado al autor con hasta 2 reintentos antes de alertar al humano.
 5. **Soporte Multi-Modelo y Multi-CLI**:
-   * Conectores nativos para **Claude Code** (`claude -p`), **Antigravity / AGY** (`agy --prompt`), **Aider / Codex** (`aider --message`), **Grok / xAI** y ejecutores personalizados.
+   * Los clientes MCP externos son independientes de `AgentRunner`. El runner incluye rutas para Claude, AGY, Aider y ejecutores genéricos, con aceptación pendiente en T-14. **El proveedor `codex` del runner todavía ejecuta Aider**; la prueba de Codex CLI nativo de T-13 utiliza MCP directamente y no acredita ese adaptador.
 6. **Sesiones locales y autorización**:
    * Credenciales Bearer persistentes por agente/proyecto, con expiración y revocación, y permisos verificados en HTTP, SSE y WebSocket. Provisión por operador local; ver [identidad y migración](docs/authentication.md).
 7. **Resiliencia & Circuit Breakers**:
-   * Límite de turnos e intercambios por tarea (`TaskTurnBreaker`), control de presupuesto de tokens (`BudgetBreaker`), detección de locks expirados (`StaleLockDetector`) y resolución de deadlocks por ciclos de espera (`detect_deadlock`).
+   * Hay componentes de límites de turnos, presupuesto y detección de conflictos. Su recuperación y aplicación persistente al worker quedan en T-14; las leases de edición verificadas están documentadas en [locks.md](docs/locks.md).
 8. **Dashboard TUI en Tiempo Real (`top`)**:
    * Monitor interactivo de terminal construido con Rich Live para observar a los agentes, tareas, locks y decisiones en vivo.
 
@@ -144,7 +144,7 @@ uv run agent-bus quickstart
 
 Esto ejecuta automáticamente:
 1. Inicialización del proyecto (`.agent-bus/`).
-2. Arranque del servidor daemon en background (`http://localhost:8420`).
+2. Arranque del hub HTTP loopback configurado, incluido su puerto; un destino remoto debe estar iniciado.
 3. Registro de agentes (`claude`, `antigravity`).
 4. Creación de Git Worktrees aislados y arranque de los daemons de ejecución.
 
@@ -175,15 +175,14 @@ uv run agent-bus worker start --agent claude # Iniciar daemon para un agente
 uv run agent-bus worker stop --agent claude  # Detener daemon
 ```
 
-### 4. Sesión Interactiva que se Despierta Sola (`watch`)
-Deja tu terminal CLI escuchando el bus; cuando otro agente te escriba con `reply_needed`,
-tu sesión ejecuta un turno (`claude --resume <session_id> -p`) y responde sola:
+### 4. Watcher que inicia procesos headless (`watch`)
+El watcher escucha el bus y puede lanzar un proceso `claude -p`, usando `--resume` cuando conserva una sesión previa. Ese proceso es independiente de cualquier TUI abierta; no inyecta texto ni despierta automáticamente aquella terminal:
 
 ```bash
 uv run agent-bus watch --agent claude --cli claude
 ```
 
-Alternativa MCP (recomendada, misma sesión sin subprocesos): conéctate con
+Para esperar dentro de la ejecución actual de un cliente MCP, usar
 `wait_for_updates` — ver [docs/mcp-setup.md](docs/mcp-setup.md).
 
 ### 5. Lanzar Equipo con Configuración Personalizada
@@ -253,7 +252,7 @@ export AGENT_BUS_AGENT_ID=antigravity
 
 ## 🧪 Suite de Pruebas
 
-La suite usa bases, credenciales y hubs efímeros. La evidencia por tanda está en [TASK.md](TASK.md); la aceptación con clientes MCP externos sigue pendiente:
+La suite usa bases, credenciales y hubs efímeros. La evidencia por tanda está en [TASK.md](TASK.md). La aceptación optativa con modelos y clientes externos tiene sus propios [pasos y resultados](docs/acceptance-t13.md):
 
 ```bash
 uv run pytest

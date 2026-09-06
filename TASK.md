@@ -29,7 +29,7 @@ T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/
 | T-10 | P1 | SDK MCP y pruebas stdio | T-05, T-07, T-08, T-09 | completada | codex-integrator / codex-t10-stdio / codex-t10-contracts |
 | T-11 | P1 | Aislamiento por proyecto y sesión | T-05, T-06 | completada | codex-integrator / codex-t11-project / codex-t11-security / codex-t11-workers |
 | T-12 | P1 | Renovación y alcance de locks | T-04, T-11 | completada | codex-integrator / codex-t12-storage / codex-t12-paths / codex-t12-clients |
-| T-13 | P1 | Validación con dos clientes reales | T-01 a T-12 | pendiente | — |
+| T-13 | P1 | Validación con dos clientes reales | T-01 a T-12 | completada | codex-integrator / codex-t13-acceptance |
 | T-14 | P2 | Workers recuperables y adaptadores | T-13 | pendiente | — |
 | T-15 | P2 | Integración Git verificada | T-14 | pendiente | — |
 
@@ -158,13 +158,13 @@ Definir recurso protegido, ruta canónica, propietario por sesión, lease y reno
 
 Elegir dos clientes reales y registrar versiones, configuración y evidencias. Crear una matriz que distinga comunicación, espera, continuación de sesión y headless. Corregir el README según resultados, incluyendo el alias Codex/Aider.
 
-- [ ] Dos agentes envían, leen, responden y confirman mensajes sin retransmisión humana.
-- [ ] El receptor se desconecta, recibe mensajes mientras está fuera y los recupera al volver.
-- [ ] Competir por una tarea o lock produce un único ganador.
-- [ ] Los reintentos controlados no duplican efectos en el escenario de aceptación.
-- [ ] Cada cliente demuestra su mecanismo de espera/activación o documenta explícitamente su limitación.
-- [ ] La suite completa pasa con servicios efímeros; las pruebas manuales incluyen pasos reproducibles.
-- [ ] README, configuración MCP y context.md reflejan lo comprobado.
+- [x] Dos agentes envían, leen, responden y confirman mensajes sin retransmisión humana.
+- [x] El receptor se desconecta, recibe mensajes mientras está fuera y los recupera al volver.
+- [x] Competir por una tarea o lock produce un único ganador.
+- [x] Los reintentos controlados no duplican efectos en el escenario de aceptación.
+- [x] Cada cliente demuestra su mecanismo de espera/activación o documenta explícitamente su limitación.
+- [x] La suite completa pasa con servicios efímeros; las pruebas manuales incluyen pasos reproducibles.
+- [x] README, configuración MCP y context.md reflejan lo comprobado.
 
 ## T-14 — Workers y adaptadores, posterior al MVP
 
@@ -286,3 +286,17 @@ Validación final: **592 passed**, dos avisos de deprecación WebSocket, en **13
 Contrato y migración: [locks.md](docs/locks.md). Límites explícitos: renovación deliberada, sin fencing de escrituras del filesystem ni renovación automática por heartbeat; la revocación impide nuevas operaciones pero la lease existente conserva su vencimiento; `tasks/lock-files` sigue siendo metadato. El guard de ejecución local de T-11 es independiente.
 
 **Siguiente tarea: T-13**, aceptación con aplicaciones MCP externas y documentación realista de comunicación, espera y reactivación. El hub previo y los listeners permanecen activos; no se reinicia ni migra automáticamente ese servicio.
+
+## Registro de T-13
+
+Aceptación sobre T-12 (`ca847a8`) en el worktree `agent/codex-t13-acceptance`; harness y evidencia pública en `a571714`. Clientes elegidos por disponibilidad y autenticación local: **Claude Code 2.1.185 / GLM-5.1** y **Codex CLI 0.153.4 / gpt-6-astra**. No se cambió su configuración global ni se utilizaron los adaptadores del worker.
+
+Se verificaron descubrimiento MCP, intercambio sin retransmisión humana, espera SSE de Claude anterior al envío, reintentos con claves estables, competencia con un único ganador por tarea/lock, mensaje persistido mientras Claude estaba desconectado, y reanudación explícita de ambos clientes conservando ID y un marcador de contexto no repetido en el nuevo prompt. Los cuatro turnos terminaron correctamente. Resultado: cuatro operaciones lógicas, cuatro entregas y tres ACK; la respuesta final permanece pendiente porque la corrida termina al enviarla. La tarea terminó y el lock se liberó.
+
+La auditoría adicional leyó SQLite, trazas y orden de peticiones: un HTTP 200 y un 409 por competencia, reintentos reales de envío/respuesta, confirmaciones realizadas por ambos clientes y ausencia de acciones shell/archivo en los turnos. Se conservan hashes de las trazas y una evidencia sanitizada sin tokens en [docs/evidence/t13.json](docs/evidence/t13.json).
+
+Validación final: **592 passed**, dos avisos de deprecación WebSocket, en **138,75 s** mediante `PYTHONPATH=$PWD/src ../codex-integrator/.venv/bin/python -m pytest -q`. La aceptación con modelos se ejecuta separadamente mediante `scripts/acceptance_real_clients.py`; su verificación de artefactos no vuelve a llamar a los modelos. `ruff check --select F,E9` del harness y `git diff --check`, limpios.
+
+README, configuración MCP y context.md distinguen comunicación, espera, continuación de conversación y headless. Se retira la promesa de autonomía universal; el alias `codex` de `AgentRunner` sigue invocando Aider y queda declarado expresamente. La skill OpenAI Docs ayudó a contrastar la configuración y reanudación nativas de Codex; los resultados se basan en las ejecuciones registradas.
+
+Matriz, comandos y límites en [docs/acceptance-t13.md](docs/acceptance-t13.md). No se acreditan TUI que se despierta sola, hooks Stop en aplicación viva, navegador ni AGY/Aider/Grok. **Siguiente tarea: T-14**, workers recuperables y adaptadores; después T-15. El hub personal y sus listeners permanecen activos con su versión anterior, y los hubs de aceptación se cerraron al terminar.

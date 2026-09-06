@@ -20,11 +20,11 @@ El proceso MCP fija la sesión al arrancar y deriva de ella los actores de sus h
 
 ## 1. Hook Stop de Claude Code (`hooks/stop-check-inbox.sh`)
 
-Configurado en `.claude/settings.json`. Cuando la sesión de Claude Code queda
-idle (fin de turno), el hook consulta `/inbox/{agent}/`; si hay mensajes con
-`reply_needed`, devuelve `{"decision": "block", "reason": "..."}` — Claude Code
-procesa el reason como estímulo y la sesión continúa sola: lee el inbox y
-responde por el bus.
+El ejemplo de `.claude/settings.json` ejecuta el hook al finalizar un turno. Consulta
+`/inbox/{agent}/messages`; si hay mensajes con `reply_needed`, devuelve
+`{"decision": "block", "reason": "..."}`. Es una solicitud de continuación al cliente,
+no un listener permanente capaz de iniciar una TUI inactiva. El script se valida
+automáticamente; la reacción de una TUI real al hook no formó parte de T-13.
 
 - Sin pendientes: salida vacía, la sesión duerme normal.
 - Bus caído o credencial inválida: no bloquea (fail-open). El hook es una ayuda al ciclo de sesión, no una garantía de entrega o ejecución.
@@ -46,9 +46,9 @@ En T-08, `read_messages` devuelve `{messages, next_cursor}`. `post_message` y
 Leer no confirma; usar `ack_messages` o `reply_message(..., acknowledge=true)`
 tras procesar el mensaje. Ver [el contrato y ejemplos](messaging.md).
 
-La sesión del agente la llama y queda esperando ahí; al llegar un mensaje/tarea,
-la tool lo devuelve y el agente lo procesa EN SU MISMA SESIÓN (contexto
-completo, visible en terminal).
+Mientras el cliente mantiene una llamada a `wait_for_updates`, la herramienta puede
+devolver el mensaje dentro de esa ejecución. T-13 lo verificó en Claude Code en
+modo headless. No implica que un cliente terminado se reactive por sí solo.
 
 ### Instalación y contrato del transporte
 
@@ -100,15 +100,41 @@ Config JSON del cliente (stdio):
 
 ### Conectar AGY / Antigravity
 
-Si el cliente soporta MCP stdio, usar el mismo patrón de configuración. Arrancar `agent-bus mcp-server` por sí solo no consulta el inbox ni espera novedades: necesita un cliente que envíe las solicitudes del protocolo. La conexión de AGY/Antigravity concreto sigue pendiente de aceptación en T-13.
+Si el cliente soporta MCP stdio, usar el mismo patrón de configuración. Arrancar `agent-bus mcp-server` por sí solo no consulta el inbox ni espera novedades: necesita un cliente que envíe las solicitudes del protocolo. AGY/Antigravity no fue seleccionado en T-13; su conexión concreta sigue sin aceptación.
 
-## 3. Antigravity / AGY y Codex
+## 3. Codex CLI nativo
+
+La aceptación de Codex CLI 0.153.4 se hizo con MCP directo; `AgentRunner(provider="codex")`
+todavía invoca Aider y no es un adaptador nativo de Codex. Configuración equivalente
+para una instalación preparada:
+
+```toml
+[mcp_servers.agent_bus]
+command = "/ruta/agent-bus/.venv/bin/agent-bus"
+args = ["mcp-server"]
+cwd = "/ruta/proyecto"
+required = true
+startup_timeout_sec = 20
+tool_timeout_sec = 150
+
+[mcp_servers.agent_bus.env]
+AGENT_BUS_PROJECT_ROOT = "/ruta/proyecto"
+AGENT_BUS_AGENT_ID = "codex"
+AGENT_BUS_SESSION_FILE = "/ruta/proyecto/.agent-bus/runtime/credentials/codex.json"
+```
+
+El proyecto debe tener configurada su URL y su credencial provisionada. Ver
+[MCP oficial de Codex](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+Se verificaron `codex exec` y `codex exec resume <id>` con el mismo ID y recuerdo
+de contexto; la reanudación fue iniciada por el harness de aceptación.
+
+## 4. Antigravity / AGY y otros clientes
 
 La reactivación de una sesión interactiva depende del cliente. Las pruebas del transporte no demuestran que una TUI pueda recibir un turno espontáneo. Los hooks y la consulta explícita de `agent-bus work inbox` siguen siendo mecanismos complementarios que deben verificarse por cliente.
 
 ## Alcance verificado
 
-Las pruebas de autenticación ejercitan clientes MCP en proceso contra un hub HTTP real y efímero, además de CLI, HTTP, SSE y WebSocket. T-09 implementa [eventos recuperables y espera con plazo total](events.md). T-10 verifica procesos stdio reales contra un hub efímero: SDK 2.1.1 en modo moderno (`2026-07-28`), handshake `2024-11-05` y `2025-06-18`, herramientas, cancelación y liberación de SSE, EOF, stdout roto y salida saturada. La aceptación con dos aplicaciones MCP externas sigue en T-13. Los mecanismos descritos de activación deben validarse en cada cliente; no equivalen a una prueba de interoperabilidad universal.
+Las pruebas de autenticación ejercitan clientes MCP en proceso contra un hub HTTP real y efímero, además de CLI, HTTP, SSE y WebSocket. T-09 implementa [eventos recuperables y espera con plazo total](events.md). T-10 verifica procesos stdio reales contra un hub efímero: SDK 2.1.1 en modo moderno (`2026-07-28`), handshake `2024-11-05` y `2025-06-18`, herramientas, cancelación y liberación de SSE, EOF, stdout roto y salida saturada. T-13 añade la [aceptación con Claude Code y Codex CLI](acceptance-t13.md), con versiones, modelos, reintentos, desconexión y reanudación registrados. Las aplicaciones y mecanismos fuera de esa matriz siguen sin aceptación; no se acredita interoperabilidad universal.
 
 ## Decisiones relacionadas
 

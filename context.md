@@ -23,7 +23,7 @@ Convertir agent-bus en un MCP confiable para comunicar y coordinar agentes que t
 - Diagnóstico inicial: prototipo aprovechable, pendiente de corregir entrega, exclusión e identidad.
 - Suite histórica del diagnóstico: 189 aprobadas, 1 fallida; la prueba de espera MCP dependía de `localhost:8420`. Esa dependencia se corrigió en T-01.
 - Reproducciones temporales confirmaron H-01 a H-06 del análisis: broadcast incompleto, claims con falso éxito, locks concurrentes ambiguos, suplantación con clave aportada por el cliente, finalización de tarea ajena y contrato de decisiones inválido.
-- No se ha demostrado aquí un intercambio completo con clientes MCP reales.
+- T-13 verificó intercambio y reanudación con Claude Code 2.1.185 (modelo GLM-5.1) y Codex CLI 0.153.4 (gpt-6-astra); ver la matriz y evidencias al final de este documento.
 - El usuario autorizó comenzar la implementación con subagentes y worktrees. La primera tanda cerró T-01 a T-04 y el contrato funcional de T-07. La segunda cerró T-05/T-06 y vinculó T-07 con la identidad autenticada; ambas se integran localmente a main.
 
 Estos resultados son una fotografía inicial. Verificar de nuevo el código y registrar evidencia al completar tareas; no presentar esta suite como estado actual indefinidamente.
@@ -117,7 +117,7 @@ El usuario aceptó el diagnóstico y pidió convertirlo en documentación y tare
 - Diferenciar comunicación MCP, reactivación de sesión y ejecución headless; validar cada cliente.
 - Posponer consenso BFT, reputación y merges autónomos hasta estabilizar el núcleo.
 
-Entregas, sesiones y versión del SDK están definidos en las secciones anteriores. Elegir y verificar las dos aplicaciones cliente sigue pendiente de T-13. Registrar esas decisiones y sus motivos al implementarlas.
+Entregas, sesiones y versión del SDK están definidos en las secciones anteriores. T-13 eligió Claude Code y Codex CLI por estar instalados y autenticados; la matriz de aceptación delimita sus versiones, modelos y mecanismos comprobados.
 
 ## Mapa del código
 
@@ -171,4 +171,17 @@ Implementación hasta `33eb90e`, validada con **592 pruebas aprobadas** en **137
 - Las mutaciones consumen cursores y confirman en un callback atómico; el reloj se lee después de obtener acceso de escritura SQLite. Una transacción compartida pendiente produce un 503 reintentable, sin confirmar trabajo ajeno.
 - El lock es cooperativo: no intercepta editores externos ni frena escrituras de un proceso que ignora su vencimiento. No se cubren hardlinks, cambios de symlink posteriores ni montajes remotos distintos. `tasks/lock-files` es metadato descriptivo, no una adquisición de lease.
 
-Siguiente: **T-13**, aceptación con aplicaciones MCP externas y documentación de sus mecanismos reales de comunicación/reactivación.
+Al cerrar T-12 seguía T-13, completada en el registro siguiente.
+
+## T-13: aceptación con dos aplicaciones reales
+
+Evidencias y reproducción en [acceptance-t13.md](docs/acceptance-t13.md), resumen sanitizado en [t13.json](docs/evidence/t13.json), harness optativo en `scripts/acceptance_real_clients.py`. Se ejecutó contra el código de T-12 (`ca847a8`), con hub/base/proyecto efímeros y credenciales independientes. La suite completa pasó: **592 pruebas en 138,75 s**, dos avisos de deprecación WebSocket.
+
+- Claude Code 2.1.185 usa aquí GLM-5.1 por la configuración disponible; Codex CLI 0.153.4 usa gpt-6-astra. Son aplicaciones MCP reales; no se pasó por `AgentRunner` ni por un mock del cliente.
+- Cuatro turnos headless: intercambio concurrente y reanudación explícita de ambos clientes. Cada uno conservó el ID de conversación y recordó un marcador que no se repitió en el prompt de reanudación.
+- Un único ganador para tarea y lock; envío y respuesta repetidos con la misma clave sin duplicar entregas. Cuatro operaciones lógicas, cuatro entregas y tres ACK; la respuesta final queda pendiente intencionalmente al finalizar el escenario.
+- Claude mantuvo SSE antes del envío y recuperó un mensaje escrito mientras estaba desconectado. Codex recuperó y confirmó su pendiente al reanudar. El harness inicia los procesos, pero no transporta el texto entre clientes ni lo copia a sus prompts.
+- No se acreditan reactivación espontánea de TUI, hooks Stop en aplicación viva, AGY/Aider/Grok, ni la autonomía completa del worker. El alias `provider=codex` del runner todavía invoca Aider; el README ya lo declara y T-14 debe resolverlo.
+- La skill OpenAI Docs se usó para contrastar configuración MCP y reanudación de Codex con la versión instalada. La evidencia local prevalece para afirmar qué se ejecutó.
+
+Quedan **T-14** (workers y adaptadores) y **T-15** (integración Git verificada). Las referencias anteriores a T-13 pendiente describen el estado histórico al cerrar cada tanda. El hub personal y sus listeners siguen con su proceso anterior; ninguna aceptación reinició ese servicio. Los archivos privados de la corrida viven en `/tmp/agent-bus-t13-n21ax5md` y pueden desaparecer; el resumen sanitizado y el harness quedan en Git.
