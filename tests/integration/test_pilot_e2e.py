@@ -10,18 +10,14 @@ Validates complete real-world operational cycle:
 
 from __future__ import annotations
 
-import asyncio
-import os
 import subprocess
-import time
 from pathlib import Path
 
-import httpx
 import pytest
 from click.testing import CliRunner
 
 from agent_bus.cli.main import app
-from agent_bus.security import async_bus_client, sync_bus_client
+from agent_bus.security import async_bus_client
 from agent_bus.worker.daemon import WorkerDaemon
 from agent_bus.worker.integrator import BranchIntegrator
 from agent_bus.worker.runner import AgentRunner, RunnerResult
@@ -56,36 +52,37 @@ def pilot_git_repo(tmp_path: Path) -> Path:
 async def test_pilot_end_to_end_operational_cycle(
     tmp_path: Path,
     pilot_git_repo: Path,
-    live_bus_url: str,
+    secure_bus,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Executes the full end-to-end pilot cycle with isolated hub, worker, worktree and integrator."""
-    # Ensure project_id matches live_bus default project ("default")
-    monkeypatch.setenv("AGENT_BUS_URL", live_bus_url)
-    monkeypatch.setenv("AGENT_BUS_PROJECT_ID", "default")
+    # Match the project used by the provisioned credentials.
+    bus_url = secure_bus.url
+    monkeypatch.setenv("AGENT_BUS_URL", bus_url)
+    monkeypatch.setenv("AGENT_BUS_PROJECT_ID", "acceptance-project")
     monkeypatch.setenv("AGENT_BUS_PROJECT_ROOT", str(pilot_git_repo))
     monkeypatch.chdir(pilot_git_repo)
 
     # 1. Onboarding / Initialization via CLI
     runner = CliRunner()
-    init_res = runner.invoke(app, ["init", "--bus-url", live_bus_url], catch_exceptions=False)
+    init_res = runner.invoke(app, ["init", "--bus-url", bus_url], catch_exceptions=False)
     assert init_res.exit_code == 0
     assert "Proyecto inicializado" in init_res.output
 
     # Register pilot agents (using agent_id matching principal identity)
-    worker_agent = "worker"
-    integrator_agent = "integrator"
+    worker_agent = "alice"
+    integrator_agent = "human"
 
-    async with async_bus_client(worker_agent, base_url=live_bus_url) as client:
+    async with async_bus_client(worker_agent, base_url=bus_url) as client:
         r_worker = await client.post("/register", json={"agent_id": worker_agent, "display_name": "Codex Worker"})
-        assert r_worker.status_code in (200, 201, 409)
+        assert r_worker.status_code == 201, r_worker.text
 
-    async with async_bus_client(integrator_agent, base_url=live_bus_url) as client:
+    async with async_bus_client(integrator_agent, base_url=bus_url) as client:
         r_lead = await client.post("/register", json={"agent_id": integrator_agent, "display_name": "Lead Integrator"})
-        assert r_lead.status_code in (200, 201, 409)
+        assert r_lead.status_code == 201, r_lead.text
 
     # Record initial architecture decision
-    async with async_bus_client(worker_agent, base_url=live_bus_url) as client:
+    async with async_bus_client(worker_agent, base_url=bus_url) as client:
         dec_resp = await client.post(
             "/decisions",
             json={
@@ -133,19 +130,19 @@ async def test_pilot_end_to_end_operational_cycle(
         provider="mock",
         worktree_dir=wt_info.path,
         custom_executor=simulated_real_code_turn,
-        bus_url=live_bus_url,
+        bus_url=bus_url,
     )
 
     worker_daemon = WorkerDaemon(
         agent_id=worker_agent,
         runner=agent_runner,
-        bus_url=live_bus_url,
+        bus_url=bus_url,
         poll_interval_seconds=0.1,
     )
 
     # 4. Create Task on the bus
     task_id = "TASK-PILOT-01"
-    async with async_bus_client(integrator_agent, base_url=live_bus_url) as client:
+    async with async_bus_client(integrator_agent, base_url=bus_url) as client:
         t_create = await client.post(
             "/tasks",
             json={
@@ -158,7 +155,7 @@ async def test_pilot_end_to_end_operational_cycle(
         assert t_create.status_code == 200
 
     # 5. Run one step of worker daemon polling / task claiming & execution
-    worker_daemon._client = async_bus_client(worker_agent, base_url=live_bus_url, timeout=10.0)
+    worker_daemon._client = async_bus_client(worker_agent, base_url=bus_url, timeout=10.0)
     try:
         # Check and process pending tasks
         await worker_daemon._check_and_process_pending()
@@ -167,7 +164,7 @@ async def test_pilot_end_to_end_operational_cycle(
         worker_daemon._client = None
 
     # Verify task state transitioned to 'in_review'
-    async with async_bus_client(worker_agent, base_url=live_bus_url) as client:
+    async with async_bus_client(worker_agent, base_url=bus_url) as client:
         t_status = await client.get(f"/tasks/{task_id}")
         assert t_status.status_code == 200
         task_data = t_status.json()
@@ -183,7 +180,7 @@ async def test_pilot_end_to_end_operational_cycle(
     # 6. Branch Integrator Execution
     integrator = BranchIntegrator(
         repo_dir=pilot_git_repo,
-        bus_url=live_bus_url,
+        bus_url=bus_url,
         agent_id=integrator_agent,
     )
 
@@ -200,7 +197,7 @@ async def test_pilot_end_to_end_operational_cycle(
     assert int_res.status == "integrated"
 
     # Verify task is now 'done' on the bus
-    async with async_bus_client(integrator_agent, base_url=live_bus_url) as client:
+    async with async_bus_client(integrator_agent, base_url=bus_url) as client:
         t_done = await client.get(f"/tasks/{task_id}")
         assert t_done.status_code == 200
         assert t_done.json()["status"] == "done"
@@ -222,21 +219,21 @@ async def test_pilot_end_to_end_operational_cycle(
         agent_id=worker_agent,
         provider="mock",
         worktree_dir=wt_info.path,
-        bus_url=live_bus_url,
+        bus_url=bus_url,
     )
     restarted_daemon = WorkerDaemon(
         agent_id=worker_agent,
         runner=restarted_runner,
-        bus_url=live_bus_url,
+        bus_url=bus_url,
     )
-    restarted_daemon._client = async_bus_client(worker_agent, base_url=live_bus_url, timeout=10.0)
+    restarted_daemon._client = async_bus_client(worker_agent, base_url=bus_url, timeout=10.0)
     try:
         # Check decisions persistence
         decisions = await restarted_daemon._fetch_recent_decisions()
         assert any(d.get("decision_id") == "ADR-001" for d in decisions)
 
         # Check task remains 'done' and no duplicate executions occur
-        async with async_bus_client(worker_agent, base_url=live_bus_url) as client:
+        async with async_bus_client(worker_agent, base_url=bus_url) as client:
             t_after = await client.get(f"/tasks/{task_id}")
             assert t_after.json()["status"] == "done"
 
@@ -254,23 +251,26 @@ async def test_pilot_end_to_end_operational_cycle(
 async def test_pilot_integration_rejection_and_feedback_cycle(
     tmp_path: Path,
     pilot_git_repo: Path,
-    live_bus_url: str,
+    secure_bus,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Validates that a failing candidate branch is rejected by the integrator and sends feedback to the author."""
-    monkeypatch.setenv("AGENT_BUS_URL", live_bus_url)
-    monkeypatch.setenv("AGENT_BUS_PROJECT_ID", "default")
+    bus_url = secure_bus.url
+    monkeypatch.setenv("AGENT_BUS_URL", bus_url)
+    monkeypatch.setenv("AGENT_BUS_PROJECT_ID", "acceptance-project")
     monkeypatch.setenv("AGENT_BUS_PROJECT_ROOT", str(pilot_git_repo))
     monkeypatch.chdir(pilot_git_repo)
 
-    worker_agent = "worker"
-    integrator_agent = "integrator"
+    worker_agent = "alice"
+    integrator_agent = "human"
 
-    async with async_bus_client(worker_agent, base_url=live_bus_url) as client:
-        await client.post("/register", json={"agent_id": worker_agent, "display_name": "Codex Worker"})
+    async with async_bus_client(worker_agent, base_url=bus_url) as client:
+        response = await client.post("/register", json={"agent_id": worker_agent, "display_name": "Codex Worker"})
+        assert response.status_code == 201, response.text
 
-    async with async_bus_client(integrator_agent, base_url=live_bus_url) as client:
-        await client.post("/register", json={"agent_id": integrator_agent, "display_name": "Lead Integrator"})
+    async with async_bus_client(integrator_agent, base_url=bus_url) as client:
+        response = await client.post("/register", json={"agent_id": integrator_agent, "display_name": "Lead Integrator"})
+        assert response.status_code == 201, response.text
 
     wm = WorktreeManager(repo_root=pilot_git_repo)
     wt_info = wm.create(worker_agent, base_ref="main")
@@ -283,17 +283,21 @@ async def test_pilot_integration_rejection_and_feedback_cycle(
     _git(wt_info.path, "commit", "-m", "feat(agent): complete TASK-FAIL-01")
 
     task_id = "TASK-FAIL-01"
-    async with async_bus_client(integrator_agent, base_url=live_bus_url) as client:
-        await client.post(
+    async with async_bus_client(integrator_agent, base_url=bus_url) as client:
+        response = await client.post(
             "/tasks",
             json={"task_id": task_id, "title": "Failing Task", "owner": worker_agent},
         )
-        # Move to review
-        await client.post(f"/tasks/{task_id}/review")
+        assert response.status_code == 200, response.text
+
+    # The task owner submits their work for review.
+    async with async_bus_client(worker_agent, base_url=bus_url) as client:
+        response = await client.post(f"/tasks/{task_id}/review")
+        assert response.status_code == 200, response.text
 
     integrator = BranchIntegrator(
         repo_dir=pilot_git_repo,
-        bus_url=live_bus_url,
+        bus_url=bus_url,
         agent_id=integrator_agent,
     )
 
@@ -308,7 +312,7 @@ async def test_pilot_integration_rejection_and_feedback_cycle(
     assert results[0].status == "retry_requested"
 
     # Verify task ownership remained/reassigned to worker and inbox received feedback
-    async with async_bus_client(worker_agent, base_url=live_bus_url) as client:
+    async with async_bus_client(worker_agent, base_url=bus_url) as client:
         t_data = (await client.get(f"/tasks/{task_id}")).json()
         assert t_data["owner"] == worker_agent
         assert t_data["status"] == "in_progress"

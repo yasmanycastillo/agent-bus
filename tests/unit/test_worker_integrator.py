@@ -433,14 +433,14 @@ def _author_worktree(tmp_path: Path, env: dict) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_record_review_real_404_fails_closed(tmp_path, live_bus_url):
+async def test_record_review_real_400_fails_closed(tmp_path, secure_bus):
     """POST /reviews for a payload the bus rejects (400) must fail closed."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     env = _git_env(repo)
     wt = _author_worktree(repo, env)
 
-    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=secure_bus.url, agent_id="human")
 
     # Corrupt the decision after evaluation so the server rejects it (400).
     http_evidence: list = []
@@ -469,13 +469,13 @@ async def test_record_review_real_404_fails_closed(tmp_path, live_bus_url):
     assert res.merged is False
     assert res.status == "error"
     # The HTTP request really happened and the server answered 400
-    assert http_evidence and http_evidence[0] == 400
+    assert http_evidence == [400, "exception:HTTPStatusError"]
     # main untouched
     assert "feature.txt" not in [p.name for p in repo.iterdir()]
 
 
 @pytest.mark.asyncio
-async def test_done_real_404_triggers_rollback(tmp_path, live_bus_url):
+async def test_done_real_404_triggers_rollback(tmp_path, secure_bus):
     """POST /tasks/<unknown>/done returns 404 after publication -> conditional rollback."""
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -483,7 +483,7 @@ async def test_done_real_404_triggers_rollback(tmp_path, live_bus_url):
     wt = _author_worktree(repo, env)
     main_before = _run_git("rev-parse", "main", cwd=repo, env=env)
 
-    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=secure_bus.url, agent_id="human")
 
     async def mock_record(decision):
         return True
@@ -505,6 +505,8 @@ async def test_done_real_404_triggers_rollback(tmp_path, live_bus_url):
     assert res.success is False
     assert res.status == "error"
     assert res.metadata.get("rolled_back") is True
+    assert "404 Not Found" in res.error
+    assert f"{secure_bus.url}/tasks/T911-unknown/done" in res.error
     # Target was rolled back to the pre-integration commit
     assert _run_git("rev-parse", "main", cwd=repo, env=env) == main_before
     _run_git("checkout", "-f", "main", cwd=repo, env=env)
@@ -512,7 +514,7 @@ async def test_done_real_404_triggers_rollback(tmp_path, live_bus_url):
 
 
 @pytest.mark.asyncio
-async def test_done_failure_rollback_loses_race_reports_reconciliation(tmp_path, live_bus_url):
+async def test_done_failure_rollback_loses_race_reports_reconciliation(tmp_path, secure_bus):
     """If someone advances main after publication, rollback CAS loses and we reconcile."""
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -520,7 +522,7 @@ async def test_done_failure_rollback_loses_race_reports_reconciliation(tmp_path,
     wt = _author_worktree(repo, env)
     main_before = _run_git("rev-parse", "main", cwd=repo, env=env)
 
-    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=secure_bus.url, agent_id="human")
 
     async def mock_record(decision):
         return True
@@ -530,11 +532,15 @@ async def test_done_failure_rollback_loses_race_reports_reconciliation(tmp_path,
     # After publication (inside _finalize_merge failure path), race the target:
     # advance main beyond integration_sha so the rollback CAS must lose.
     finalize_calls = {"n": 0}
+    real_finalize = integrator._finalize_merge
+    http_evidence = []
 
     async def racing_finalize(task_id):
         finalize_calls["n"] += 1
         if finalize_calls["n"] == 1:
-            # Simultaneously fail /done AND advance main concurrently.
+            # Fail the real /done request, then advance main before rollback.
+            completed, error = await real_finalize(task_id)
+            http_evidence.append((completed, error))
             (repo / "raced.txt").write_text("raced\n")
             _run_git("checkout", "-f", "main", cwd=repo, env=env)
             _run_git("add", "-A", cwd=repo, env=env)
@@ -544,7 +550,7 @@ async def test_done_failure_rollback_loses_race_reports_reconciliation(tmp_path,
                      "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
                 cwd=repo,
             )
-            return (False, "simulated 500 from /done")
+            return completed, error
         return (False, "already failed")
 
     integrator._finalize_merge = racing_finalize  # type: ignore
@@ -556,6 +562,11 @@ async def test_done_failure_rollback_loses_race_reports_reconciliation(tmp_path,
     assert res.merged is True  # publication happened; rollback lost
     assert res.status == "error"
     assert res.metadata.get("reconciliation_required") is True
+    assert len(http_evidence) == 1
+    completed, error = http_evidence[0]
+    assert completed is False
+    assert "404 Not Found" in error
+    assert f"{secure_bus.url}/tasks/T912/done" in error
     # main is at the raced commit, past integration
     main_after = _run_git("rev-parse", "main", cwd=repo, env=env)
     assert main_after != main_before
