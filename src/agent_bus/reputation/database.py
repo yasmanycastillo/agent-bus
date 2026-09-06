@@ -4,6 +4,26 @@ import aiosqlite
 from pathlib import Path
 
 
+INBOX_SCHEMA = """
+CREATE TABLE IF NOT EXISTS inbox (
+    message_id TEXT NOT NULL,
+    from_agent TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    correlation_id TEXT,
+    reply_needed INTEGER DEFAULT 0,
+    related_task TEXT,
+    body TEXT,
+    metadata TEXT,
+    signature TEXT,
+    timestamp TEXT NOT NULL,
+    archived INTEGER DEFAULT 0,
+    archived_at TEXT,
+    PRIMARY KEY (message_id, to_agent)
+);
+"""
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS reputation (
     agent_id TEXT PRIMARY KEY,
@@ -22,21 +42,7 @@ CREATE TABLE IF NOT EXISTS endorsements (
     PRIMARY KEY (from_agent, to_agent)
 );
 
-CREATE TABLE IF NOT EXISTS inbox (
-    message_id TEXT PRIMARY KEY,
-    from_agent TEXT NOT NULL,
-    to_agent TEXT NOT NULL,
-    message_type TEXT NOT NULL,
-    correlation_id TEXT,
-    reply_needed INTEGER DEFAULT 0,
-    related_task TEXT,
-    body TEXT,
-    metadata TEXT,
-    signature TEXT,
-    timestamp TEXT NOT NULL,
-    archived INTEGER DEFAULT 0,
-    archived_at TEXT
-);
+""" + INBOX_SCHEMA + """
 
 CREATE INDEX IF NOT EXISTS idx_inbox_to_agent ON inbox(to_agent, archived);
 CREATE INDEX IF NOT EXISTS idx_inbox_timestamp ON inbox(timestamp);
@@ -102,8 +108,39 @@ class Database:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._connection = await aiosqlite.connect(self.db_path)
         self._connection.row_factory = aiosqlite.Row
-        await self._connection.executescript(SCHEMA)
-        await self._connection.commit()
+        try:
+            await self._connection.executescript(SCHEMA)
+            await self._migrate_inbox_deliveries()
+        except BaseException:
+            await self.close()
+            raise
+
+    async def _migrate_inbox_deliveries(self) -> None:
+        # Serialize schema inspection and migration across hub initializations.
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = await self.conn.execute_fetchall("PRAGMA table_info(inbox)")
+            primary_key = [
+                row["name"]
+                for row in sorted(columns, key=lambda row: row["pk"])
+                if row["pk"]
+            ]
+            if primary_key == ["message_id"]:
+                await self.conn.execute("ALTER TABLE inbox RENAME TO inbox_legacy")
+                await self.conn.execute(INBOX_SCHEMA)
+                await self.conn.execute("INSERT INTO inbox SELECT * FROM inbox_legacy")
+                await self.conn.execute("DROP TABLE inbox_legacy")
+                # The old indexes followed the renamed table and were dropped with it.
+                await self.conn.execute(
+                    "CREATE INDEX idx_inbox_to_agent ON inbox(to_agent, archived)"
+                )
+                await self.conn.execute(
+                    "CREATE INDEX idx_inbox_timestamp ON inbox(timestamp)"
+                )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
 
     @property
     def conn(self) -> aiosqlite.Connection:
