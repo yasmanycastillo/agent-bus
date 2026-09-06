@@ -137,12 +137,18 @@ def watcher_hub(monkeypatch):
     return hub
 
 
-@pytest.mark.parametrize("failure", ["exit", "exception", "empty", "cancelled", "reply", "error_result"])
+@pytest.mark.parametrize("failure", ["exit", "exception", "empty", "cancelled", "reply", "error_result", "malformed", "nontext", "blank_exception"])
 async def test_watcher_failure_never_acknowledges(watcher_hub, monkeypatch, tmp_path, failure):
     hub = watcher_hub
     async def run(*args):
         if failure == "exception":
             raise RuntimeError("CLI crashed")
+        if failure == "blank_exception":
+            raise RuntimeError()
+        if failure == "malformed":
+            return subprocess.CompletedProcess([], 0, "not-json", "")
+        if failure == "nontext":
+            return subprocess.CompletedProcess([], 0, '{"result": {"error": "bad result"}}', "")
         if failure == "cancelled":
             raise asyncio.CancelledError()
         return subprocess.CompletedProcess([], 1 if failure == "exit" else 0,
@@ -155,7 +161,7 @@ async def test_watcher_failure_never_acknowledges(watcher_hub, monkeypatch, tmp_
             await watch.run_turn("bob", hub.message, {}, sessions_file=tmp_path / "sessions.json")
     else:
         assert await watch.run_turn("bob", hub.message, {}, sessions_file=tmp_path / "sessions.json") is None
-    assert hub.failures
+    assert hub.failures and all(hub.failures)
     assert not hub.message["acknowledged"]
     assert not hub.replies
 

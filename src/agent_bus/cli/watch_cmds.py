@@ -116,7 +116,7 @@ async def _run_cli(cmd: list[str], agent_id: str) -> subprocess.CompletedProcess
 
 async def _record_failure(client, agent_id: str, message_id: str, error: str) -> None:
     try:
-        response = await client.post(f"/inbox/{agent_id}/{message_id}/fail", json={"error": error[:500]})
+        response = await client.post(f"/inbox/{agent_id}/{message_id}/fail", json={"error": error.strip()[:500] or "CLI failed without error details"})
         response.raise_for_status()
     except Exception as exc:
         logger.warning("Could not record watcher failure: %s", exc)
@@ -159,6 +159,12 @@ async def run_turn(
                 output_data = json.loads(result.stdout)
             except json.JSONDecodeError:
                 output_data = None
+            if cli == "claude" and (
+                not isinstance(output_data, dict)
+                or not isinstance(output_data.get("result"), str)
+                or not output_data["result"].strip()
+            ):
+                raise RuntimeError("Claude CLI returned no successful text result")
             if isinstance(output_data, dict) and output_data.get("is_error"):
                 raise RuntimeError("CLI returned an error result")
             new_session = extract_session_id(result.stdout)

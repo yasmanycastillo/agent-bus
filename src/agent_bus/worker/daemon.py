@@ -184,7 +184,7 @@ class WorkerDaemon:
             return
         try:
             response = await self._client.post(
-                f"/inbox/{self.agent_id}/{message_id}/fail", json={"error": error[:500]},
+                f"/inbox/{self.agent_id}/{message_id}/fail", json={"error": error.strip()[:500] or "Runner failed without error details"},
             )
             response.raise_for_status()
         except Exception as exc:
