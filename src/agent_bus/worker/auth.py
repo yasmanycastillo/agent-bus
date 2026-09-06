@@ -111,10 +111,12 @@ class WorkerAuth:
     ) -> bool:
         """Verifica la firma de una operación.
 
-        Si ``public_key_hex`` no se pasa, usa la clave pública registrada del
-        agente (raíz de confianza local). Falla si el agente no está registrado.
+        Siempre usa la clave pública registrada localmente. Una clave enviada
+        por el cliente debe coincidir; nunca establece la raíz de confianza.
         """
-        key = public_key_hex or self.get_public_key(agent_id)
+        key = self.get_public_key(agent_id)
+        if public_key_hex is not None and public_key_hex != key:
+            return False
         if not key or not signature_hex:
             return False
         payload = canonical_payload(agent_id, method, path, body)
