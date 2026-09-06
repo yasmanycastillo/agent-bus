@@ -24,7 +24,7 @@ T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/
 | T-05 | P0 | Identidad y credenciales confiables | T-01 | completada | codex-security / codex-clients |
 | T-06 | P0 | Autorización de operaciones | T-03, T-05 | completada | codex-policy |
 | T-07 | P1 | Contrato de decisiones | T-01; cierre de identidad: T-05/T-06 | completada | codex-integrator |
-| T-08 | P1 | Confirmación, respuestas e idempotencia | T-02, T-05, T-06 | pendiente | — |
+| T-08 | P1 | Confirmación, respuestas e idempotencia | T-02, T-05, T-06 | completada | codex-integrator / codex-t08-storage / codex-t08-clients / codex-t08-workers |
 | T-09 | P1 | Eventos recuperables y espera acotada | T-08 | pendiente | — |
 | T-10 | P1 | SDK MCP y pruebas stdio | T-05, T-07, T-08, T-09 | pendiente | — |
 | T-11 | P1 | Aislamiento por proyecto y sesión | T-05, T-06 | pendiente | — |
@@ -104,14 +104,14 @@ Contrato funcional corregido en `b284c24`; identidad cerrada con `63a285e` + `e5
 
 ## T-08 — Ciclo completo de mensajes
 
-Agregar operaciones equivalentes a `read_messages(cursor, limit)`, `ack_messages`, `reply_message` e idempotencia de envío. Definir mensaje, conversación, correlación y entrega en el contrato.
+Agregar operaciones equivalentes a `read_messages(cursor, limit)`, `ack_messages`, `reply_message` e idempotencia de envío. Definir mensaje, conversación, correlación y entrega en el contrato. Implementación y migración: [messaging.md](docs/messaging.md).
 
-- [ ] Leer no confirma automáticamente; confirmar es explícito e idempotente.
-- [ ] Una respuesta conserva correlación con la solicitud y conversación.
-- [ ] Repetir un envío tras perder su respuesta no duplica el mensaje lógico.
-- [ ] Si el runner falla, el mensaje sigue recuperable y se registra el fallo.
-- [ ] Los mensajes confirmados no provocan un bucle infinito de espera/respuesta.
-- [ ] La paginación es estable y evita cargar el inbox completo en el contexto del agente.
+- [x] Leer no confirma automáticamente; confirmar es explícito e idempotente.
+- [x] Una respuesta conserva correlación con la solicitud y conversación.
+- [x] Repetir un envío tras perder su respuesta no duplica el mensaje lógico.
+- [x] Si el runner falla, el mensaje sigue recuperable y se registra el fallo.
+- [x] Los mensajes confirmados no provocan un bucle infinito de espera/respuesta.
+- [x] La paginación es estable y evita cargar el inbox completo en el contexto del agente.
 
 ## T-09 — Eventos recuperables y espera acotada
 
@@ -172,7 +172,7 @@ Elegir dos clientes reales y registrar versiones, configuración y evidencias. C
 - [ ] Fallos del runner no descartan mensajes; reintentos y límites persisten tras reiniciar.
 - [ ] Presupuestos y límites detienen o bloquean trabajo con estado observable, sin bucles silenciosos.
 - [ ] La continuación de sesión se verifica por cliente y se distingue de iniciar otro subproceso.
-- [ ] `submit` entrega el objetivo a los agentes previstos; revisar que el destinatario `*` con tipo `inbox` actual no se trate como un inbox literal. La prueba de CLI de T-01 comprueba la respuesta HTTP, no esta garantía de distribución.
+- [ ] `submit` entrega el objetivo a los agentes previstos. T-08 normaliza `*` como broadcast en el hub; falta la aceptación completa del objetivo por el equipo. La prueba de CLI de T-01 comprueba la respuesta HTTP, no todo ese flujo.
 
 ## T-15 — Integración Git, posterior al MVP
 
@@ -199,4 +199,22 @@ Elegir dos clientes reales y registrar versiones, configuración y evidencias. C
 | 2026-09-05 | T-07 | Completada: principal vinculado a herramientas y decisiones; schemas seguros sin actor elegible. Regresión de suplantación y persistencia contra hub real efímero en `7e58fe7`. |
 | 2026-09-05 | Integración segunda tanda | **303 passed**, dos avisos de deprecación WebSocket, en **45,63 s**, sobre código combinado `7e58fe7`. `UV_PROJECT_ENVIRONMENT=/home/Yasmany/src/agent-bus/.venv PYTHONPATH=$PWD/src uv run --no-sync pytest -q`; Bash/JavaScript y `git diff --check` correctos. Aceptación CLI → credenciales → create_app → MCP/HTTP en cinco pruebas. Sin cliente MCP externo ni navegador real todavía. |
 
-La segunda tanda se integra localmente a `main`. El hub de coordinación que ya estaba en ejecución conserva el proceso anterior; no se reinició ni se detuvieron listeners. Para activar la política en ese servicio, provisionar sus sesiones y reiniciar servidor/clientes con la configuración documentada. Próxima tanda recomendada: T-08, seguida por T-09.
+La segunda tanda se integra localmente a `main`. El hub de coordinación que ya estaba en ejecución conserva el proceso anterior; no se reinició ni se detuvieron listeners. Para activar la política en ese servicio, provisionar sus sesiones y reiniciar servidor/clientes con la configuración documentada. La siguiente tanda, T-08, se documenta a continuación.
+
+
+## Registro de T-08
+
+Completada en worktrees separados, integrados localmente a `main` después de verificar el código combinado:
+
+- `5ab3deb` (origen `371f42f`): secuencias y estados de entrega, migración, idempotencia, cursor firmado y reply+ack atómico. 36 pruebas dirigidas de almacenamiento.
+- `d5c139e` (origen `cf22a87`): herramientas MCP de respuesta/confirmación, páginas e idempotencia; CLI con claves recuperables e IDs completos.
+- `2d33fc7` (origen `a6acf45`): worker y watcher conservan fallos, consultan almacenamiento y confirman solo al guardar una respuesta.
+- `12e18fe` (origen `504a132`): errores JSON de Claude y cancelación del subproceso no producen confirmaciones incorrectas.
+- `607b678`: endpoints HTTP/WS autenticados, aprobación humana atómica y seis escenarios de aceptación/regresión con backend real o ASGI aislado.
+- `a774a8c`: watcher rechaza salida Claude malformada/no textual; fallos sin detalle conservan un error registrable.
+
+Validación final: **374 passed**, dos avisos de deprecación WebSocket, en **65,92 s** sobre `a774a8c`. Comando: `UV_PROJECT_ENVIRONMENT=/home/Yasmany/src/agent-bus/.venv PYTHONPATH=$PWD/src uv run --no-sync pytest -q`. `git diff --check` limpio. La revisión cruzada encontró y corrigió el caso de una entrega confirmada eliminada entre lectura y consulta de estado, además del error JSON con exit code cero y del subproceso que seguía vivo tras cancelar.
+
+Garantías delimitadas: conservar la clave al reintentar; HTTP sin clave sigue como compatibilidad; la retención de un padre limita respuestas posteriores; múltiples procesos de una misma identidad todavía requieren T-11. La idempotencia del envío no hace exactamente una vez los efectos externos del runner. Los tests no sustituyen T-13 con dos clientes MCP externos.
+
+**Siguiente tarea: T-09**, eventos recuperables y espera con plazo total acotado. El hub de coordinación previo conserva su proceso anterior; no se detuvieron listeners ni se migró ese servicio durante esta implementación.

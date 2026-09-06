@@ -42,7 +42,7 @@ Se trabajó en `.worktrees/codex-integrator`, `.worktrees/codex-broadcast`, `.wo
 
 ## Segunda tanda: T-05/T-06 y cierre de identidad T-07
 
-Validación combinada: **303 pruebas aprobadas** en 45,63 s sobre `7e58fe7`, con dos avisos de deprecación WebSocket. Incluye cinco escenarios de provisión CLI y MCP/HTTP contra `create_app` real efímero. Siguiente trabajo: T-08 (ack, respuestas correlacionadas e idempotencia), luego T-09.
+Validación combinada: **303 pruebas aprobadas** en 45,63 s sobre `7e58fe7`, con dos avisos de deprecación WebSocket. Incluye cinco escenarios de provisión CLI y MCP/HTTP contra `create_app` real efímero. T-08 se completó posteriormente; su resultado se describe en la sección siguiente.
 
 Decisión: sesiones Bearer locales persistentes, provisionadas por el operador del sistema operativo. Se retira Ed25519 como autenticación HTTP; no existe inscripción HTTP anónima ni fallback a una clave aportada por el solicitante. Ver [guía de provisión y migración](docs/authentication.md).
 
@@ -54,11 +54,26 @@ Decisión: sesiones Bearer locales persistentes, provisionadas por el operador d
 - La configuración admite directorio, base y proyecto explícitos por entorno; selección de identidad dinámica y rutas absolutas en subprocesos. `quickstart` todavía autoinicia solo 127.0.0.1:8420; otras URL deben tener hub iniciado explícitamente (T-11). Los clientes restringen credenciales al origen del hub y requieren HTTPS fuera de loopback. Cada proyecto debe usar una base separada: el namespace integral de T-11 sigue pendiente.
 - El panel recibe un token administrativo en un formulario y lo mantiene en memoria; usa `fetch` con Authorization para HTTP/SSE.
 
-El token puede reutilizarse hasta revocación/vencimiento; no aporta anti-replay por solicitud ni idempotencia (T-08). Tareas y locks continúan asociados al nombre del agente, sin leases por sesión (T-11/T-12). Compartir usuario Unix con acceso a todas las credenciales o a la base no protege frente a un agente malicioso.
+El token puede reutilizarse hasta revocación/vencimiento; por sí solo no aporta anti-replay por solicitud ni idempotencia. T-08 implementa esta última para envíos con clave, como se describe abajo. Tareas y locks continúan asociados al nombre del agente, sin leases por sesión (T-11/T-12). Compartir usuario Unix con acceso a todas las credenciales o a la base no protege frente a un agente malicioso.
 
 La suite legacy usa compatibilidad explícita; las pruebas nuevas de seguridad usan sesiones estrictas. La aceptación automatizada incluye provisión CLI y clientes MCP en proceso contra un hub efímero; no demuestra todavía interoperabilidad externa stdio ni el navegador completo (T-10/T-13).
 
 Worktrees de la tanda: `codex-security`, `codex-policy`, `codex-clients` e integrador. Se integran commits revisados y se verifica el código combinado antes de actualizar `main`; no se activa el integrador Git autónomo.
+
+## T-08 implementada: ciclo completo de mensajes
+
+Validación actual: **374 pruebas aprobadas** en 65,92 s sobre `a774a8c`, con dos avisos de deprecación WebSocket. Contratos, ejemplos y migración en [messaging.md](docs/messaging.md). Siguiente tarea: **T-09**.
+
+- Un mensaje lógico tiene ID, conversación y correlación con el mensaje al que responde. Cada destinatario tiene una entrega independiente, con secuencia durable, confirmación e historial de fallos.
+- Envíos con clave se deduplican por remitente y contenido en SQLite. Broadcast congela destinatarios; reintentar no abre una entrega confirmada. La clave debe conservarse en el cliente.
+- `GET /inbox/{agent}/messages` devuelve páginas con cursor firmado y límite superior de secuencia; no confirma. `/ack` confirma hasta 100 IDs sin efectos parciales. `/reply` deriva autor/destino/hilo y admite confirmación atómica explícita.
+- MCP incorpora `ack_messages` y `reply_message`. `read_messages` ahora devuelve `{messages, next_cursor}`; envío/respuesta requieren clave. CLI añade `work ack/reply`, claves recuperables y páginas con IDs completos.
+- Worker/watcher usan almacenamiento como fuente de pendientes y SSE como aviso. Un fallo conserva la entrega y registra error; un éxito guarda respuesta+ack. Claude `is_error` con exit0 no es éxito; cancelar recoge el subproceso directo.
+- Retención: se conservan secuencias y registros de idempotencia aunque se limpien entregas confirmadas; responder requiere que el padre siga disponible. HTTP sin clave es compatibilidad, sin garantía de idempotencia de request.
+
+No hay ejecución exactamente una vez de efectos externos ni exclusión entre procesos del mismo agente (T-11/T-14). La espera MCP sigue pendiente del plazo total/cancelación y recuperación de eventos de T-09/T-10. La aceptación con clientes MCP externos por stdio sigue en T-13.
+
+Worktrees: `codex-t08-storage`, `codex-t08-clients`, `codex-t08-workers` e integrador. Se integran commits revisados manualmente a `main`; los listeners permanecen activos y el hub de coordinación previo no se reinició.
 
 ## Orientación acordada para el trabajo
 

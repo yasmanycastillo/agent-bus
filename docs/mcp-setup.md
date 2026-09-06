@@ -38,7 +38,13 @@ responde por el bus.
 Implementado en `src/agent_bus/mcp/server.py` — stdio JSON-RPC 2.0. Tools:
 `wait_for_updates` (long-poll bloqueante: chequea pendientes o conecta al SSE
 `/events/{id}`), `post_message`, `read_messages`, `claim_task`, `complete_task`,
-`acquire_lock`, `release_lock`, `get_project_status`, `record_decision`.
+`acquire_lock`, `release_lock`, `get_project_status`, `record_decision`,
+`ack_messages` y `reply_message`.
+
+En T-08, `read_messages` devuelve `{messages, next_cursor}`. `post_message` y
+`reply_message` requieren una clave de idempotencia que se conserva al reintentar.
+Leer no confirma; usar `ack_messages` o `reply_message(..., acknowledge=true)`
+tras procesar el mensaje. Ver [el contrato y ejemplos](messaging.md).
 
 La sesión del agente la llama y queda esperando ahí; al llegar un mensaje/tarea,
 la tool lo devuelve y el agente lo procesa EN SU MISMA SESIÓN (contexto

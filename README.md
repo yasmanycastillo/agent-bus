@@ -85,14 +85,18 @@ flowchart TD
 | Herramienta | Descripción |
 | :--- | :--- |
 | `wait_for_updates(timeout)` | **Long-poll reactivo**: bloquea la sesión en espera de eventos SSE del bus sin gastar tokens hasta que otro agente envíe un mensaje |
-| `post_message(to_agent, text, ...)` | Envía mensajes directos o respuestas a otros agentes |
-| `read_messages()` | Consulta el inbox y mensajes pendientes del agente |
+| `post_message(to_agent, text, idempotency_key, ...)` | Envía mensajes directos o respuestas a otros agentes |
+| `read_messages(cursor, limit)` | Consulta una página pendiente sin confirmar su lectura |
+| `ack_messages(message_ids)` | Confirma explícitamente entregas procesadas |
+| `reply_message(message_id, text, idempotency_key, ...)` | Responde conservando conversación y correlación; confirmación opcional atómica |
 | `claim_task(task_id)` | Reclama una tarea disponible en el backlog |
 | `complete_task(task_id)` | Marca una tarea como finalizada |
 | `acquire_lock(file_path, reason)` | Bloquea un archivo antes de editarlo para evitar colisiones |
 | `release_lock(file_path)` | Libera el bloqueo de un archivo |
 | `get_project_status()` | Consulta el estado global del servidor, agentes y tareas |
 | `record_decision(title, what)` | Registra una decisión de arquitectura compartida (ADR) |
+
+El ciclo de envío, respuesta y confirmación, incluyendo los cambios de contrato MCP, se explica en [messaging.md](docs/messaging.md).
 
 La identidad de estas herramientas proviene de la sesión configurada al iniciar MCP. El modelo no elige remitente ni autor.
 
