@@ -849,7 +849,6 @@ class MessageBus:
 
     async def _event_response(self, request: Request, scope: str | None, subscribers: set):
         wake = asyncio.Event()
-        subscribers.add(wake)
         token = request.state.token
         cursor = request.headers.get("last-event-id", request.query_params.get("cursor"))
         try:
@@ -866,6 +865,9 @@ class MessageBus:
         async def event_generator():
             nonlocal cursor
             try:
+                # Register only when iteration starts: a disconnect while
+                # sending response headers must not retain an unused wake hint.
+                subscribers.add(wake)
                 if not await self._session_valid(token):
                     return
                 yield {"event": "checkpoint", "id": cursor, "data": json.dumps({"cursor": cursor})}

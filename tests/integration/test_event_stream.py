@@ -285,3 +285,17 @@ async def test_replay_drains_multiple_bounded_pages_without_duplicates(event_bus
         assert actual == expected
     assert max(limits) == 50
     assert limits.count(50) >= 2
+
+
+async def test_response_aborted_before_iteration_has_no_subscription(event_bus):
+    from starlette.requests import Request
+
+    bus, sessions = event_bus
+    scope = {"type": "http", "method": "GET", "path": "/inbox/alice/events", "query_string": b"",
+             "headers": [], "state": {"token": sessions["alice"]["token"]}}
+    response = await bus._event_response(Request(scope), "alice", bus._sse_subscribers["alice"])
+    # If ASGI closes while sending headers, the body iterator may never start.
+    # Closing such an unstarted generator does not execute its finally block.
+    assert not bus._sse_subscribers["alice"]
+    await response.body_iterator.aclose()
+    assert not bus._sse_subscribers["alice"]
