@@ -382,14 +382,47 @@ def work_check():
         raise SystemExit(1)
 
 
+def _message_key(value: str | None) -> str:
+    from uuid import uuid4
+
+    key = value if value is not None else str(uuid4())
+    if not 1 <= len(key) <= 128:
+        raise click.BadParameter("Debe contener entre 1 y 128 caracteres", param_hint="--idempotency-key")
+    # Print before any network request, including failures or ambiguous timeouts.
+    click.echo(f"Clave de reintento: {key}")
+    return key
+
+
+def _inbox_page(client, agent: str, *, cursor: str | None = None, limit: int = 50):
+    params = {"limit": limit}
+    if cursor is not None:
+        params["cursor"] = cursor
+    response = client.get(f"/inbox/{agent}/messages", params=params)
+    if response.status_code != 200:
+        raise click.ClickException(_explain_error(response))
+    return response.json()
+
+
+def _print_page(page, agent: str):
+    if page["messages"]:
+        print_inbox_list(page["messages"], agent)
+    else:
+        click.echo("Inbox vacio")
+    if page.get("next_cursor"):
+        click.echo(f"Siguiente cursor: {page['next_cursor']}")
+        click.echo("Continua con: agent-bus work inbox --cursor <cursor>")
+
+
 @work.command("msg")
 @click.argument("to_agent")
 @click.argument("text")
 @click.option("--reply-needed", is_flag=True, help="Requiere respuesta")
 @click.option("--task", default=None, help="Tarea relacionada")
-def work_msg(to_agent: str, text: str, reply_needed: bool, task: str | None):
+@click.option("--idempotency-key", default=None, help="Reutiliza la misma clave al reintentar el envío")
+def work_msg(to_agent: str, text: str, reply_needed: bool, task: str | None, idempotency_key: str | None):
     """Enviar mensaje a otro agente."""
     agent = _require_agent()
+    key = _message_key(idempotency_key)
     with _client() as client:
         resp = client.post(
             "/messages",
@@ -400,19 +433,56 @@ def work_msg(to_agent: str, text: str, reply_needed: bool, task: str | None):
                 "body": {"text": text},
                 "reply_needed": reply_needed,
                 "related_task": task,
+                "idempotency_key": key,
             },
         )
         data = resp.json()
         if resp.status_code == 200:
             click.echo(f"Mensaje enviado (id: {data.get('message_id', '?')[:8]})")
         else:
-            click.echo(f"Error: {data}")
+            raise click.ClickException(_explain_error(resp))
+
+
+@work.command("reply")
+@click.argument("message_id")
+@click.argument("text")
+@click.option("--idempotency-key", default=None, help="Reutiliza la clave al reintentar la respuesta")
+@click.option("--reply-needed", is_flag=True, help="La respuesta requiere otra respuesta")
+@click.option("--ack", "acknowledge", is_flag=True, help="Confirmar también el mensaje original")
+def work_reply(message_id: str, text: str, idempotency_key: str | None, reply_needed: bool, acknowledge: bool):
+    """Responder a un mensaje conservando la conversación."""
+    agent = _require_agent()
+    key = _message_key(idempotency_key)
+    with _client() as client:
+        response = client.post(f"/inbox/{agent}/{message_id}/reply", json={
+            "body": {"text": text}, "idempotency_key": key,
+            "reply_needed": reply_needed, "acknowledge": acknowledge,
+        })
+        if response.status_code != 200:
+            raise click.ClickException(_explain_error(response))
+        click.echo(f"Respuesta enviada (id: {response.json()['message_id']})")
+
+
+@work.command("ack")
+@click.argument("message_ids", nargs=-1, required=True)
+def work_ack(message_ids: tuple[str, ...]):
+    """Confirmar uno o varios mensajes procesados (máximo 100)."""
+    if len(message_ids) > 100:
+        raise click.BadParameter("Confirma como máximo 100 mensajes por llamada")
+    agent = _require_agent()
+    with _client() as client:
+        response = client.post(f"/inbox/{agent}/ack", json={"message_ids": list(message_ids)})
+        if response.status_code != 200:
+            raise click.ClickException(_explain_error(response))
+        click.echo(f"Confirmados: {', '.join(response.json()['acknowledged'])}")
 
 
 @work.command("inbox")
 @click.option("--read", "msg_id", default=None, help="Leer mensaje especifico")
 @click.option("--archive", "archive_id", default=None, help="Archivar mensaje")
-def work_inbox(msg_id: str | None, archive_id: str | None):
+@click.option("--cursor", default=None, help="Cursor de la página siguiente")
+@click.option("--limit", default=50, type=click.IntRange(1, 100), show_default=True)
+def work_inbox(msg_id: str | None, archive_id: str | None, cursor: str | None, limit: int):
     """Ver inbox del agente actual."""
     agent = _require_agent()
     with _client() as client:
@@ -431,12 +501,7 @@ def work_inbox(msg_id: str | None, archive_id: str | None):
             else:
                 click.echo("Mensaje no encontrado")
             return
-        resp = client.get(f"/inbox/{agent}")
-        messages = resp.json()
-        if not messages:
-            click.echo("Inbox vacio")
-        else:
-            print_inbox_list(messages, agent)
+        _print_page(_inbox_page(client, agent, cursor=cursor, limit=limit), agent)
 
 
 @work.command("decide")
@@ -526,7 +591,7 @@ def show_dashboard():
     with _client() as client:
         status = client.get("/status").json()
         tasks = client.get("/tasks").json()
-        inbox = client.get(f"/inbox/{agent}").json() if agent else []
+        inbox = _inbox_page(client, agent, limit=20)["messages"] if agent else []
         locks = client.get("/locks").json()
         decisions = client.get("/decisions").json()
         agents = client.get("/agents").json()
@@ -555,7 +620,7 @@ def top_cmd(interval: float, once: bool):
         with _client() as client:
             status = client.get("/status").json()
             tasks = client.get("/tasks").json()
-            inbox = client.get(f"/inbox/{agent}").json() if agent else []
+            inbox = _inbox_page(client, agent, limit=20)["messages"] if agent else []
             locks = client.get("/locks").json()
             decisions = client.get("/decisions").json()
             agents = client.get("/agents").json()
@@ -671,18 +736,16 @@ def show_tasks(task_status: str | None, owner: str | None):
 
 @show.command("inbox")
 @click.argument("agent_id", required=False)
-def show_inbox(agent_id: str | None):
+@click.option("--cursor", default=None)
+@click.option("--limit", default=50, type=click.IntRange(1, 100), show_default=True)
+def show_inbox(agent_id: str | None, cursor: str | None, limit: int):
     """Ver inbox de un agente."""
     agent = agent_id or get_current_agent()
     if not agent:
         click.echo("Especifica un agente o ejecuta 'agent-bus setup'")
         return
     with _client() as client:
-        messages = client.get(f"/inbox/{agent}").json()
-        if not messages:
-            click.echo(f"Inbox vacio ({agent})")
-        else:
-            print_inbox_list(messages, agent)
+        _print_page(_inbox_page(client, agent, cursor=cursor, limit=limit), agent)
 
 
 @show.command("locks")
@@ -825,9 +888,9 @@ def hook_inbox(bus_url: str, agent_id: str | None):
         if not actor:
             return
         with sync_bus_client(actor, base_url=bus_url, timeout=3) as client:
-            response = client.get(f"/inbox/{actor}")
+            response = client.get(f"/inbox/{actor}/messages", params={"reply_needed": True, "limit": 3})
             response.raise_for_status()
-            messages = response.json()
+            messages = response.json()["messages"]
         pending = [message for message in messages if message.get("reply_needed")]
         if not pending:
             return
@@ -836,8 +899,8 @@ def hook_inbox(bus_url: str, agent_id: str | None):
             for message in pending[-3:]
         ]
         reason = (
-            f"Tienes {len(pending)} mensaje(s) en agent-bus que requieren respuesta. "
-            "Lee: agent-bus work inbox; responde: agent-bus work msg <agente> \"<respuesta>\".\n"
+            f"Hay mensajes en agent-bus que requieren respuesta (mostrando {len(pending)}). "
+            "Lee: agent-bus work inbox; responde: agent-bus work reply <message_id> \"<respuesta>\" --ack.\n"
             + "\n".join(lines)
         )
         click.echo(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))

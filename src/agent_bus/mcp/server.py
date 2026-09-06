@@ -17,7 +17,7 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from pydantic import BaseModel, Field, StrictStr
+from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr
 
 from agent_bus.security import async_bus_client, load_session
 
@@ -35,6 +35,36 @@ class DecisionToolArguments(BaseModel):
     what: StrictStr = Field(min_length=1, description="Descripción de la decisión")
     decided_by: StrictStr = Field(min_length=1, description="Agente responsable")
     context: StrictStr = Field(default="", description="Contexto adicional")
+
+
+class PostMessageArguments(BaseModel):
+    from_agent: StrictStr
+    to_agent: StrictStr = Field(min_length=1)
+    text: StrictStr
+    idempotency_key: StrictStr = Field(min_length=1, max_length=128, description="Conserva esta clave al reintentar el mismo envío")
+    reply_needed: StrictBool = False
+    related_task: StrictStr | None = None
+
+
+class ReadMessagesArguments(BaseModel):
+    agent_id: StrictStr
+    cursor: StrictStr | None = None
+    limit: StrictInt = Field(default=50, ge=1, le=100)
+    reply_needed: StrictBool | None = None
+
+
+class AckMessagesArguments(BaseModel):
+    agent_id: StrictStr
+    message_ids: list[StrictStr] = Field(min_length=1, max_length=100)
+
+
+class ReplyMessageArguments(BaseModel):
+    agent_id: StrictStr
+    message_id: StrictStr = Field(min_length=1)
+    text: StrictStr
+    idempotency_key: StrictStr = Field(min_length=1, max_length=128)
+    reply_needed: StrictBool = False
+    acknowledge: StrictBool = False
 
 
 TOOLS_DEFINITIONS = [
@@ -59,36 +89,23 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "post_message",
-        "description": "Enviar un mensaje directo a otro agente a través del bus.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "from_agent": {"type": "string", "description": "Remitente"},
-                "to_agent": {"type": "string", "description": "Destinatario"},
-                "text": {"type": "string", "description": "Contenido del mensaje"},
-                "reply_needed": {
-                    "type": "boolean",
-                    "description": "Si el mensaje requiere respuesta obligatoria",
-                    "default": False,
-                },
-                "related_task": {
-                    "type": "string",
-                    "description": "ID de la tarea relacionada (opcional)",
-                },
-            },
-            "required": ["from_agent", "to_agent", "text"],
-        },
+        "description": "Enviar un mensaje; conserva idempotency_key para reintentos del mismo contenido.",
+        "inputSchema": PostMessageArguments.model_json_schema(),
     },
     {
         "name": "read_messages",
-        "description": "Leer los mensajes pendientes o recientes del inbox de un agente.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string", "description": "ID del agente"},
-            },
-            "required": ["agent_id"],
-        },
+        "description": "Leer una página del inbox pendiente sin confirmar mensajes. Continúa con next_cursor.",
+        "inputSchema": ReadMessagesArguments.model_json_schema(),
+    },
+    {
+        "name": "ack_messages",
+        "description": "Confirmar explícitamente mensajes procesados. Repetir la confirmación es seguro.",
+        "inputSchema": AckMessagesArguments.model_json_schema(),
+    },
+    {
+        "name": "reply_message",
+        "description": "Responder al mensaje original conservando conversación. acknowledge=true confirma el original al guardar la respuesta.",
+        "inputSchema": ReplyMessageArguments.model_json_schema(),
     },
     {
         "name": "claim_task",
@@ -247,21 +264,40 @@ class McpServer:
                 return await self._wait_for_updates(agent_id, timeout)
 
             elif name == "post_message":
+                message = PostMessageArguments.model_validate(args)
                 payload = {
-                    "from_agent": args["from_agent"],
-                    "to_agent": args["to_agent"],
+                    "from_agent": message.from_agent,
+                    "to_agent": message.to_agent,
                     "message_type": "inbox",
-                    "body": {"text": args["text"]},
-                    "reply_needed": bool(args.get("reply_needed", False)),
-                    "related_task": args.get("related_task"),
+                    "body": {"text": message.text},
+                    "idempotency_key": message.idempotency_key,
+                    "reply_needed": message.reply_needed,
+                    "related_task": message.related_task,
                 }
                 resp = await client.post("/messages", json=payload)
                 resp.raise_for_status()
                 return resp.json()
 
             elif name == "read_messages":
-                agent_id = args["agent_id"]
-                resp = await client.get(f"/inbox/{agent_id}")
+                page = ReadMessagesArguments.model_validate(args)
+                params = page.model_dump(exclude={"agent_id"}, exclude_none=True)
+                resp = await client.get(f"/inbox/{page.agent_id}/messages", params=params)
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "ack_messages":
+                ack = AckMessagesArguments.model_validate(args)
+                resp = await client.post(f"/inbox/{ack.agent_id}/ack", json={"message_ids": ack.message_ids})
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "reply_message":
+                reply = ReplyMessageArguments.model_validate(args)
+                payload = {
+                    "body": {"text": reply.text}, "idempotency_key": reply.idempotency_key,
+                    "reply_needed": reply.reply_needed, "acknowledge": reply.acknowledge,
+                }
+                resp = await client.post(f"/inbox/{reply.agent_id}/{reply.message_id}/reply", json=payload)
                 resp.raise_for_status()
                 return resp.json()
 
@@ -338,24 +374,17 @@ class McpServer:
         # 1. Chequeo rápido de pendientes existentes
         async with self._client(timeout=10.0) as client:
             try:
-                response = await client.get(f"/inbox/{agent_id}/pending")
+                response = await client.get(f"/inbox/{agent_id}/messages", params={"limit": 5})
                 response.raise_for_status()
-                pending = response.json()
-                if pending.get("count", 0) > 0:
-                    # solo reply_needed (requieren acción) y acotado a 5 para
-                    # no saturar el contexto de la sesión despertada
-                    response = await client.get(f"/inbox/{agent_id}")
-                    response.raise_for_status()
-                    inbox = response.json()
-                    actionable = [
-                        m for m in inbox if m.get("reply_needed")
-                    ][:5] or inbox[-5:]
+                page = response.json()
+                messages = page["messages"]
+                if messages:
                     return {
                         "status": "pending_messages",
-                        "count": pending["count"],
-                        "total_in_inbox": len(inbox),
-                        "messages": actionable,
-                        "hint": "usa read_messages para ver el inbox completo",
+                        "count": len(messages),
+                        "messages": messages,
+                        "next_cursor": page.get("next_cursor"),
+                        "hint": "Procesa y confirma con ack_messages; continúa con read_messages y next_cursor.",
                     }
             except Exception as exc:
                 return {"status": "error", "error": str(exc)}

@@ -52,7 +52,7 @@ async def test_mcp_binds_actor_and_token_at_startup(credentials, monkeypatch):
         requests.append(request)
         return httpx.Response(200, json=json.loads(request.content))
     install_transport(monkeypatch, mcp, handle)
-    message = await server.execute_tool("post_message", {"to_agent": "bob", "text": "Review"})
+    message = await server.execute_tool("post_message", {"to_agent": "bob", "text": "Review", "idempotency_key": "session-bound"})
     assert message["from_agent"] == "alice"
     assert requests[0].headers["Authorization"] == f"Bearer {credentials['alice'][0]['token']}"
     with pytest.raises(ValueError, match="authenticated MCP session"):
@@ -172,20 +172,30 @@ async def test_watcher_response_and_child_share_session(credentials, monkeypatch
         returncode = 0
         stdout = '{"session_id":"thread-session","result":"Reviewed"}'
         stderr = ''
-    def run(*args, **kwargs):
-        captured["env"] = kwargs["env"]
+    async def run(cmd, agent_id):
+        captured["env"] = watch.worker_environment(agent_id)
         return Result()
     def handle(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={
+                "message_id": "incoming", "from_agent": "bob", "body": {"text": "Review"},
+                "conversation_id": "c1", "acknowledged": False,
+            })
         captured["request"] = request
         return httpx.Response(200, json={"message_id": "reply"})
     monkeypatch.setattr(watch.shutil, "which", lambda _: "/unused")
-    monkeypatch.setattr(watch.subprocess, "run", run)
+    monkeypatch.setattr(watch, "_run_cli", run)
     install_transport(monkeypatch, watch, handle)
     await watch.run_turn("alice", {"message_id": "incoming", "from_agent": "bob", "body": {"text": "Review"}},
                          {}, sessions_file=tmp_path / "watch.json")
     assert captured["env"]["AGENT_BUS_SESSION_FILE"] == str(credentials["alice"][1])
     assert captured["request"].headers["Authorization"] == f"Bearer {credentials['alice'][0]['token']}"
-    assert json.loads(captured["request"].content)["from_agent"] == "alice"
+    assert captured["request"].url.path == "/inbox/alice/incoming/reply"
+    payload = json.loads(captured["request"].content)
+    assert payload["idempotency_key"] == "watch-reply:incoming"
+    assert payload["acknowledge"] is True
+    assert payload["body"]["text"] == "Reviewed"
+    assert "from_agent" not in payload
 
 
 def test_team_explicit_admin_never_falls_back_to_unsigned(credentials, monkeypatch):
@@ -268,7 +278,7 @@ def test_hook_uses_installed_entrypoint_without_system_package(credentials, monk
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             requests.append((self.path, self.headers.get("Authorization")))
-            body = json.dumps([{"from_agent": "bob", "reply_needed": True, "body": {"text": "Please review"}}]).encode()
+            body = json.dumps({"messages": [{"from_agent": "bob", "reply_needed": True, "body": {"text": "Please review"}}], "next_cursor": None}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -299,7 +309,7 @@ def test_hook_uses_installed_entrypoint_without_system_package(credentials, monk
         result = subprocess.run(["/bin/bash", str(hook)], env=env, capture_output=True, text=True, timeout=8)
         assert result.returncode == 0
         assert json.loads(result.stdout)["decision"] == "block", result.stderr
-        assert requests == [("/inbox/alice", f"Bearer {credentials['alice'][0]['token']}")]
+        assert requests == [("/inbox/alice/messages?reply_needed=true&limit=3", f"Bearer {credentials['alice'][0]['token']}")]
     finally:
         server.shutdown()
         server.server_close()

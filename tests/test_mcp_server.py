@@ -26,6 +26,8 @@ async def test_mcp_tools_list():
     tool_names = [t["name"] for t in tools]
     assert "wait_for_updates" in tool_names
     assert "post_message" in tool_names
+    assert "ack_messages" in tool_names
+    assert "reply_message" in tool_names
     assert "claim_task" in tool_names
     assert "acquire_lock" in tool_names
 
@@ -57,9 +59,11 @@ async def test_mcp_message_tools_against_real_hub(live_bus_url):
     server = McpServer(bus_url=live_bus_url)
     sent = await call_tool(server, "post_message", {
         "from_agent": "claude", "to_agent": "reviewer", "text": "Please review",
-        "reply_needed": True, "related_task": "T1",
+        "reply_needed": True, "related_task": "T1", "idempotency_key": "review-request",
     })
-    inbox = await call_tool(server, "read_messages", {"agent_id": "reviewer"})
+    page = await call_tool(server, "read_messages", {"agent_id": "reviewer"})
+    inbox = page["messages"]
+    assert page["next_cursor"] is None
     assert len(inbox) == 1
     assert inbox[0]["message_id"] == sent["message_id"]
     assert inbox[0]["body"]["text"] == "Please review"
@@ -67,6 +71,15 @@ async def test_mcp_message_tools_against_real_hub(live_bus_url):
     pending = await call_tool(server, "wait_for_updates", {"agent_id": "reviewer"})
     assert pending["status"] == "pending_messages"
     assert pending["messages"] == inbox
+    replied = await call_tool(server, "reply_message", {
+        "agent_id": "reviewer", "message_id": sent["message_id"], "text": "Reviewed",
+        "idempotency_key": "review-reply", "acknowledge": True,
+    })
+    assert replied["conversation_id"] == sent["conversation_id"]
+    assert (await call_tool(server, "read_messages", {"agent_id": "reviewer"}))["messages"] == []
+    assert (await call_tool(server, "ack_messages", {
+        "agent_id": "reviewer", "message_ids": [sent["message_id"]],
+    }))["acknowledged"] == [sent["message_id"]]
 
 
 async def test_mcp_coordination_tools_against_real_hub(live_bus_url):

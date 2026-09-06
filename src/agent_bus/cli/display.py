@@ -121,7 +121,7 @@ def print_tasks_table(tasks: list[dict]) -> None:
 
 def print_inbox_list(messages: list[dict], agent_id: str) -> None:
     table = Table(title=f"Inbox ({agent_id})", show_header=True, header_style="bold")
-    table.add_column("ID", style="dim", width=8)
+    table.add_column("ID", style="dim", no_wrap=True, overflow="ignore", min_width=36)
     table.add_column("De", style="cyan", width=10)
     table.add_column("Tipo", style="green", width=10)
     table.add_column("Reply?", style="yellow", width=6)
@@ -129,7 +129,7 @@ def print_inbox_list(messages: list[dict], agent_id: str) -> None:
     for m in messages:
         body_text = str(m.get("body", {}))[:60]
         table.add_row(
-            m["message_id"][:8],
+            m["message_id"],
             m["from_agent"],
             m["message_type"],
             "Si" if m.get("reply_needed") else "No",
