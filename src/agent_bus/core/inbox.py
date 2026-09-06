@@ -45,8 +45,8 @@ class InboxManager:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    async def _transaction(self, operation):
-        return await self._db.transaction(operation)
+    async def _transaction(self, operation, *, write=True):
+        return await self._db.transaction(operation, write=write)
 
     @staticmethod
     def _insert_delivery(connection, envelope: Envelope):
@@ -224,7 +224,7 @@ class InboxManager:
                 "latest_summary": [{"from": row[0], "text": str(json.loads(row[1]) if row[1] else None)[:60]}
                                    for row in reversed(latest[:3])],
             }
-        return await self._transaction(operation)
+        return await self._transaction(operation, write=False)
 
     async def delivery_state(self, agent_id: str, message_id: str) -> dict | None:
         rows = await self._db.conn.execute_fetchall(
@@ -315,7 +315,7 @@ class InboxManager:
                 next_cursor = self._encode_cursor(position, secret)
             return {"messages": messages, "next_cursor": next_cursor}
 
-        return await self._transaction(operation)
+        return await self._transaction(operation, write=False)
 
     async def cleanup_expired(self, max_age_days: int = 30) -> int:
         def operation(connection):

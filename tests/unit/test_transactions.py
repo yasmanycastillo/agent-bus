@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from contextlib import closing
 from datetime import datetime, timezone
 
@@ -15,10 +16,12 @@ from agent_bus.types import Envelope, MessageType
 from agent_bus.worker.gatekeeper import ReviewDecision, Verdict
 
 
-@pytest.fixture(params=['file', 'memory', 'temporary', 'uri'])
+@pytest.fixture(params=['file', 'memory', 'temporary', 'uri', 'anonymous_uri', 'named_uri', 'encoded_uri'])
 async def db(request, tmp_path):
     paths = {'file': str(tmp_path / 'transactions.db'), 'memory': ':memory:',
-             'temporary': '', 'uri': f'file:{tmp_path}/named?mode=memory&cache=shared'}
+             'temporary': '', 'uri': f'file:{tmp_path}/named?mode=memory&cache=shared',
+             'anonymous_uri': 'file::memory:', 'named_uri': f'file:{tmp_path}/named?mode=memory',
+             'encoded_uri': f'file:{tmp_path}/encoded?mode=mem%6fry'}
     database = Database(paths[request.param])
     await database.initialize()
     try:
@@ -176,3 +179,229 @@ async def test_memory_databases_are_isolated():
     finally:
         await first.close()
         await second.close()
+
+
+@pytest.mark.parametrize('uri', [
+    'file::memory:?cache=private', 'file:named?mode=memory&cache=private',
+    'file:named?cache=shared&mode=memory&cache=private',
+    'file:%3Amemory%3A?cache=private',
+])
+def test_private_memory_cache_is_rejected(uri):
+    with pytest.raises(ValueError, match='cache=private'):
+        Database(uri)
+
+
+@pytest.mark.parametrize('uri, expected', [
+    ('file::memory:', 'file::memory:?cache=shared'),
+    ('file::memory:?cache=shared', 'file::memory:?cache=shared'),
+    ('file:named?mode=memory', 'file:named?mode=memory&cache=shared'),
+    ('file:named?mode=memory#fragment', 'file:named?mode=memory&cache=shared#fragment'),
+    ('file:disk?cache=private', 'file:disk?cache=private'),
+])
+def test_memory_uri_normalization(uri, expected):
+    assert Database(uri).db_path == expected
+
+
+@pytest.mark.parametrize('fail', [False, True])
+async def test_cancellation_waits_for_commit_or_rollback_and_close(db, monkeypatch, fail):
+    loop = asyncio.get_running_loop()
+    started, close_started = asyncio.Event(), asyncio.Event()
+    release_operation, release_close = threading.Event(), threading.Event()
+    closed = []
+    connect = sqlite3.connect
+
+    class ObservedConnection(sqlite3.Connection):
+        def close(self):
+            loop.call_soon_threadsafe(close_started.set)
+            assert release_close.wait(5)
+            super().close()
+            closed.append(True)
+
+    monkeypatch.setattr(sqlite3, 'connect',
+                        lambda *args, **kwargs: connect(*args, **kwargs, factory=ObservedConnection))
+
+    def operation(connection):
+        connection.execute("INSERT INTO reputation(agent_id) VALUES ('cancelled')")
+        loop.call_soon_threadsafe(started.set)
+        assert release_operation.wait(5)
+        if fail:
+            raise ValueError('injected failure after cancellation')
+
+    pending = asyncio.create_task(db.transaction(operation))
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        pending.cancel()
+        await asyncio.sleep(0)  # Deliver cancellation while the callback is held.
+        assert not pending.done()
+        assert len(db._workers) == 1
+        release_operation.set()
+        await asyncio.wait_for(close_started.wait(), 3)
+        pending.cancel()  # Repeated cancellation must not skip connection.close().
+        await asyncio.sleep(0)
+        assert not pending.done()
+        with closing(connect(db.db_path, uri=True)) as fresh:
+            assert fresh.execute("SELECT COUNT(*) FROM reputation WHERE agent_id='cancelled'").fetchone() == (
+                int(not fail),)
+    finally:
+        release_operation.set()
+        release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(pending, 3)
+    assert closed == [True]
+    assert not db._workers
+
+
+async def test_concurrent_close_waits_for_every_dispatched_worker(db, monkeypatch):
+    loop = asyncio.get_running_loop()
+    connecting = [asyncio.Event(), asyncio.Event()]
+    release = [threading.Event(), threading.Event()]
+    guard = threading.Lock()
+    dispatched = []
+    closed = []
+    connect = sqlite3.connect
+
+    class ObservedConnection(sqlite3.Connection):
+        def close(self):
+            super().close()
+            closed.append(True)
+
+    def held_connect(*args, **kwargs):
+        with guard:
+            index = len(dispatched)
+            dispatched.append(index)
+        loop.call_soon_threadsafe(connecting[index].set)
+        assert release[index].wait(5)
+        return connect(*args, **kwargs, factory=ObservedConnection)
+
+    monkeypatch.setattr(sqlite3, 'connect', held_connect)
+    workers = [asyncio.create_task(db.transaction(
+        lambda conn: conn.execute('SELECT COUNT(*) FROM reputation').fetchone()[0], write=False,
+    )) for _ in range(2)]
+    closers = []
+    try:
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in connecting)), 3)
+        assert len(db._workers) == 2
+        anchor = db.conn
+        closers = [asyncio.create_task(db.close()) for _ in range(2)]
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match='closing'):
+            await db.transaction(lambda conn: None)
+        with pytest.raises(RuntimeError, match='closing'):
+            await db.initialize()
+        closers[0].cancel()
+        await asyncio.sleep(0)
+        assert all(not task.done() for task in closers)
+        release[0].set()
+        await asyncio.wait_for(asyncio.wait(workers, return_when=asyncio.FIRST_COMPLETED), 3)
+        assert len(closed) == 1
+        assert all(not task.done() for task in closers)
+        assert await anchor.execute_fetchall('SELECT 1')
+    finally:
+        for event in release:
+            event.set()
+        results = await asyncio.wait_for(asyncio.gather(*workers, *closers, return_exceptions=True), 3)
+    assert results[:2] == [0, 0]
+    assert isinstance(results[2], asyncio.CancelledError)
+    assert results[3] is None
+    assert len(closed) == 2
+    assert not db._workers
+    assert db._connection is None
+    with pytest.raises(ValueError, match='no active connection'):
+        await anchor.execute('SELECT 1')
+    await db.close()
+
+
+async def test_reinitialize_after_close_starts_a_new_lifecycle(db):
+    await db.close()
+    with pytest.raises(RuntimeError, match='closed'):
+        await db.transaction(lambda conn: None)
+    await db.initialize()
+    anchor = db.conn
+    assert await db.transaction(lambda conn: conn.execute('SELECT 42').fetchone()[0]) == 42
+    await db.close()
+    with pytest.raises(ValueError, match='no active connection'):
+        await anchor.execute('SELECT 1')
+
+
+@pytest.mark.parametrize('method', ['page', 'pending_summary'])
+async def test_inbox_read_does_not_wait_for_reserved_writer(tmp_path, method):
+    database = Database(str(tmp_path / 'reader.db'))
+    await database.initialize()
+    inbox = InboxManager(database)
+    env = envelope()
+    await inbox.deliver(env)
+    try:
+        await database.conn.execute('BEGIN IMMEDIATE')
+        await database.conn.execute('UPDATE inbox SET archived=1')
+        result = await asyncio.wait_for(getattr(inbox, method)('bob'), 2)
+        if method == 'page':
+            assert [message['message_id'] for message in result['messages']] == [env.message_id]
+        else:
+            assert result['count'] == 1
+    finally:
+        await database.conn.rollback()
+        await database.close()
+
+
+async def test_read_snapshot_does_not_reserve_writer(tmp_path):
+    database = Database(str(tmp_path / 'snapshot.db'))
+    await database.initialize()
+    async with database.conn.execute('PRAGMA journal_mode=WAL') as cursor:
+        assert (await cursor.fetchone())[0] == 'wal'
+    loop = asyncio.get_running_loop()
+    started, release = asyncio.Event(), threading.Event()
+
+    def read(connection):
+        before = connection.execute('SELECT COUNT(*) FROM reputation').fetchone()[0]
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5)
+        after = connection.execute('SELECT COUNT(*) FROM reputation').fetchone()[0]
+        return before, after
+
+    reader = asyncio.create_task(database.transaction(read, write=False))
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        await asyncio.wait_for(database.transaction(
+            lambda conn: conn.execute("INSERT INTO reputation(agent_id) VALUES ('writer')").rowcount,
+        ), 2)
+    finally:
+        release.set()
+        result = await asyncio.wait_for(reader, 3)
+        await database.close()
+    assert result == (0, 0)
+
+
+async def test_read_transaction_rejects_writes(db):
+    with pytest.raises(sqlite3.OperationalError, match='readonly'):
+        await db.transaction(lambda conn: conn.execute("INSERT INTO reputation(agent_id) VALUES ('no')"), write=False)
+
+
+@pytest.mark.parametrize('code', [None, 'invalid', sqlite3.SQLITE_ERROR,
+                                       sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
+                                       sqlite3.SQLITE_LOCKED | (1 << 8)])
+async def test_begin_error_codes(db, monkeypatch, code):
+    error = sqlite3.OperationalError('injected')
+    if code is not None:
+        error.sqlite_errorcode = code
+    connect = sqlite3.connect
+    attempts = []
+
+    class FailingBegin(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql == 'BEGIN IMMEDIATE':
+                attempts.append(sql)
+                if len(attempts) == 1:
+                    raise error
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(sqlite3, 'connect', lambda *a, **kw: connect(*a, **kw, factory=FailingBegin))
+    def operation(conn):
+        return conn.execute('SELECT 42').fetchone()[0]
+    if isinstance(code, int) and (code & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        assert await db.transaction(operation) == 42
+        assert len(attempts) == 2
+    else:
+        with pytest.raises(sqlite3.OperationalError) as caught:
+            await db.transaction(operation)
+        assert caught.value is error
+        assert len(attempts) == 1

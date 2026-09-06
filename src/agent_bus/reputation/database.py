@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 
 INBOX_SCHEMA = """
@@ -206,10 +207,29 @@ class Database:
             f"file:agent-bus-{secrets.token_hex(16)}?mode=memory&cache=shared"
             if db_path in ("", ":memory:") else db_path
         )
+        if self.db_path.startswith("file:"):
+            uri = urlsplit(self.db_path)
+            parameters = parse_qsl(uri.query, keep_blank_values=True)
+            if unquote(uri.path) == ":memory:" or ("mode", "memory") in parameters:
+                caches = [value for key, value in parameters if key == "cache"]
+                if any(value != "shared" for value in caches):
+                    raise ValueError("In-memory transactions require cache=shared; cache=private is unsupported")
+                if not caches:
+                    base, marker, fragment = self.db_path.partition("#")
+                    self.db_path = base + ("&" if "?" in base else "?") + "cache=shared" + marker + fragment
         self.project_id = project_id
         self._connection: aiosqlite.Connection | None = None
+        self._workers: set[asyncio.Task] = set()
+        self._closing = False
+        self._close_task: asyncio.Task | None = None
 
     async def initialize(self) -> None:
+        if self._closing:
+            if self._close_task is None or not self._close_task.done():
+                raise RuntimeError("Database is closing")
+            self._close_task.result()
+            self._close_task = None
+            self._closing = False
         if not self.db_path.startswith("file:"):
             self.db_path = str(Path(self.db_path).absolute())
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -377,29 +397,57 @@ class Database:
             await self.conn.rollback()
             raise
 
-    async def transaction(self, operation):
+    @staticmethod
+    async def _wait_for_worker(worker):
+        """Defer even repeated cancellation until the worker has cleaned up."""
+        cancelled = None
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+            except BaseException:
+                break
+        if cancelled is not None:
+            # Retrieve a possible failure so cancellation does not leak an
+            # unobserved task exception. Cancellation takes precedence.
+            try:
+                worker.result()
+            except BaseException:
+                pass
+            raise cancelled
+        return worker.result()
+
+    async def transaction(self, operation, *, write=True):
         """Run a synchronous callback in its own committed transaction.
 
         Connection creation, writer reservation, callback and cleanup all run
         in one worker job. No pending work on ``conn`` can absorb this commit.
-        Once dispatched, cancellation of the awaiting coroutine does not stop
-        the worker; it still completes or rolls back and closes its connection.
+        Cancellation waits for commit/rollback and connection closure before
+        propagating. Read callbacks use a deferred, query-only snapshot.
         """
+        if self._closing:
+            raise RuntimeError("Database is closing or closed")
         self.conn  # Require an initialized database (including its memory anchor).
 
         def runner():
             connection = sqlite3.connect(self.db_path, uri=True)
             connection.row_factory = sqlite3.Row
             try:
+                if not write:
+                    connection.execute("PRAGMA query_only = ON")
                 deadline = time.monotonic() + 5
                 while True:
                     try:
-                        connection.execute("BEGIN IMMEDIATE")
+                        connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
                         break
                     except sqlite3.OperationalError as exc:
                         # Shared-cache memory databases return SQLITE_LOCKED
                         # immediately instead of honoring SQLite's busy timeout.
-                        if (exc.sqlite_errorcode & 0xff) != sqlite3.SQLITE_LOCKED or time.monotonic() >= deadline:
+                        code = getattr(exc, "sqlite_errorcode", None)
+                        if (not isinstance(code, int)
+                                or (code & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                                or time.monotonic() >= deadline):
                             raise
                         time.sleep(0.01)
                 result = operation(connection)
@@ -411,7 +459,10 @@ class Database:
             finally:
                 connection.close()
 
-        return await asyncio.to_thread(runner)
+        worker = asyncio.create_task(asyncio.to_thread(runner))
+        self._workers.add(worker)
+        worker.add_done_callback(self._workers.discard)
+        return await self._wait_for_worker(worker)
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -420,6 +471,17 @@ class Database:
         return self._connection
 
     async def close(self) -> None:
-        if self._connection:
-            await self._connection.close()
-            self._connection = None
+        if self._close_task is None:
+            # Admission and worker registration contain no await, so close
+            # cannot miss a transaction accepted on this event loop.
+            self._closing = True
+
+            async def finish():
+                if self._workers:
+                    await asyncio.gather(*self._workers, return_exceptions=True)
+                if self._connection:
+                    await self._connection.close()
+                    self._connection = None
+
+            self._close_task = asyncio.create_task(finish())
+        await self._wait_for_worker(self._close_task)
