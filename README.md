@@ -1,6 +1,6 @@
 # agent-bus ⚡
 
-[![Tests](https://img.shields.io/badge/tests-190%20passed-brightgreen.svg)](https://github.com/yasmanycastillo/agent-bus)
+[![Tests](https://img.shields.io/badge/tests-pytest-brightgreen.svg)](TASK.md)
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com)
 [![MCP](https://img.shields.io/badge/MCP-2024--11--05-orange.svg)](https://modelcontextprotocol.io)
@@ -9,6 +9,8 @@
 **Protocolo y bus de eventos distribuido para la orquestación autónoma de equipos multi-agente de Inteligencia Artificial.**
 
 `agent-bus` permite que múltiples agentes de IA (**Claude Code**, **Antigravity / AGY**, **OpenAI Codex**, **Grok**, **Aider**) colaboren en un mismo proyecto de código en tiempo real, de forma **completamente autónoma y sin requerir un humano como mensajero manual entre terminales**.
+
+> Estado: prototipo en estabilización. Las garantías verificadas y pendientes están en [TASK.md](TASK.md); la autonomía y compatibilidad con clientes externos requieren todavía la aceptación de T-13.
 
 ---
 
@@ -65,8 +67,8 @@ flowchart TD
    * Si los tests pasan, ejecuta el merge a `main`. Si fallan o hay conflictos, envía feedback detallado al autor con hasta 2 reintentos antes de alertar al humano.
 5. **Soporte Multi-Modelo y Multi-CLI**:
    * Conectores nativos para **Claude Code** (`claude -p`), **Antigravity / AGY** (`agy --prompt`), **Aider / Codex** (`aider --message`), **Grok / xAI** y ejecutores personalizados.
-6. **Seguridad Criptográfica Ed25519**:
-   * Claves asimétricas por agente (`~/.agent-bus/agents/<id>.key`) con middleware en el Hub que verifica firmas canónicas en operaciones de escritura.
+6. **Sesiones locales y autorización**:
+   * Credenciales Bearer persistentes por agente/proyecto, con expiración y revocación, y permisos verificados en HTTP, SSE y WebSocket. Provisión por operador local; ver [identidad y migración](docs/authentication.md).
 7. **Resiliencia & Circuit Breakers**:
    * Límite de turnos e intercambios por tarea (`TaskTurnBreaker`), control de presupuesto de tokens (`BudgetBreaker`), detección de locks expirados (`StaleLockDetector`) y resolución de deadlocks por ciclos de espera (`detect_deadlock`).
 8. **Dashboard TUI en Tiempo Real (`top`)**:
@@ -82,17 +84,21 @@ flowchart TD
 
 | Herramienta | Descripción |
 | :--- | :--- |
-| `wait_for_updates(agent_id, timeout)` | **Long-poll reactivo**: bloquea la sesión en espera de eventos SSE del bus sin gastar tokens hasta que otro agente envíe un mensaje |
-| `post_message(from_agent, to_agent, text, ...)` | Envía mensajes directos o respuestas a otros agentes |
-| `read_messages(agent_id)` | Consulta el inbox y mensajes pendientes del agente |
-| `claim_task(task_id, agent_id)` | Reclama una tarea disponible en el backlog |
-| `complete_task(task_id, agent_id)` | Marca una tarea como finalizada |
-| `acquire_lock(file_path, agent_id, reason)` | Bloquea un archivo antes de editarlo para evitar colisiones |
-| `release_lock(file_path, agent_id)` | Libera el bloqueo de un archivo |
+| `wait_for_updates(timeout)` | **Long-poll reactivo**: bloquea la sesión en espera de eventos SSE del bus sin gastar tokens hasta que otro agente envíe un mensaje |
+| `post_message(to_agent, text, ...)` | Envía mensajes directos o respuestas a otros agentes |
+| `read_messages()` | Consulta el inbox y mensajes pendientes del agente |
+| `claim_task(task_id)` | Reclama una tarea disponible en el backlog |
+| `complete_task(task_id)` | Marca una tarea como finalizada |
+| `acquire_lock(file_path, reason)` | Bloquea un archivo antes de editarlo para evitar colisiones |
+| `release_lock(file_path)` | Libera el bloqueo de un archivo |
 | `get_project_status()` | Consulta el estado global del servidor, agentes y tareas |
-| `record_decision(title, what, decided_by)` | Registra una decisión de arquitectura compartida (ADR) |
+| `record_decision(title, what)` | Registra una decisión de arquitectura compartida (ADR) |
+
+La identidad de estas herramientas proviene de la sesión configurada al iniciar MCP. El modelo no elige remitente ni autor.
 
 ### Cómo Conectar tu Entorno al Servidor MCP
+
+Primero [provisiona una sesión](docs/authentication.md) y configura `AGENT_BUS_CONFIG_DIR`, `AGENT_BUS_PROJECT_ID`, `AGENT_BUS_AGENT_ID` y `AGENT_BUS_SESSION_FILE` en el entorno del proceso MCP.
 
 #### 1. Claude Code
 Agrega el servidor MCP ejecutando en tu terminal:
@@ -107,7 +113,13 @@ Agrega la siguiente configuración a tu archivo `mcp.json` o `claude_desktop_con
   "mcpServers": {
     "agent-bus": {
       "command": "uv",
-      "args": ["run", "agent-bus", "mcp-server"]
+      "args": ["--project", "/ruta/agent-bus", "run", "agent-bus", "mcp-server"],
+      "env": {
+        "AGENT_BUS_CONFIG_DIR": "/ruta/proyecto/.agent-bus/runtime",
+        "AGENT_BUS_PROJECT_ID": "mi-proyecto",
+        "AGENT_BUS_AGENT_ID": "claude",
+        "AGENT_BUS_SESSION_FILE": "/ruta/proyecto/.agent-bus/runtime/credentials/claude.json"
+      }
     }
   }
 }
@@ -115,9 +127,9 @@ Agrega la siguiente configuración a tu archivo `mcp.json` o `claude_desktop_con
 
 ---
 
-## 🚀 Inicio Rápido (1 solo comando)
+## 🚀 Inicio local
 
-Para inicializar el servidor, registrar agentes y poner a trabajar a tu equipo autónomo:
+Antes de `quickstart`, el operador debe provisionar una sesión por cada agente del equipo y una sesión administrativa para gestionar el panel y las reasignaciones. Consulta los [pasos de provisión y migración](docs/authentication.md). `quickstart` no concede confianza automáticamente. Ejecutarlo con el proyecto configurado y las credenciales de cada agente disponibles en el directorio de configuración:
 
 ```bash
 uv run agent-bus quickstart
@@ -179,7 +191,7 @@ uv run agent-bus run-team --agents "claude,antigravity,codex" --base-ref main
 
 | Comando | Descripción |
 | :--- | :--- |
-| `agent-bus quickstart` | Onboarding en 1 paso (inicializa bus, agentes y workers) |
+| `agent-bus quickstart` | Inicializa bus, agentes y workers con sesiones previamente provisionadas |
 | `agent-bus top` | Dashboard TUI interactivo en tiempo real con Rich Live |
 | `agent-bus mcp-server` | Inicia el servidor MCP nativo sobre stdio (JSON-RPC 2.0) |
 | `agent-bus run-team` | Inicializa worktrees y arranca daemons de fondo |
@@ -203,7 +215,7 @@ uv run agent-bus run-team --agents "claude,antigravity,codex" --base-ref main
 
 ## 🖥️ War Room Web (Panel Humano)
 
-El hub sirve una interfaz web para supervisar y dirigir al equipo sin usar la terminal:
+El hub sirve una interfaz web para supervisar y dirigir al equipo. Los datos y acciones requieren una sesión administrativa; el formulario conserva el token únicamente en memoria:
 
 ```
 http://localhost:8420/room
@@ -220,7 +232,7 @@ API subyacente: `GET/POST /room/api/*` (overview, assign, approve, message, pend
 
 ## 💻 Desarrollo Multi-Terminal
 
-Si tienes varias terminales abiertas (por ejemplo, una con **Claude Code** y otra con **Antigravity** o un humano), puedes aislar la identidad de cada terminal exportando la variable de entorno:
+Si tienes varias terminales abiertas (por ejemplo, una con **Claude Code** y otra con **Antigravity** o un humano), selecciona en cada terminal su identidad y credencial previamente provisionada. Cambiar solo el nombre no concede permisos:
 
 ```bash
 # Terminal 1 (Claude)
@@ -234,7 +246,7 @@ export AGENT_BUS_AGENT_ID=antigravity
 
 ## 🧪 Suite de Pruebas
 
-`agent-bus` cuenta con una suite completa de 190 pruebas unitarias y de integración end-to-end:
+La suite usa bases, credenciales y hubs efímeros. La evidencia por tanda está en [TASK.md](TASK.md); la aceptación con clientes MCP externos sigue pendiente:
 
 ```bash
 uv run pytest
@@ -244,7 +256,7 @@ uv run pytest
 
 ## 📖 Arquitectura Detallada
 
-Para consultar el diseño técnico completo, flujo de diagramas de secuencia Mermaid, criptografía Ed25519 y modelo de consenso BFT, consulta:
+Para consultar el diseño original, diagramas y componentes de consenso, consulta el documento histórico siguiente. La autenticación vigente se describe en [authentication.md](docs/authentication.md):
 👉 **[`docs/autonomous_multi_agent_architecture.md`](docs/autonomous_multi_agent_architecture.md)**
 
 Para conectar tu CLI al bus vía MCP: 👉 **[`docs/mcp-setup.md`](docs/mcp-setup.md)**

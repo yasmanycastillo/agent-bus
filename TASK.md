@@ -21,9 +21,9 @@ T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/
 | T-02 | P0 | Persistencia de broadcasts | T-01 | completada | codex-broadcast |
 | T-03 | P0 | Claim atómico de tareas | T-01 | completada | codex-claims |
 | T-04 | P0 | Adquisición atómica de locks | T-01 | completada | codex-locks |
-| T-05 | P0 | Identidad y credenciales confiables | T-01 | pendiente | — |
-| T-06 | P0 | Autorización de operaciones | T-03, T-05 | pendiente | — |
-| T-07 | P1 | Contrato de decisiones | T-01; cierre de identidad: T-05/T-06 | bloqueada (cierre de identidad) | codex-integrator |
+| T-05 | P0 | Identidad y credenciales confiables | T-01 | completada | codex-security / codex-clients |
+| T-06 | P0 | Autorización de operaciones | T-03, T-05 | completada | codex-policy |
+| T-07 | P1 | Contrato de decisiones | T-01; cierre de identidad: T-05/T-06 | completada | codex-integrator |
 | T-08 | P1 | Confirmación, respuestas e idempotencia | T-02, T-05, T-06 | pendiente | — |
 | T-09 | P1 | Eventos recuperables y espera acotada | T-08 | pendiente | — |
 | T-10 | P1 | SDK MCP y pruebas stdio | T-05, T-07, T-08, T-09 | pendiente | — |
@@ -73,23 +73,23 @@ Eliminar el falso éxito producido por consultar antes de insertar e ignorar el 
 
 Definir el modelo local de confianza, registro y vinculación de credenciales. Verificar contra credenciales registradas, no contra una clave arbitraria enviada en el request. Integrar autenticación en los clientes que escriben.
 
-Preparación: revisión de contratos realizada, propuesta resumida en [context.md](context.md#preparación-de-t-05t-06). Todavía no hay implementación. No cambiar solo el default de firmas: los clientes actuales no firman y existen accesos alternativos por HTTP/WS.
+Implementación de la segunda tanda: sesiones Bearer provisionadas por operador local; se retira la autenticación HTTP por firmas. Ver [provisión, permisos y migración](docs/authentication.md). Servidor y clientes se integran conjuntamente, con rutas HTTP/WS/SSE protegidas.
 
-- [ ] La reproducción de suplantación con clave desconocida es rechazada.
-- [ ] Firmante, identidad declarada y sesión autorizada coinciden.
-- [ ] Si se conservan firmas por operación, se define protección ante replay mediante nonce/expiración y su prueba.
-- [ ] HTTP y WebSocket aplican la política; revisar también lecturas y SSE según el modelo de acceso elegido.
-- [ ] El modo local seguro usa loopback y rechaza escrituras sin credenciales; cualquier modo de desarrollo inseguro es explícito.
-- [ ] MCP, CLI y workers autorizados siguen funcionando con la política activada.
+- [x] La reproducción de suplantación con clave desconocida es rechazada.
+- [x] El actor declarado coincide con la identidad de la sesión autorizada; se retira el firmante HTTP legacy.
+- [x] Resolver firmas por operación: retiradas; no aplica nonce de firma. Tokens reutilizables hasta expiración/revocación; idempotencia sigue en T-08.
+- [x] HTTP y WebSocket aplican la política; revisar también lecturas y SSE según el modelo de acceso elegido.
+- [x] El modo local seguro usa loopback y rechaza escrituras sin credenciales; cualquier modo de desarrollo inseguro es explícito.
+- [x] MCP, CLI y workers autorizados siguen funcionando con la política activada.
 
 ## T-06 — Autorización de operaciones (H-05)
 
 Aplicar permisos a finalizar/reasignar tareas, liberar locks, confirmar inbox y registrar decisiones. Derivar el actor del contexto autenticado. Distinguir operaciones de agente y administración humana.
 
-- [ ] Un agente no finaliza tareas ni confirma mensajes ajenos.
-- [ ] La reasignación administrativa requiere el permiso definido y deja trazabilidad.
-- [ ] Un cambio de propietario invalida los permisos anteriores de forma consistente.
-- [ ] Hay pruebas positivas y negativas por operación protegida.
+- [x] Un agente no finaliza tareas ni confirma mensajes ajenos.
+- [x] La reasignación administrativa requiere el permiso definido y deja trazabilidad.
+- [x] Un cambio de propietario invalida los permisos anteriores de forma consistente.
+- [x] Hay pruebas positivas y negativas por operación protegida.
 
 ## T-07 — Contrato de decisiones (H-06)
 
@@ -98,9 +98,9 @@ Compartir o adaptar explícitamente los modelos MCP/HTTP. Resolver generación d
 - [x] `record_decision` crea una decisión válida y esta puede recuperarse.
 - [x] El payload mínimo documentado no produce HTTP 422.
 - [x] Los argumentos inválidos generan errores accionables.
-- [ ] La integración final respeta la identidad definida por T-05/T-06.
+- [x] La integración final respeta la identidad definida por T-05/T-06.
 
-Contrato funcional corregido en `b284c24`. La tarea queda parcialmente resuelta: su cierre depende del principal autenticado de T-05/T-06, que aún no existe. Validación: 12 pruebas MCP aprobadas antes de la integración combinada.
+Contrato funcional corregido en `b284c24`; identidad cerrada con `63a285e` + `e561e7f` y aceptación `7e58fe7`. MCP deriva el autor de la sesión, rechaza actores discordantes y el backend rechaza IDs de decisión duplicados con 409 sin alterar el registro existente.
 
 ## T-08 — Ciclo completo de mensajes
 
@@ -132,16 +132,16 @@ Elegir SDK mantenido y versiones compatibles con clientes objetivo. Migrar el tr
 - [ ] EOF y cierre durante una espera liberan los recursos del proceso.
 - [ ] stdout contiene exclusivamente mensajes del protocolo; logs van a stderr.
 - [ ] Errores de herramienta y de protocolo se distinguen y los schemas se validan.
-- [ ] Cada conexión deriva su identidad de configuración/credenciales, sin remitente libre elegido por el modelo.
+- [x] Cada conexión deriva su identidad de configuración/credenciales, sin remitente libre elegido por el modelo. Implementado antes del SDK en T-05; conservarlo al migrar.
 
 ## T-11 — Proyecto y sesión
 
-Definir namespace, descubrimiento de raíz y aislamiento de configuración/datos. Incluir subdirectorios y worktrees. Evitar identidad operativa única por nombre del proveedor.
+Definir namespace, descubrimiento de raíz y aislamiento de configuración/datos. Incluir subdirectorios y worktrees. Revisar `quickstart`: conecta con AGENT_BUS_URL pero su autostart conserva 127.0.0.1:8420. Evitar identidad operativa única por nombre del proveedor.
 
 - [ ] Dos proyectos simultáneos no mezclan mensajes, tareas ni locks.
 - [ ] Dos sesiones del mismo proveedor tienen identidades distinguibles.
 - [ ] Cada entrada resuelve explícitamente el proyecto correcto desde un worktree o subdirectorio.
-- [ ] Una sesión expirada no mantiene permisos indefinidos.
+- [x] Una sesión expirada no mantiene permisos indefinidos. T-05 valida requests y revalida streams; el resto del aislamiento T-11 sigue pendiente.
 - [ ] Si se admite reconectar una misma sesión desde varios procesos, se define quién puede consumir/ejecutar trabajo.
 
 ## T-12 — Renovación y alcance de locks
@@ -194,3 +194,9 @@ Elegir dos clientes reales y registrar versiones, configuración y evidencias. C
 | 2026-09-05 | T-04 | Completada: `14f44e4` (origen `49c869f`). 14 pruebas dirigidas, contención con conexiones independientes y liberación frente a sucesor distinto. |
 | 2026-09-05 | T-07 | Contrato funcional corregido en `b284c24`, 12 pruebas MCP; cierre de identidad bloqueado por T-05/T-06. |
 | 2026-09-05 | Integración primera tanda | `218 passed` en 27,16 s sobre código combinado `4089b8e`; dos avisos de deprecación del soporte WebSocket de dependencias. `git diff --check` limpio. Sin aceptación con clientes MCP externos todavía. |
+| 2026-09-05 | T-05 | Completada: configuración `8e0d600`, sesiones `398c4e8`, clientes `63a285e`, proxies `090dc6f`, aislamiento/hook `06c606b`. Tokens locales con expiración/revocación; provisión explícita. Se retira firma HTTP, sin promesa de anti-replay/idempotencia. |
+| 2026-09-05 | T-06 | Completada: `e561e7f` (origen `c07ebed`). Autorización HTTP/WS/SSE, propiedad SQL y auditoría atómica. Revisión cruzada detectó mutación de decisión ajena por ID duplicado; corregida con 409 e inmutabilidad. 93 pruebas dirigidas y regresión final de handoff aprobadas. |
+| 2026-09-05 | T-07 | Completada: principal vinculado a herramientas y decisiones; schemas seguros sin actor elegible. Regresión de suplantación y persistencia contra hub real efímero en `7e58fe7`. |
+| 2026-09-05 | Integración segunda tanda | **303 passed**, dos avisos de deprecación WebSocket, en **45,63 s**, sobre código combinado `7e58fe7`. `UV_PROJECT_ENVIRONMENT=/home/Yasmany/src/agent-bus/.venv PYTHONPATH=$PWD/src uv run --no-sync pytest -q`; Bash/JavaScript y `git diff --check` correctos. Aceptación CLI → credenciales → create_app → MCP/HTTP en cinco pruebas. Sin cliente MCP externo ni navegador real todavía. |
+
+La segunda tanda se integra localmente a `main`. El hub de coordinación que ya estaba en ejecución conserva el proceso anterior; no se reinició ni se detuvieron listeners. Para activar la política en ese servicio, provisionar sus sesiones y reiniciar servidor/clientes con la configuración documentada. Próxima tanda recomendada: T-08, seguida por T-09.

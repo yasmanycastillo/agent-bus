@@ -12,6 +12,12 @@ subproceso que se lance corre EN PARALELO, invisible para la terminal viva.
 Solución elegida (Opción C): el propio agente consulta el bus como parte de su
 ciclo natural, vía tools MCP y hooks del CLI.
 
+## Credenciales antes de conectar
+
+Provisionar una sesión por agente mediante `agent-bus auth create` como operador local. Seguir [identidad y autorización](authentication.md) para seleccionar proyecto, base y archivo de sesión. El servidor rechaza por defecto conexiones sin credenciales; registrar un nombre no crea confianza.
+
+El proceso MCP fija la sesión al arrancar y deriva de ella los actores de sus herramientas. Cambiar `from_agent`, `agent_id` o `decided_by` en un argumento no permite actuar como otra identidad.
+
 ## 1. Hook Stop de Claude Code (`hooks/stop-check-inbox.sh`)
 
 Configurado en `.claude/settings.json`. Cuando la sesión de Claude Code queda
@@ -21,9 +27,11 @@ procesa el reason como estímulo y la sesión continúa sola: lee el inbox y
 responde por el bus.
 
 - Sin pendientes: salida vacía, la sesión duerme normal.
-- Bus caído: no bloquea (fail-open).
+- Bus caído o credencial inválida: no bloquea (fail-open). El hook es una ayuda al ciclo de sesión, no una garantía de entrega o ejecución.
 - Variables: `AGENT_BUS_URL` (default `http://localhost:8420`),
-  `AGENT_BUS_AGENT_ID` (default `claude`).
+  `AGENT_BUS_AGENT_ID` (o identidad seleccionada en la configuración/sesión), `AGENT_BUS_CONFIG_DIR`,
+  `AGENT_BUS_PROJECT_ID` y `AGENT_BUS_SESSION_FILE`. El hook usa el cliente autenticado común.
+- Runtime: usa `agent-bus` instalado en PATH o `uv run --no-sync` sobre el repositorio del hook. Si se copia a otro proyecto o se ejecuta desde un worktree sin entorno instalado, definir `AGENT_BUS_PACKAGE_DIR` con la ruta de la instalación preparada.
 
 ## 2. Servidor MCP nativo (`agent-bus mcp-server`)
 
@@ -39,6 +47,8 @@ completo, visible en terminal).
 ### Conectar Claude Code
 
 ```bash
+export AGENT_BUS_AGENT_ID=claude
+export AGENT_BUS_SESSION_FILE="$AGENT_BUS_CONFIG_DIR/credentials/claude.json"
 claude mcp add agent-bus -- uv run agent-bus mcp-server
 # desde el directorio del proyecto (necesita uv + el paquete instalado)
 ```
@@ -56,7 +66,13 @@ Config JSON del cliente (stdio):
   "mcpServers": {
     "agent-bus": {
       "command": "uv",
-      "args": ["--project", "/ruta/al/proyecto", "run", "agent-bus", "mcp-server"]
+      "args": ["--project", "/ruta/agent-bus", "run", "agent-bus", "mcp-server"],
+      "env": {
+        "AGENT_BUS_CONFIG_DIR": "/ruta/proyecto/.agent-bus/runtime",
+        "AGENT_BUS_PROJECT_ID": "mi-proyecto",
+        "AGENT_BUS_AGENT_ID": "claude",
+        "AGENT_BUS_SESSION_FILE": "/ruta/proyecto/.agent-bus/runtime/credentials/claude.json"
+      }
     }
   }
 }
@@ -74,6 +90,10 @@ como ese subproceso y procesar lo que devuelva.
   usar el waiter MCP como ese subproceso.
 - Codex/Aider: instrucción de protocolo en su archivo CODEX.md: al terminar
   cualquier tarea, ejecutar `agent-bus work inbox` antes de ceder el control.
+
+## Alcance verificado
+
+Las pruebas de autenticación ejercitan clientes MCP en proceso contra un hub HTTP real y efímero, además de CLI, HTTP, SSE y WebSocket. La negociación stdio con dos clientes MCP externos, la espera cancelable y la recuperación de eventos siguen en T-09/T-10/T-13. Los mecanismos descritos de activación deben validarse en cada cliente; no equivalen a una prueba de interoperabilidad universal.
 
 ## Decisiones relacionadas
 
