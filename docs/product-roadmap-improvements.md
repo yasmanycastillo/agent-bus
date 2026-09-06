@@ -1,51 +1,54 @@
 # Plan de Mejoras para Comercialización y Casos de Uso Empresariales
 
-Este documento detalla el **roadmap técnico y de producto** necesario para convertir `agent-bus` en un producto monetizable (Open-Core / On-Premise / SaaS Empresarial) con **Hermes AI** como orquestador central y modelos de coding especializados.
+Este documento define el roadmap para convertir `agent-bus` en un producto de coordinación de agentes desplegable en local, on-premise o SaaS. El producto central es el bus, la identidad, la entrega durable, los worktrees y el gate de integración. Hermes es una integración futura, no un requisito del núcleo.
 
 ---
 
 ## 1. Mejoras Técnicas Necesarias por Nivel
 
-### Nivel 1: Conclusión del Core y Estabilidad Base (T-12 a T-15) — ¡COMPLETADO!
+### Estado actual: core implementado, operación real pendiente de ampliar
 * [x] **T-12: Locks Robustos y Fencing Tokens:**
   - Scope `checkout` y `project`, canonicalización de rutas y rechazo de escapes de worktree.
   - Leases por sesión, TTL acotado (300 s default), reclamación de expirados y tokens de adquisición (`acquisition_id`) para evitar colisiones por titulares desfasados.
-* [x] **T-13: Validación con Clientes Reales:**
-  - Validación automatizada e interoperabilidad stdio demostrada contra **Claude Code** y **Codex CLI**.
-  - Evidencia auditada sin tokens en `docs/evidence/t13.json`.
-* [x] **T-14: Workers Recuperables y Adaptadores Nativos:**
-  - Adaptadores nativos para **Claude**, **Codex**, **Aider**, **AGY** y **Grok**.
-  - Persistencia de intentos en `inbox_delivery_state` y reanudación de sesiones `thread_id -> session_id`.
-* [x] **T-15: Integración Git Automatizada:**
+* [x] **T-13: Validación con clientes reales:**
+  - Claude Code y Codex CLI validados mediante stdio; AGY y Grok tienen pruebas headless del runner.
+  - La matriz completa y sus límites están en `docs/acceptance-t13.md`.
+* [x] **T-14: Workers recuperables y adaptadores nativos:**
+  - Adaptadores separados para Claude, Codex, Aider, AGY y Grok.
+  - Intentos persistentes y sesiones reanudables; la aceptación de cada proveedor sigue siendo desigual.
+* [x] **T-15: Integración Git automatizada:**
   - `BranchIntegrator` con verificación de estado previo (preflight), merges protegidos y rollback seguro ante fallos.
   - Cola `in-review` y comandos CLI del ciclo de vida del integrador (`agent-bus integrator start/status/stop`).
-* [x] **Onboarding y Experiencia Interactiva:**
-  - CLI `quickstart` interactivo para autoconfiguración de proyectos, aislamiento de puertos de hubs y setup guiado de credenciales.
+* [x] **Onboarding y experiencia interactiva:**
+  - `agent-bus onboard` crea el proyecto, credenciales, hub, worktrees y workers con confirmación.
+  - Cada proyecto puede aislar su puerto para no mezclar hubs.
+
+**Limitación operativa actual:** el flujo local está listo para una prueba controlada, pero todavía hay que medir recuperación, costes y comportamiento de cada proveedor en proyectos reales. El dashboard existente es operativo; no es aún la Team Edition web descrita más adelante.
 
 ---
 
-### Nivel 2: Integración del Orquestador Hermes AI (El "Tech Lead Autónomo")
-* [ ] **Módulo `HermesOrchestrator` / Adapter de Inferencia:**
+### Nivel 2: Orquestación estructurada (siguiente prioridad)
+* [ ] **Contrato de inferencia y `HermesOrchestrator`:**
   - Soporte para endpoints compatibles con OpenAI / vLLM / Ollama / OpenRouter para conectar instancias de Hermes (ej. `Hermes-3-Llama-3.1-70B` / `Hermes-3-8B`).
   - Soporte de Structured Outputs / JSON Schema nativo para garantizar que el desglose de tareas siempre sea sintácticamente válido.
-* [ ] **Desglose Autónomo de Tareas (Epic Breakdown):**
+* [ ] **Desglose autónomo de tareas (Epic Breakdown):**
   - Capacidad de Hermes para leer un issue o especificación de alto nivel y convertirlo en un grafo de tareas acíclico dirigido (DAG) con dependencias claras.
   - Publicación y asignación automática en el bus (`broadcast_assignment` / `create_task`).
-* [ ] **Evaluación y Gatekeeper de Integración:**
+* [ ] **Gatekeeper de integración:**
   - Hermes actuando como revisor de código: evalúa diffs en la cola `in-review`, lee la salida de los tests en `.worktrees/` y autoriza al `BranchIntegrator` el merge a `main` o solicita correcciones al agente asignado.
 
 
 ---
 
-### Nivel 3: Experiencia para Equipos y Desarrollo Local (Team Edition)
+### Nivel 3: Team Edition y control operativo
 * [ ] **Dashboard Web Interactivo Moderno (React / WebSockets):**
   - Visualización en tiempo real de agentes activos, roles, archivos bloqueados (locks), tareas en progreso y flujo de mensajes.
   - Interfaz gráfica para que los desarrolladores humanos puedan pausar agentes, reasignar tareas o inyectar feedback humano en el bucle (*Human-in-the-Loop*).
 * [ ] **Gateway de Cuotas y Costes (Budget Control):**
   - Límite de gasto por tarea, sprint o agente para evitar que un agente en bucle consuma créditos excesivos de APIs comerciales.
   - Métricas de consumo de tokens y tiempo de resolución por modelo y por agente.
-* [ ] **CLI Simplificado (`agent-bus up / team init`):**
-  - Un único comando que levante el hub, configure las credenciales de los agentes del equipo y arranque el listener en segundo plano sin fricción.
+* [x] **CLI simplificado inicial (`agent-bus onboard`):** prepara un proyecto con preguntas y confirmaciones.
+* [ ] **Evolución del onboarding:** detectar puertos ocupados, validar autenticación de proveedor y ofrecer recuperación guiada.
 
 ---
 
@@ -64,7 +67,27 @@ Este documento detalla el **roadmap técnico y de producto** necesario para conv
 
 ---
 
-## 2. Modelos de Coding Recomendados por Rol
+## 2. Plan ejecutable y criterios de salida
+
+| Fase | Objetivo | Dependencias | Criterio de salida |
+| :--- | :--- | :--- | :--- |
+| P0. Operación real | Completar una tarea con worker e integrador en un repositorio de prueba | Core actual | `submit → commit → in_review → tests → merge → done` reproducible |
+| P1. Contrato de tareas | Añadir dependencias, criterios de aceptación, comando de pruebas y DAG persistente | P0 | Hermes crea tareas idempotentes y el bus rechaza ciclos |
+| P2. Orquestador | Adaptador OpenAI-compatible/vLLM/Ollama con JSON Schema | P1 | Un desglose válido produce tareas trazables y asignables |
+| P3. Control operativo | Dashboard web, cuotas, costes, pausas y feedback humano | P0, P1 | Un operador detiene, reasigna y audita sin editar SQLite |
+| P4. Enterprise | Integraciones SDLC, SSO, auditoría exportable y air-gapped | P1–P3 | Instalación y recuperación documentadas y probadas |
+
+Cada entrega debe medir: tareas que llegan a `done`, tiempo hasta `in_review`, reintentos, conflictos de merge, bloqueos, coste por tarea, tiempo de resolución y recuperación tras reinicio. No se debe cerrar una fase por tener sólo clases o mocks.
+
+## 3. Decisiones de producto
+
+El primer mercado recomendado es mantenimiento de deuda técnica y migraciones: tareas acotadas, ramas aisladas, pruebas automatizadas y resultado verificable. Data engineering, SRE y documentación viva quedan como verticales posteriores.
+
+Hermes debe ser un adaptador intercambiable. El contrato del bus no debe depender de un modelo concreto; se selecciona por capacidad, coste, latencia, ventana de contexto, despliegue y calidad de salida estructurada.
+
+El gateway de cuotas y costes debe preceder a la ejecución autónoma comercial: limita por agente, tarea y proyecto, registra tokens y tiempo, y detiene trabajo con estado visible.
+
+## 4. Modelos de Coding Recomendados por Rol
 
 | Rol | Modelo Recomendado | Despliegue / Ubicación | Justificación |
 | :--- | :--- | :--- | :--- |
@@ -75,7 +98,7 @@ Este documento detalla el **roadmap técnico y de producto** necesario para conv
 
 ---
 
-## 3. Otras Posibilidades de Uso y Mercados Verticales
+## 5. Otras Posibilidades de Uso y Mercados Verticales
 
 Más allá del desarrollo de software convencional, esta arquitectura de bus coordinado con Hermes abre varios casos de uso adicionales de alto valor:
 

@@ -10,7 +10,7 @@
 
 `agent-bus` permite que varios agentes intercambien mensajes, reclamen tareas y coordinen archivos dentro de un proyecto. El hub conserva las entregas mientras los clientes están desconectados; cada aplicación necesita consultar o mantener una espera activa para procesarlas.
 
-> Estado y evidencias: [TASK.md](TASK.md) y [aceptación con clientes reales](docs/acceptance-t13.md). Los workers recuperables y la integración Git autónoma siguen pendientes de T-14/T-15.
+> Estado y evidencias: [TASK.md](TASK.md) y [aceptación con clientes reales](docs/acceptance-t13.md). T-14 y T-15 están implementadas; la validación operativa con proyectos reales y proveedores adicionales continúa.
 
 Guía de [proyectos y sesiones](docs/projects.md): runtime compartido entre worktrees, hubs separados por proyecto e identidades independientes por sesión de proveedor.
 
@@ -49,7 +49,7 @@ flowchart TD
     D1 -->|"Commits locales"| WT1
     D2 -->|"Commits locales"| WT2
 
-    WT1 -->|"Tests & Merge"| Integrator["BranchIntegrator: aceptación pendiente T-15"]
+    WT1 -->|"Tests & Merge"| Integrator["BranchIntegrator: gate de integración"]
     WT2 -->|"Tests & Merge"| Integrator
 
     Integrator -->|"Tests verdes -> Merge limpio"| Main["🌿 Rama main"]
@@ -68,11 +68,11 @@ flowchart TD
    * [`BranchIntegrator`](src/agent_bus/worker/integrator.py) valida automáticamente la suite de tests en la rama del agente antes de fusionar.
    * Si los tests pasan, ejecuta el merge a `main`. Si fallan o hay conflictos, envía feedback detallado al autor con hasta 2 reintentos antes de alertar al humano.
 5. **Soporte Multi-Modelo y Multi-CLI**:
-   * Los clientes MCP externos son independientes de `AgentRunner`. El runner incluye rutas para Claude, AGY, Aider y ejecutores genéricos, con aceptación pendiente en T-14. **El proveedor `codex` del runner todavía ejecuta Aider**; la prueba de Codex CLI nativo de T-13 utiliza MCP directamente y no acredita ese adaptador.
+   * Los clientes MCP externos son independientes de `AgentRunner`. El runner incluye adaptadores separados para Claude, AGY, Aider, Codex y Grok; la aceptación real de cada proveedor tiene distinto alcance.
 6. **Sesiones locales y autorización**:
    * Credenciales Bearer persistentes por agente/proyecto, con expiración y revocación, y permisos verificados en HTTP, SSE y WebSocket. Provisión por operador local; ver [identidad y migración](docs/authentication.md).
 7. **Resiliencia & Circuit Breakers**:
-   * Hay componentes de límites de turnos, presupuesto y detección de conflictos. Su recuperación y aplicación persistente al worker quedan en T-14; las leases de edición verificadas están documentadas en [locks.md](docs/locks.md).
+   * Hay límites de turnos, presupuesto y detección de conflictos. La aplicación comercial de cuotas, costes y métricas por proyecto sigue en el roadmap; las leases verificadas están documentadas en [locks.md](docs/locks.md).
 8. **Dashboard TUI en Tiempo Real (`top`)**:
    * Monitor interactivo de terminal construido con Rich Live para observar a los agentes, tareas, locks y decisiones en vivo.
 
