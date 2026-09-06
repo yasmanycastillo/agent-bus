@@ -44,7 +44,7 @@ def test_worker_start_creates_pid_and_process(
     """E2E: worker start lanza un proceso real (mock runner) y registra su PID."""
     from agent_bus.cli import worker_cmds
 
-    monkeypatch.setattr(worker_cmds, "WORKERS_DIR", tmp_path)
+    monkeypatch.setattr(worker_cmds, "_workers_dir", lambda: tmp_path)
     monkeypatch.setenv("AGENT_BUS_AGENT_ID", "claude")
     monkeypatch.chdir(tmp_path)
 
@@ -82,7 +82,7 @@ def test_worker_start_idempotente(monkeypatch, tmp_path, spawned_processes):
 
     from agent_bus.cli import worker_cmds
 
-    monkeypatch.setattr(worker_cmds, "WORKERS_DIR", tmp_path)
+    monkeypatch.setattr(worker_cmds, "_workers_dir", lambda: tmp_path)
 
     # proceso dormido de larga vida
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -99,7 +99,7 @@ def test_worker_start_idempotente(monkeypatch, tmp_path, spawned_processes):
 def test_worker_status_sin_pid(monkeypatch, tmp_path):
     from agent_bus.cli import worker_cmds
 
-    monkeypatch.setattr(worker_cmds, "WORKERS_DIR", tmp_path)
+    monkeypatch.setattr(worker_cmds, "_workers_dir", lambda: tmp_path)
     runner = CliRunner()
     result = runner.invoke(worker, ["status", "--agent", "codex"], catch_exceptions=False)
     assert "no iniciado" in result.output
@@ -108,7 +108,7 @@ def test_worker_status_sin_pid(monkeypatch, tmp_path):
 def test_worker_stop_stale_pid(monkeypatch, tmp_path):
     from agent_bus.cli import worker_cmds
 
-    monkeypatch.setattr(worker_cmds, "WORKERS_DIR", tmp_path)
+    monkeypatch.setattr(worker_cmds, "_workers_dir", lambda: tmp_path)
     # PID imposible: no debería existir ningún proceso con ese PID alto
     (tmp_path / "codex.pid").write_text("99999999")
     runner = CliRunner()
@@ -120,7 +120,7 @@ def test_run_team_and_submit_cli(monkeypatch, tmp_path, live_bus_url, spawned_pr
     """Verifica que run-team y submit ejecuten correctamente."""
     from agent_bus.cli import worker_cmds
 
-    monkeypatch.setattr(worker_cmds, "WORKERS_DIR", tmp_path)
+    monkeypatch.setattr(worker_cmds, "_workers_dir", lambda: tmp_path)
     # This command otherwise creates worktrees in the checkout running pytest.
     monkeypatch.chdir(tmp_path)
 

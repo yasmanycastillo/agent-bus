@@ -21,22 +21,32 @@ import time
 import shutil
 import subprocess
 from pathlib import Path
+from contextlib import nullcontext
 
 import click
 import httpx
 
 from agent_bus.security import async_bus_client
 
-from agent_bus.config import DEFAULT_CONFIG_DIR, get_config_dir
+from agent_bus.config import DEFAULT_CONFIG_DIR, get_config_dir, get_bus_url
 from agent_bus.worker.client import BusEventClient, worker_environment
+from agent_bus.worker.execution import ExecutionGuard
 
 logger = logging.getLogger("agent_bus.cli.watch")
 
 SESSIONS_FILE = DEFAULT_CONFIG_DIR / "watch_sessions.json"
 
 
+def _session_file(agent_id: str | None = None) -> Path:
+    from agent_bus.security import resolve_agent_id
+    agent = resolve_agent_id(agent_id)
+    if not agent:
+        raise ValueError("Select an agent for the watcher session map")
+    return get_config_dir() / "watch" / agent / "sessions.json"
+
+
 def load_session_map(path: Path | None = None) -> dict[str, str]:
-    path = path or get_config_dir() / "watch_sessions.json"
+    path = path or _session_file()
     if path.exists():
         try:
             return json.loads(path.read_text())
@@ -46,7 +56,7 @@ def load_session_map(path: Path | None = None) -> dict[str, str]:
 
 
 def save_session_map(mapping: dict[str, str], path: Path | None = None) -> None:
-    path = path or get_config_dir() / "watch_sessions.json"
+    path = path or _session_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(mapping, indent=1))
 
@@ -88,11 +98,11 @@ def build_prompt(message: dict) -> str:
     )
 
 
-async def _run_cli(cmd: list[str], agent_id: str) -> subprocess.CompletedProcess:
+async def _run_cli(cmd: list[str], agent_id: str, bus_url: str | None = None) -> subprocess.CompletedProcess:
     """Keep the event loop responsive and reap the CLI on cancellation or timeout."""
     process = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env=worker_environment(agent_id),
+        env=worker_environment(agent_id, bus_url=bus_url),
     )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
@@ -129,9 +139,11 @@ async def run_turn(
     cli: str = "claude",
     dry_run: bool = False,
     sessions_file: Path | None = None,
-    bus_url: str = "http://localhost:8420",
+    bus_url: str | None = None,
 ) -> str | None:
     """Send one durable reply and acknowledge only after the CLI succeeds."""
+    bus_url = get_bus_url(bus_url)
+    sessions_file = sessions_file or _session_file(agent_id)
     message_id = message["message_id"]
     if dry_run:
         click.echo(f"[dry-run] {cli} -p ... (message {message_id[:8]})")
@@ -152,7 +164,7 @@ async def run_turn(
             cmd = [binary, "-p", build_prompt(message), "--output-format", "json"]
             if session_id:
                 cmd.extend(["--resume", session_id])
-            result = await _run_cli(cmd, agent_id)
+            result = await _run_cli(cmd, agent_id, bus_url=bus_url)
             if result.returncode != 0:
                 raise RuntimeError(f"CLI turn failed ({result.returncode}): {result.stderr[:200]}")
             try:
@@ -196,13 +208,13 @@ async def run_turn(
 
 class PendingMessageWatcher:
     """SSE wakes bounded polling; persisted delivery state decides what to execute."""
-    def __init__(self, agent_id: str, *, cli: str = "claude", bus_url: str = "http://localhost:8420",
+    def __init__(self, agent_id: str, *, cli: str = "claude", bus_url: str | None = None,
                  dry_run: bool = False, sessions_file: Path | None = None):
         self.agent_id = agent_id
         self.cli = cli
-        self.bus_url = bus_url
+        self.bus_url = get_bus_url(bus_url)
         self.dry_run = dry_run
-        self.sessions_file = sessions_file or get_config_dir() / "watch" / agent_id / "sessions.json"
+        self.sessions_file = sessions_file or _session_file(agent_id)
         self.session_map = load_session_map(self.sessions_file)
         self.cursor: str | None = None
         self.retry_after: dict[str, float] = {}
@@ -234,6 +246,11 @@ class PendingMessageWatcher:
         self.retry_after = {key: value for key, value in self.retry_after.items() if value > time.monotonic()}
 
     async def run(self, *, once: bool = False) -> None:
+        guard = nullcontext() if self.dry_run else ExecutionGuard(self.agent_id, kind="watcher")
+        with guard:
+            await self._run(once=once)
+
+    async def _run(self, *, once: bool = False) -> None:
         events = BusEventClient(self.agent_id, bus_url=self.bus_url, on_event=self.on_event)
         event_task = asyncio.create_task(events.start())
         try:
@@ -258,10 +275,10 @@ class PendingMessageWatcher:
 @click.command(name="watch")
 @click.option("--agent", "agent_id", default=None, help="Agent id (default: agente actual)")
 @click.option("--cli", default="claude", help="CLI a despertar: claude, agy, ...")
-@click.option("--bus-url", default="http://localhost:8420", help="URL del bus")
+@click.option("--bus-url", default=None, help="URL del bus")
 @click.option("--dry-run", is_flag=True, help="Solo mostrar qué se ejecutaría")
 @click.option("--once", is_flag=True, help="Procesar un solo mensaje pendiente y salir")
-def watch(agent_id: str | None, cli: str, bus_url: str, dry_run: bool, once: bool):
+def watch(agent_id: str | None, cli: str, bus_url: str | None, dry_run: bool, once: bool):
     """Escuchar el bus y despertar la sesión interactiva ante mensajes que requieren respuesta."""
     from agent_bus.cli.display import get_current_agent
 
@@ -272,7 +289,7 @@ def watch(agent_id: str | None, cli: str, bus_url: str, dry_run: bool, once: boo
             raise SystemExit(1)
 
     # Fail immediately for missing/mismatched credentials, including dry-run.
-    worker_environment(agent_id)
+    worker_environment(agent_id, bus_url=bus_url)
     watcher = PendingMessageWatcher(agent_id, cli=cli, bus_url=bus_url, dry_run=dry_run)
     click.echo(f"👀 Watcheando el bus como '{agent_id}' (CLI: {cli})")
     click.echo("   Consulta persistida y SSE activos. Ctrl+C para salir.")

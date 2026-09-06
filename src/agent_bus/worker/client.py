@@ -10,19 +10,28 @@ from pathlib import Path
 
 import httpx
 
-from agent_bus.config import get_config_dir
+from agent_bus.config import get_config_dir, get_bus_url, load_config
 from agent_bus.security import AuthenticationError, async_bus_client, load_session
 from agent_bus.core.sse import iter_sse_frames
 
 logger = logging.getLogger("agent_bus.worker.client")
 
 
-def worker_environment(agent_id: str, *, per_agent: bool = False) -> dict[str, str]:
+def worker_environment(agent_id: str, *, per_agent: bool = False, bus_url: str | None = None) -> dict[str, str]:
     """Select one worker's credentials without sharing an administrator's session."""
+    config = load_config()
+    resolved_url = get_bus_url(bus_url)
     env = os.environ.copy()
     env["AGENT_BUS_AGENT_ID"] = agent_id
     config_dir = get_config_dir().resolve()
     env["AGENT_BUS_CONFIG_DIR"] = str(config_dir)
+    env["AGENT_BUS_DATABASE_PATH"] = str(Path(config.database_path).resolve())
+    env["AGENT_BUS_PROJECT_ID"] = config.bus.project_id
+    env["AGENT_BUS_URL"] = resolved_url
+    if config.project_root:
+        env["AGENT_BUS_PROJECT_ROOT"] = str(Path(config.project_root).resolve())
+    else:
+        env.pop("AGENT_BUS_PROJECT_ROOT", None)
     if per_agent:
         path = config_dir / "credentials" / f"{agent_id}.json"
     else:
@@ -49,14 +58,14 @@ class BusEventClient:
     """Authenticated SSE replay with cursors committed after callback success."""
 
     def __init__(
-        self, agent_id: str, bus_url: str = "http://localhost:8420",
+        self, agent_id: str, bus_url: str | None = None,
         on_event: EventCallback | None = None, reconnect_initial_delay: float = 1.0,
         reconnect_max_delay: float = 30.0, cursor: str | None = None,
     ) -> None:
         if reconnect_initial_delay <= 0 or reconnect_max_delay < reconnect_initial_delay:
             raise ValueError("Reconnect delays must be positive and ordered")
         self.agent_id = agent_id
-        self.bus_url = bus_url.rstrip("/")
+        self.bus_url = get_bus_url(bus_url)
         self.on_event = on_event
         self.reconnect_initial_delay = reconnect_initial_delay
         self.reconnect_max_delay = reconnect_max_delay
@@ -171,7 +180,7 @@ class BusEventClient:
 
 
 async def iter_bus_events(
-    agent_id: str, bus_url: str = "http://localhost:8420", stop: asyncio.Event | None = None,
+    agent_id: str, bus_url: str | None = None, stop: asyncio.Event | None = None,
     cursor: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Yield replayed events; stop interrupts even a silent stream or reconnect delay.

@@ -8,7 +8,9 @@ from typing import Any
 
 import httpx
 
+from agent_bus.config import get_bus_url
 from agent_bus.security import async_bus_client
+from agent_bus.worker.execution import ExecutionGuard
 
 from agent_bus.types import AgentStatus
 from agent_bus.worker.client import BusEventClient
@@ -25,7 +27,7 @@ class WorkerDaemon:
         self,
         agent_id: str,
         runner: AgentRunner,
-        bus_url: str = "http://localhost:8420",
+        bus_url: str | None = None,
         poll_interval_seconds: float = 3.0,
         heartbeat_interval_seconds: float = 15.0,
         max_turns_per_task: int = 10,
@@ -34,7 +36,8 @@ class WorkerDaemon:
             raise ValueError("Runner identity must match its daemon")
         self.agent_id = agent_id
         self.runner = runner
-        self.bus_url = bus_url.rstrip("/")
+        self.bus_url = get_bus_url(bus_url)
+        self.runner.bus_url = self.bus_url
         self.poll_interval_seconds = poll_interval_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.max_turns_per_task = max_turns_per_task
@@ -47,7 +50,12 @@ class WorkerDaemon:
         self._message_retry_after: dict[str, float] = {}
 
     async def start(self) -> None:
-        """Starts the autonomous worker daemon loop."""
+        """A worker and watcher cannot automatically execute the same participant."""
+        with ExecutionGuard(self.agent_id, kind="worker"):
+            await self._run()
+
+    async def _run(self) -> None:
+        """Starts the autonomous worker daemon loop after acquiring exclusion."""
         self._client = async_bus_client(self.agent_id, base_url=self.bus_url, timeout=30.0)
         try:
             response = await self._client.post("/register", json={

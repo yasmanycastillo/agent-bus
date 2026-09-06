@@ -28,10 +28,12 @@ class AgentRunner:
         provider: str = "claude",
         model: str | None = None,
         worktree_dir: Path | None = None,
+        bus_url: str | None = None,
         custom_executor: (
             Callable[[str, str | None], Coroutine[Any, Any, RunnerResult]] | None
         ) = None,
     ) -> None:
+        self.bus_url = bus_url
         self.agent_id = agent_id
         self.provider = provider.lower()
         self.model = model
@@ -248,7 +250,7 @@ class AgentRunner:
         from agent_bus.worker.client import worker_environment
 
         try:
-            env = worker_environment(self.agent_id)
+            env = worker_environment(self.agent_id, bus_url=self.bus_url)
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(self.worktree_dir),
