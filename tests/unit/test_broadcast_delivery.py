@@ -91,7 +91,7 @@ async def test_legacy_migration_preserves_all_columns_and_indexes(tmp_path):
         await db.initialize()
         try:
             rows = await db.conn.execute_fetchall("SELECT * FROM inbox ORDER BY message_id")
-            assert [tuple(row) for row in rows] == original
+            assert [tuple(row)[:13] for row in rows] == original
             indexes = await db.conn.execute_fetchall("PRAGMA index_list(inbox)")
             assert {"idx_inbox_to_agent", "idx_inbox_timestamp"} <= {row[1] for row in indexes}
         finally:
@@ -100,7 +100,8 @@ async def test_legacy_migration_preserves_all_columns_and_indexes(tmp_path):
     await db.initialize()
     try:
         inbox = InboxManager(db)
-        await inbox.deliver(Envelope(message_id="legacy-0", from_agent="sender", to_agent="two", message_type="inbox"))
+        original_message = await inbox.get_message("one", "legacy-0")
+        await inbox.deliver(original_message.model_copy(update={"to_agent": "two"}))
         assert await inbox.pending_count("one") == 1
         assert await inbox.pending_count("two") == 1
         assert len(await inbox.get_archived("one")) == 1

@@ -49,6 +49,7 @@ class AutonomyLevel(int, enum.Enum):
 class Envelope(BaseModel):
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     correlation_id: str | None = None
+    conversation_id: str | None = None
     from_agent: str
     to_agent: str | None = None
     message_type: MessageType

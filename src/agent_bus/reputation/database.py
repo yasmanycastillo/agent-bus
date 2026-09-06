@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import aiosqlite
+import secrets
 from pathlib import Path
 
 
@@ -46,6 +47,31 @@ CREATE TABLE IF NOT EXISTS endorsements (
 
 CREATE INDEX IF NOT EXISTS idx_inbox_to_agent ON inbox(to_agent, archived);
 CREATE INDEX IF NOT EXISTS idx_inbox_timestamp ON inbox(timestamp);
+
+CREATE TABLE IF NOT EXISTS inbox_delivery_state (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    failed_at TEXT,
+    UNIQUE(message_id, to_agent)
+);
+CREATE INDEX IF NOT EXISTS idx_delivery_agent_sequence ON inbox_delivery_state(to_agent, sequence);
+
+CREATE TABLE IF NOT EXISTS message_idempotency (
+    from_agent TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    envelope_json TEXT NOT NULL,
+    recipients_json TEXT NOT NULL,
+    PRIMARY KEY(from_agent, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS message_state (
+    name TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
@@ -158,6 +184,22 @@ class Database:
                 await self.conn.execute(
                     "CREATE INDEX idx_inbox_timestamp ON inbox(timestamp)"
                 )
+            # Keep the original 13-column schema for the earlier composite-key
+            # migration, then extend both old and current databases in place.
+            columns = await self.conn.execute_fetchall("PRAGMA table_info(inbox)")
+            if "conversation_id" not in {row["name"] for row in columns}:
+                await self.conn.execute("ALTER TABLE inbox ADD COLUMN conversation_id TEXT")
+                await self.conn.execute(
+                    "UPDATE inbox SET conversation_id = COALESCE(correlation_id, message_id)"
+                )
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO inbox_delivery_state(message_id, to_agent) "
+                "SELECT message_id, to_agent FROM inbox ORDER BY timestamp, message_id, to_agent"
+            )
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO message_state(name, value) VALUES ('cursor_secret', ?)",
+                (secrets.token_hex(32),),
+            )
             await self.conn.commit()
         except BaseException:
             await self.conn.rollback()
