@@ -69,9 +69,10 @@ class TaskManager:
 
     async def reassign(self, task_id: str, new_owner: str) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
+        status = ", status = 'pending'" if new_owner == "free" else ", status = 'in_progress'"
         await self._db.conn.execute(
-            """UPDATE tasks SET owner = ?, updated_at = ?
-               WHERE task_id = ?""",
+            "UPDATE tasks SET owner = ?, updated_at = ?" + status
+            + " WHERE task_id = ?",
             (new_owner, now, task_id),
         )
         await self._db.conn.commit()
@@ -79,7 +80,7 @@ class TaskManager:
 
     async def complete(self, task_id: str, actor: str | None = None) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
-        condition = " AND owner = ? AND status = 'in_progress'" if actor else ""
+        condition = " AND owner = ? AND status IN ('in_progress', 'in_review')" if actor else " AND status != 'done'"
         params = (now, task_id, actor) if actor else (now, task_id)
         rows = await self._db.conn.execute_fetchall(
             "UPDATE tasks SET status = 'done', updated_at = ? WHERE task_id = ?"
@@ -87,6 +88,7 @@ class TaskManager:
         )
         await self._db.conn.commit()
         return self._row_to_task(rows[0]) if rows else None
+
 
     async def submit_review(self, task_id: str, actor: str | None = None) -> Task | None:
         """Move owned work to the serialized integration queue."""
