@@ -13,6 +13,9 @@ from contextlib import asynccontextmanager
 
 import anyio
 from mcp.server.stdio import stdio_server
+from mcp.shared.message import SessionMessage
+from mcp.types import INVALID_REQUEST, PARSE_ERROR, ErrorData, JSONRPCError
+from pydantic import ValidationError
 
 # Bound a single incoming JSON-RPC line, including arbitrary tool arguments.
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
@@ -38,6 +41,44 @@ class _Output:
 
     async def flush(self):
         await self.writer.drain()
+
+
+class _ProtocolInput:
+    """Turn SDK validation failures into RPC errors instead of silent timeouts."""
+    def __init__(self, reader, writer):
+        self.reader, self.writer = reader, writer
+
+    async def receive(self):
+        while True:
+            item = await self.reader.receive()
+            if not isinstance(item, Exception):
+                return item
+            invalid_json = isinstance(item, ValidationError) and any(
+                error["type"] == "json_invalid" for error in item.errors()
+            )
+            error = ErrorData(
+                code=PARSE_ERROR if invalid_json else INVALID_REQUEST,
+                message="Parse error" if invalid_json else "Invalid request",
+            )
+            await self.writer.send(SessionMessage(JSONRPCError(jsonrpc="2.0", id=None, error=error)))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return await self.receive()
+        except anyio.EndOfStream:
+            raise StopAsyncIteration from None
+
+    async def aclose(self):
+        await self.reader.aclose()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.aclose()
 
 
 @asynccontextmanager
@@ -84,8 +125,8 @@ async def cancellable_stdio():
             lifetime.start_soon(stop_on_eof)
             async with stdio_server(
                 stdin=_Input(reader, eof), stdout=_Output(writer),  # type: ignore[arg-type]
-            ) as streams:
-                yield streams
+            ) as (read_stream, write_stream):
+                yield _ProtocolInput(read_stream, write_stream), write_stream
     finally:
         # Abort also frees a backpressured writer if the peer stopped reading.
         if write_transport is not None and not write_transport.is_closing():
