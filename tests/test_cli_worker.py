@@ -3,25 +3,55 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from agent_bus.cli.main import app
 from agent_bus.cli.worker_cmds import run_team, submit_goal, worker
 
 
-def test_worker_start_creates_pid_and_process(monkeypatch, tmp_path):
+@pytest.fixture
+def spawned_processes(monkeypatch):
+    """Reap every process even when a CLI assertion fails."""
+    processes = []
+    original = subprocess.Popen
+
+    def tracked_popen(*args, **kwargs):
+        proc = original(*args, **kwargs)
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", tracked_popen)
+    try:
+        yield processes
+    finally:
+        for proc in processes:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+
+
+def test_worker_start_creates_pid_and_process(
+    monkeypatch, tmp_path, live_bus_url, spawned_processes,
+):
     """E2E: worker start lanza un proceso real (mock runner) y registra su PID."""
     from agent_bus.cli import worker_cmds
 
     monkeypatch.setattr(worker_cmds, "WORKERS_DIR", tmp_path)
     monkeypatch.setenv("AGENT_BUS_AGENT_ID", "claude")
+    monkeypatch.chdir(tmp_path)
 
     runner = CliRunner()
     result = runner.invoke(
         worker,
-        ["start", "--agent", "claude", "--provider", "mock"],
+        ["start", "--agent", "claude", "--provider", "mock", "--bus-url", live_bus_url],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -36,32 +66,15 @@ def test_worker_start_creates_pid_and_process(monkeypatch, tmp_path):
     result = runner.invoke(worker, ["status", "--agent", "claude"], catch_exceptions=False)
     assert "corriendo" in result.output
 
-    # stop lo mata (el daemon tarda unos segundos en bajar: polling hasta 10s)
+    # Reap the actual child, rather than treating a zombie PID as a live worker.
     result = runner.invoke(worker, ["stop", "--agent", "claude"], catch_exceptions=False)
     assert "SIGTERM" in result.output
-    import subprocess
-    import time
-
-    def _process_alive(pid: int) -> bool:
-        # os.kill(pid, 0) da falso positivo con zombies; ps distingue estado
-        r = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
-        if r.returncode != 0:
-            return False
-        stat = r.stdout.strip()
-        return stat != "Z" and stat != ""
-
-    deadline = time.monotonic() + 10
-    alive = True
-    while time.monotonic() < deadline:
-        if not _process_alive(pid):
-            alive = False
-            break
-        time.sleep(0.2)
-    assert not alive
+    process = next(proc for proc in spawned_processes if proc.pid == pid)
+    assert process.wait(timeout=5) is not None
     assert not pid_file.exists()
 
 
-def test_worker_start_idempotente(monkeypatch, tmp_path):
+def test_worker_start_idempotente(monkeypatch, tmp_path, spawned_processes):
     """Un segundo start con el proceso vivo no duplica el worker."""
     import subprocess
     import sys
@@ -103,17 +116,19 @@ def test_worker_stop_stale_pid(monkeypatch, tmp_path):
     assert "no encontrado" in result.output
 
 
-def test_run_team_and_submit_cli(monkeypatch, tmp_path):
+def test_run_team_and_submit_cli(monkeypatch, tmp_path, live_bus_url, spawned_processes):
     """Verifica que run-team y submit ejecuten correctamente."""
     from agent_bus.cli import worker_cmds
 
     monkeypatch.setattr(worker_cmds, "WORKERS_DIR", tmp_path)
+    # This command otherwise creates worktrees in the checkout running pytest.
+    monkeypatch.chdir(tmp_path)
 
     runner = CliRunner()
     # Test run-team
     res_team = runner.invoke(
         app,
-        ["run-team", "--agents", "claude,antigravity", "--mock"],
+        ["run-team", "--agents", "claude,antigravity", "--mock", "--bus-url", live_bus_url],
         catch_exceptions=False,
     )
     assert res_team.exit_code == 0
@@ -121,13 +136,8 @@ def test_run_team_and_submit_cli(monkeypatch, tmp_path):
     assert "claude" in res_team.output
     assert "antigravity" in res_team.output
 
-    # Clean up spawned workers
-    for agent in ("claude", "antigravity"):
-        pid_file = tmp_path / f"{agent}.pid"
-        if pid_file.exists():
-            try:
-                pid = int(pid_file.read_text().strip())
-                os.kill(pid, 9)
-            except Exception:
-                pass
-            pid_file.unlink(missing_ok=True)
+    res_submit = runner.invoke(
+        app, ["submit", "Review temporary project", "--bus-url", live_bus_url],
+        catch_exceptions=False,
+    )
+    assert res_submit.exit_code == 0

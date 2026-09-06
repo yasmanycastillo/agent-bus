@@ -36,10 +36,10 @@ def test_init_idempotent(runner: CliRunner):
                 assert "inicializado" in result.output.lower()
 
 
-def test_commands_require_server(runner: CliRunner):
+def test_commands_require_server(runner: CliRunner, unavailable_bus_url, monkeypatch):
+    monkeypatch.setattr("agent_bus.cli.main.DEFAULT_URL", unavailable_bus_url)
     result = runner.invoke(app, ["status"])
-    # Either fails (no server) or succeeds (server running) — just verify it doesn't crash
-    assert result.exit_code in (0, 1)
+    assert result.exit_code == 1
 
 
 def test_init_generates_protocols(runner: CliRunner):

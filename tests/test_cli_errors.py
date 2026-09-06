@@ -58,15 +58,11 @@ def test_error_generico_extrae_campo_error():
     assert "Bad file" in _explain_error(resp)
 
 
-def test_e2e_cli_lock_sin_parametro_cuenta():
-    """La respuesta de 422 del bus real se traduce (contra servidor vivo)."""
+def test_e2e_cli_lock_sin_parametro_cuenta(live_bus_url):
+    """La respuesta 422 del hub efímero se traduce sin tocar el bus personal."""
     import httpx
 
-    try:
-        with httpx.Client(base_url="http://localhost:8420", timeout=3) as c:
-            resp = c.post("/locks/acquire", json={"path": "x.py", "agent_id": "claude"})
-    except httpx.ConnectError:
-        return  # sin servidor: skip silencioso
-    if resp.status_code == 422:
-        msg = _explain_error(resp)
-        assert "file_path" in msg  # antes: JSON crudo ilegible
+    with httpx.Client(base_url=live_bus_url, timeout=3) as c:
+        resp = c.post("/locks/acquire", json={"path": "x.py", "agent_id": "claude"})
+    assert resp.status_code == 422
+    assert "file_path" in _explain_error(resp)

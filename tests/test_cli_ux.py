@@ -6,12 +6,13 @@ import pytest
 from agent_bus.cli.main import app
 
 
-def test_top_cmd_once():
+def test_top_cmd_once(live_bus_url, monkeypatch):
+    monkeypatch.setattr("agent_bus.cli.main.DEFAULT_URL", live_bus_url)
     runner = CliRunner()
     res = runner.invoke(app, ["top", "--once"])
-    # It attempts to fetch from localhost:8420 or prints error gracefully
     assert res.exit_code == 0
-    assert "top" in res.output or "Error" in res.output
+    assert "top" in res.output
+    assert "Error" not in res.output
 
 
 def test_quickstart_help():
