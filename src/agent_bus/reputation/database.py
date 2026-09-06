@@ -367,6 +367,27 @@ class Database:
             await self.conn.rollback()
             raise
 
+    async def transaction(self, operation, *, savepoint: str = "db_tx"):
+        """Execute a multi-statement callback atomically within a SQLite savepoint.
+
+        Confines the entire transaction to a single aiosqlite worker callback.
+        Releasing the outermost savepoint commits immediately to disk without
+        calling connection.commit(), avoiding cross-coroutine commit interference
+        on the shared connection.
+        """
+        def runner(connection):
+            connection.execute(f"SAVEPOINT {savepoint}")
+            try:
+                result = operation(connection)
+                connection.execute(f"RELEASE {savepoint}")
+                return result
+            except BaseException:
+                connection.execute(f"ROLLBACK TO {savepoint}")
+                connection.execute(f"RELEASE {savepoint}")
+                raise
+
+        return await self.conn._execute(runner, self.conn._conn)
+
     @property
     def conn(self) -> aiosqlite.Connection:
         if self._connection is None:

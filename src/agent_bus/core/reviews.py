@@ -64,10 +64,10 @@ class ReviewLog:
                 conn.execute("RELEASE review_add")
             except BaseException:
                 conn.execute("ROLLBACK TO review_add")
+                conn.execute("RELEASE review_add")
                 raise
 
         await self._db.conn._execute(transaction, self._db.conn._conn)
-        await self._db.conn.commit()
         return review
 
     async def get(self, review_id: str) -> ReviewDecision | None:

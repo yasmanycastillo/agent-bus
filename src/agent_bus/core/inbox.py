@@ -50,6 +50,8 @@ class InboxManager:
 
         The first write acquires SQLite's writer reservation before any reads;
         independent connections cannot race between lookup and mutation.
+        Releasing the savepoint commits atomic mutations directly without
+        calling connection.commit(), preventing cross-coroutine commit interference.
         """
         def transaction(connection):
             connection.execute("SAVEPOINT inbox_operation")
@@ -64,12 +66,9 @@ class InboxManager:
                 connection.execute("RELEASE inbox_operation")
                 raise
 
-        # aiosqlite has no public multi-statement callback. This is the same
-        # confined transaction boundary used by task transfer + audit.
-        result = await self._db.conn._execute(transaction, self._db.conn._conn)
-        if write:
-            await self._db.conn.commit()
-        return result
+        # aiosqlite has no public multi-statement callback. Confining execution
+        # to a single driver callback ensures atomic commit via savepoint release.
+        return await self._db.conn._execute(transaction, self._db.conn._conn)
 
     @staticmethod
     def _insert_delivery(connection, envelope: Envelope):

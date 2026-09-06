@@ -443,7 +443,6 @@ class TaskManager:
                 raise
 
         row = await self._db.conn._execute(transaction, self._db.conn._conn)
-        await self._db.conn.commit()
         return self._row_to_task(row) if row is not None else None
 
     async def unlock_files(self, task_id: str) -> Task | None:
