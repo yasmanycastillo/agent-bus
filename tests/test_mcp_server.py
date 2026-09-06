@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from uuid import UUID
 
 import httpx
 import pytest
@@ -86,3 +87,38 @@ async def test_mcp_coordination_tools_against_real_hub(live_bus_url):
     done = await call_tool(server, "complete_task", {"task_id": "T1", "agent_id": "claude"})
     assert done["status"] == "done"
     assert (await call_tool(server, "get_project_status", {}))["locks"] == []
+
+
+@pytest.mark.parametrize("context", [None, "A shared project needs durable delivery"])
+async def test_mcp_record_decision_minimal_and_context(live_bus_url, context):
+    server = McpServer(bus_url=live_bus_url)
+    args = {"title": "Use SQLite", "what": "Persist each delivery", "decided_by": "claude"}
+    if context is not None:
+        args["context"] = context
+    decision = await call_tool(server, "record_decision", args)
+    assert UUID(decision["decision_id"])
+    assert decision["decision"] == args["what"]
+    assert decision["context"] == (context or "")
+    assert decision["decided_by"] == "claude"
+    async with httpx.AsyncClient(base_url=live_bus_url) as client:
+        response = await client.get(f"/decisions/{decision['decision_id']}")
+        response.raise_for_status()
+        assert response.json() == decision
+
+
+@pytest.mark.parametrize("invalid", [
+    {"title": "Missing fields"},
+    {"title": "Example", "what": "", "decided_by": "claude"},
+    {"title": "Example", "what": 123, "decided_by": "claude"},
+    {"title": "Example", "what": "Decision", "decided_by": "claude", "context": None},
+])
+async def test_mcp_record_decision_invalid_arguments(live_bus_url, invalid):
+    server = McpServer(bus_url=live_bus_url)
+    response = await server.handle_request({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "record_decision", "arguments": invalid},
+    })
+    assert "error" in response
+    assert "validation error" in response["error"]["message"]
+    async with httpx.AsyncClient(base_url=live_bus_url) as client:
+        assert (await client.get("/decisions")).json() == []

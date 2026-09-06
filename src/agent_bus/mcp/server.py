@@ -12,14 +12,26 @@ import json
 import logging
 import sys
 from typing import Any
+from uuid import uuid4
 
 import httpx
+from pydantic import BaseModel, Field, StrictStr
 
 logger = logging.getLogger("agent_bus.mcp")
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "agent-bus"
 SERVER_VERSION = "0.1.0"
+
+
+class DecisionToolArguments(BaseModel):
+    """Public MCP arguments adapted to the hub's DecisionRequest contract."""
+
+    title: StrictStr = Field(min_length=1, description="Título de la decisión")
+    what: StrictStr = Field(min_length=1, description="Descripción de la decisión")
+    decided_by: StrictStr = Field(min_length=1, description="Agente responsable")
+    context: StrictStr = Field(default="", description="Contexto adicional")
+
 
 TOOLS_DEFINITIONS = [
     {
@@ -131,16 +143,7 @@ TOOLS_DEFINITIONS = [
     {
         "name": "record_decision",
         "description": "Registrar una decisión arquitectónica (ADR) compartida con el equipo.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "Título de la decisión"},
-                "what": {"type": "string", "description": "Descripción de la decisión"},
-                "decided_by": {"type": "string", "description": "Agente responsable"},
-                "context": {"type": "string", "description": "Contexto adicional"},
-            },
-            "required": ["title", "what", "decided_by"],
-        },
+        "inputSchema": DecisionToolArguments.model_json_schema(),
     },
 ]
 
@@ -276,11 +279,13 @@ class McpServer:
                 }
 
             elif name == "record_decision":
+                decision = DecisionToolArguments.model_validate(args)
                 payload = {
-                    "title": args["title"],
-                    "what": args["what"],
-                    "decided_by": args["decided_by"],
-                    "context": args.get("context"),
+                    "decision_id": str(uuid4()),
+                    "title": decision.title,
+                    "decision": decision.what,
+                    "decided_by": decision.decided_by,
+                    "context": decision.context,
                 }
                 resp = await client.post("/decisions", json=payload)
                 resp.raise_for_status()
