@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
+import re
+import subprocess
 
 import yaml
 
@@ -8,24 +12,126 @@ import yaml
 PROJECT_DIR = ".agent-bus"
 
 
-def find_project_dir(cwd: Path | None = None) -> Path | None:
-    base = cwd or Path.cwd()
-    candidate = base / PROJECT_DIR
-    if candidate.is_dir():
-        return candidate
+def _base(cwd: Path | None = None) -> Path:
+    base = Path(cwd or Path.cwd()).expanduser().resolve()
+    if not base.is_dir():
+        raise ValueError("Project location must be an existing directory")
+    return base
+
+
+def _git_roots(base: Path) -> tuple[Path, Path] | None:
+    """Return (actual checkout, primary checkout) without inheriting Git overrides."""
+    env = {key: value for key, value in os.environ.items()
+           if key not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"}}
+    try:
+        checkout = subprocess.run(
+            ["git", "-C", str(base), "rev-parse", "--show-toplevel"],
+            check=True, capture_output=True, text=True, timeout=3, env=env,
+        ).stdout.strip()
+        worktrees = subprocess.run(
+            ["git", "-C", str(base), "worktree", "list", "--porcelain", "-z"],
+            check=True, capture_output=True, text=True, timeout=3, env=env,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # Git's first entry is the primary checkout (or bare common repository).
+    primary = next((record.removeprefix("worktree ") for record in worktrees.split("\0")
+                    if record.startswith("worktree ")), checkout)
+    return Path(checkout).resolve(), Path(primary).resolve()
+
+
+def _explicit_root() -> Path | None:
+    value = os.environ.get("AGENT_BUS_PROJECT_ROOT")
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    if not value or not path.is_absolute() or not path.is_dir():
+        raise ValueError("AGENT_BUS_PROJECT_ROOT must name an existing absolute directory")
+    return path.resolve()
+
+
+def _has_project_marker(base: Path) -> bool:
+    marker = base / PROJECT_DIR
+    if not marker.is_dir():
+        return False
+    # The legacy user configuration directory is not automatically a project.
+    if base == Path.home().resolve():
+        path = marker / "config.yaml"
+        if not path.exists():
+            return False
+        data = yaml.safe_load(path.read_text()) or {}
+        return isinstance(data, dict) and bool({"project_id", "bus_url"} & data.keys())
+    return True
+
+
+def resolve_project_root(cwd: Path | None = None) -> Path | None:
+    """Find the nearest project, sharing canonical state across Git worktrees.
+
+    Nested repositories are hard boundaries, including ones without an agent-bus
+    marker. A linked checkout resolves marker paths against the primary checkout.
+    """
+    explicit = _explicit_root()
+    if explicit is not None:
+        return explicit
+    base = _base(cwd)
+    roots = _git_roots(base)
+    if roots:
+        checkout, common = roots
+        for candidate in (base, *base.parents):
+            if not candidate.is_relative_to(checkout):
+                break
+            canonical = common / candidate.relative_to(checkout)
+            if _has_project_marker(canonical):
+                return canonical.resolve()
+            if candidate == checkout:
+                break
+        return common
+    for candidate in (base, *base.parents):
+        if _has_project_marker(candidate):
+            return candidate
+        # Fail closed if Git is unavailable or metadata is broken: do not
+        # inherit an outer project's configuration through a nested repository.
+        if (candidate / ".git").exists():
+            return candidate
     return None
 
 
+def get_checkout_root(cwd: Path | None = None) -> Path | None:
+    """Actual source checkout for generated files; shared config stays canonical."""
+    base = _base(cwd)
+    roots = _git_roots(base)
+    if roots:
+        return roots[0]
+    return resolve_project_root(base)
+
+
+def project_identity(root: Path) -> str:
+    canonical = Path(root).resolve()
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", canonical.name).strip("-_.")[:40] or "project"
+    digest = hashlib.sha256(str(canonical).encode()).hexdigest()[:16]
+    return f"{name}-{digest}"
+
+
+def find_project_dir(cwd: Path | None = None) -> Path | None:
+    root = resolve_project_root(cwd)
+    candidate = root / PROJECT_DIR if root else None
+    return candidate if candidate and candidate.is_dir() else None
+
+
 def init_project(cwd: Path | None = None) -> Path:
-    base = cwd or Path.cwd()
+    base = resolve_project_root(cwd) or _base(cwd)
     project = base / PROJECT_DIR
-    project.mkdir(exist_ok=True)
+    project.mkdir(parents=True, exist_ok=True)
     (project / "agents").mkdir(exist_ok=True)
-
     config = project / "config.yaml"
-    if not config.exists():
-        config.write_text("bus_url: http://localhost:8420\n")
-
+    existing = yaml.safe_load(config.read_text()) or {} if config.exists() else {}
+    if not isinstance(existing, dict):
+        raise ValueError("Project config must contain a YAML mapping")
+    updated = dict(existing)
+    updated.setdefault("bus_url", "http://127.0.0.1:8420")
+    updated.setdefault("project_id", project_identity(base))
+    if updated != existing or not config.exists():
+        config.write_text(yaml.safe_dump(updated, sort_keys=False))
     return project
 
 
@@ -135,7 +241,7 @@ def generate_agent_protocol(agent_id: str, cwd: Path | None = None) -> Path | No
     project = find_project_dir(cwd)
     if not project:
         return None
-    base = cwd or Path.cwd()
+    base = get_checkout_root(cwd) or project.parent
     path = base / f"{agent_id.upper()}.md"
     path.write_text(_AGENT_PROTOCOL_TEMPLATE.format(agent_id=agent_id))
     return path

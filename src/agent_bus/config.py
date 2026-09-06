@@ -7,12 +7,31 @@ from pathlib import Path
 import yaml
 
 
-DEFAULT_CONFIG_DIR = Path(os.environ.get("AGENT_BUS_CONFIG_DIR", Path.home() / ".agent-bus"))
+DEFAULT_CONFIG_DIR = Path.home() / ".agent-bus"
+
+
+def _project_root() -> Path | None:
+    # Explicit runtime configuration is self-contained. In particular, test and
+    # operator configs must not inherit the repository from which they run.
+    if "AGENT_BUS_CONFIG_DIR" in os.environ and "AGENT_BUS_PROJECT_ROOT" not in os.environ:
+        return None
+    from agent_bus.project import resolve_project_root
+    return resolve_project_root()
+
+
+def _absolute(value: str | Path, base: Path | None = None) -> Path:
+    path = Path(value).expanduser()
+    return (path if path.is_absolute() else (base or Path.cwd()) / path).resolve()
 
 
 def get_config_dir() -> Path:
-    """Resolve explicit configuration at use time, including child processes."""
-    return Path(os.environ.get("AGENT_BUS_CONFIG_DIR", DEFAULT_CONFIG_DIR)).expanduser()
+    """Project runtime by default; explicit overrides resolve at invocation cwd."""
+    if "AGENT_BUS_CONFIG_DIR" in os.environ:
+        if not os.environ["AGENT_BUS_CONFIG_DIR"]:
+            raise ValueError("AGENT_BUS_CONFIG_DIR must not be empty")
+        return _absolute(os.environ["AGENT_BUS_CONFIG_DIR"])
+    root = _project_root()
+    return root / ".agent-bus" / "runtime" if root else _absolute(DEFAULT_CONFIG_DIR)
 
 
 @dataclass
@@ -66,6 +85,7 @@ class KeysConfig:
 
 @dataclass
 class AppConfig:
+    project_root: str | None = None
     bus: BusConfig = field(default_factory=BusConfig)
     inbox: InboxConfig = field(default_factory=InboxConfig)
     consensus: ConsensusConfig = field(default_factory=ConsensusConfig)
@@ -77,61 +97,87 @@ class AppConfig:
 
 
 def load_config(path: Path | None = None) -> AppConfig:
-    """Load config from YAML file, falling back to defaults."""
-    config = AppConfig()
-    if path is None:
-        path = get_config_dir() / "config.yaml"
-    raw = {}
-    if path.exists():
-        with open(path) as f:
-            raw = yaml.safe_load(f) or {}
+    """Resolve configuration and every filesystem path before child cwd changes."""
+    from agent_bus.project import project_identity
 
-    if "bus" in raw:
-        for k, v in raw["bus"].items():
-            if hasattr(config.bus, k):
-                setattr(config.bus, k, v)
+    root = _project_root()
+    config_dir = get_config_dir()
+    config = AppConfig(
+        project_root=str(root) if root else None,
+        keys=KeysConfig(private_key_path=str(config_dir / "private.key"),
+                        public_key_path=str(config_dir / "public.key")),
+        data_dir=str(config_dir / "data"), database_path=str(config_dir / "data" / "agent_bus.db"),
+    )
+    project = {}
+    if root and (root / ".agent-bus" / "config.yaml").exists():
+        project = yaml.safe_load((root / ".agent-bus" / "config.yaml").read_text()) or {}
+        if not isinstance(project, dict):
+            raise ValueError("Project config must contain a YAML mapping")
+    config.bus.project_id = project.get("project_id") or (project_identity(root) if root else "default")
+    path = _absolute(path) if path is not None else config_dir / "config.yaml"
+    raw = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
+    if not isinstance(raw, dict):
+        raise ValueError("Runtime config must contain a YAML mapping")
 
-    if "inbox" in raw:
-        for k, v in raw["inbox"].items():
-            if hasattr(config.inbox, k):
-                setattr(config.inbox, k, v)
+    for section in ("bus", "inbox", "consensus", "logging", "keys"):
+        values = raw.get(section, {})
+        if not isinstance(values, dict):
+            raise ValueError(f"Configuration section {section} must be a mapping")
+        target = getattr(config, section)
+        for key, value in values.items():
+            if hasattr(target, key):
+                setattr(target, key, value)
+    for key, value in raw.get("reputation", {}).items():
+        if key == "weights" and isinstance(value, dict):
+            for weight, amount in value.items():
+                if hasattr(config.reputation.weights, weight):
+                    setattr(config.reputation.weights, weight, amount)
+        elif hasattr(config.reputation, key):
+            setattr(config.reputation, key, value)
 
-    if "consensus" in raw:
-        for k, v in raw["consensus"].items():
-            if hasattr(config.consensus, k):
-                setattr(config.consensus, k, v)
-
-    if "reputation" in raw:
-        rep = raw["reputation"]
-        for k, v in rep.items():
-            if k == "weights" and isinstance(v, dict):
-                for wk, wv in v.items():
-                    if hasattr(config.reputation.weights, wk):
-                        setattr(config.reputation.weights, wk, wv)
-            elif hasattr(config.reputation, k):
-                setattr(config.reputation, k, v)
-
-    if "logging" in raw:
-        for k, v in raw["logging"].items():
-            if hasattr(config.logging, k):
-                setattr(config.logging, k, v)
-
-    if "keys" in raw:
-        for k, v in raw["keys"].items():
-            if hasattr(config.keys, k):
-                setattr(config.keys, k, v)
-
-    config.data_dir = str(Path(raw.get("data_dir", config.data_dir)).expanduser())
+    config.data_dir = str(_absolute(raw.get("data_dir", config.data_dir), path.parent))
+    for key in ("private_key_path", "public_key_path"):
+        setattr(config.keys, key, str(_absolute(getattr(config.keys, key), path.parent)))
     configured_db = raw.get("database_path")
     default_db = Path(config.data_dir) / "agent_bus.db"
-    legacy_db = get_config_dir() / "agent_bus.db"
-    # Older no-config startup used a different default. Keep an existing legacy
-    # database without silently moving its data or losing its registrations.
+    legacy_db = config_dir / "agent_bus.db"
     if not configured_db and "data_dir" not in raw and legacy_db.exists() and not default_db.exists():
         default_db = legacy_db
-    config.database_path = str(Path(
-        os.environ.get("AGENT_BUS_DATABASE_PATH", configured_db or default_db)
-    ).expanduser())
+    if "AGENT_BUS_DATABASE_PATH" in os.environ:
+        config.database_path = str(_absolute(os.environ["AGENT_BUS_DATABASE_PATH"]))
+    else:
+        config.database_path = str(_absolute(configured_db or default_db, path.parent))
     config.bus.project_id = os.environ.get("AGENT_BUS_PROJECT_ID", config.bus.project_id)
-
     return config
+
+
+def get_bus_url(explicit: str | None = None) -> str:
+    """Argument > environment > project marker > runtime host/port > defaults."""
+    from urllib.parse import urlsplit
+
+    value = explicit if explicit is not None else os.environ.get("AGENT_BUS_URL")
+    if value is None:
+        config = load_config()
+        project = {}
+        if config.project_root:
+            path = Path(config.project_root) / ".agent-bus" / "config.yaml"
+            if path.exists():
+                project = yaml.safe_load(path.read_text()) or {}
+        value = project.get("bus_url")
+        if value is None:
+            host = config.bus.host
+            if host == "0.0.0.0":
+                host = "127.0.0.1"
+            elif host == "::":
+                host = "::1"
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            value = f"http://{host}:{config.bus.port}"
+    if not isinstance(value, str) or not value:
+        raise ValueError("Bus URL must be a nonempty HTTP(S) URL")
+    parsed = urlsplit(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("Bus URL must be an HTTP(S) origin without credentials")
+    if parsed.query or parsed.fragment or (parsed.port is not None and not 1 <= parsed.port <= 65535):
+        raise ValueError("Invalid bus URL")
+    return value.rstrip("/")
