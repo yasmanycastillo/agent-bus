@@ -79,14 +79,18 @@ async def test_mcp_wait_fetches_only_five_messages(mcp_transport):
     requests = []
     def handle(request):
         requests.append(request)
+        if request.url.path.endswith("/events/cursor"):
+            return httpx.Response(200, json={"cursor": "checkpoint"})
         return httpx.Response(200, json={"messages": [{"message_id": f"m{i}"} for i in range(5)], "next_cursor": "more"})
     result = await mcp_transport(handle)._wait_for_updates("alice", 1)
     assert result["count"] == 5
     assert result["next_cursor"] == "more"
+    assert result["event_cursor"] == "checkpoint"
     assert "total_in_inbox" not in result
-    assert len(requests) == 1
-    assert requests[0].url.path == "/inbox/alice/messages"
-    assert requests[0].url.params["limit"] == "5"
+    assert len(requests) == 2
+    assert requests[0].url.path == "/inbox/alice/events/cursor"
+    assert requests[1].url.path == "/inbox/alice/messages"
+    assert requests[1].url.params["limit"] == "5"
 
 
 @pytest.fixture

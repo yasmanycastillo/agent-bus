@@ -102,7 +102,7 @@ class WorkerDaemon:
     async def _on_sse_event(self, event: dict[str, Any]) -> None:
         """Called when an SSE event arrives from the bus."""
         # High priority wake up for messages requiring reply or task assignments
-        if event.get("reply_needed") or event.get("message_type") in ("handoff", "task_assigned"):
+        if event.get("event") == "reset" or event.get("reply_needed") or event.get("message_type") in ("handoff", "task_assigned"):
             self._wake_event.set()
 
     async def _heartbeat_loop(self) -> None:

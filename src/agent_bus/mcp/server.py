@@ -19,7 +19,8 @@ from uuid import uuid4
 import httpx
 from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr
 
-from agent_bus.security import async_bus_client, load_session
+from agent_bus.security import AuthenticationError, async_bus_client, load_session
+from agent_bus.core.sse import iter_sse_frames
 
 logger = logging.getLogger("agent_bus.mcp")
 
@@ -35,6 +36,13 @@ class DecisionToolArguments(BaseModel):
     what: StrictStr = Field(min_length=1, description="Descripción de la decisión")
     decided_by: StrictStr = Field(min_length=1, description="Agente responsable")
     context: StrictStr = Field(default="", description="Contexto adicional")
+
+
+class WaitArguments(BaseModel):
+    agent_id: StrictStr = Field(min_length=1)
+    timeout: StrictInt = Field(default=120, ge=1, le=120, description="Plazo total en segundos, incluida la consulta inicial")
+    event_cursor: StrictStr | None = Field(default=None, min_length=1, max_length=2048,
+                                           description="Cursor de eventos para reanudar; distinto del cursor del inbox")
 
 
 class PostMessageArguments(BaseModel):
@@ -71,21 +79,7 @@ TOOLS_DEFINITIONS = [
     {
         "name": "wait_for_updates",
         "description": "Bloquea la ejecución hasta recibir un nuevo mensaje, tarea o evento del bus por SSE (patrón long-polling reactivo).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "agent_id": {
-                    "type": "string",
-                    "description": "Identificador del agente que espera eventos (ej: claude, antigravity)",
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Tiempo máximo en segundos a esperar antes de retornar timeout (default: 120)",
-                    "default": 120,
-                },
-            },
-            "required": ["agent_id"],
-        },
+        "inputSchema": WaitArguments.model_json_schema(),
     },
     {
         "name": "post_message",
@@ -172,6 +166,7 @@ TOOLS_DEFINITIONS = [
 class McpServer:
     def __init__(self, bus_url: str = "http://127.0.0.1:8420", agent_id: str | None = None) -> None:
         self.bus_url = bus_url.rstrip("/")
+        self._event_cursors: dict[str, str] = {}
         self.session = None
         if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
             self.session = load_session(agent_id)
@@ -257,13 +252,11 @@ class McpServer:
 
     async def execute_tool(self, name: str, args: dict[str, Any]) -> Any:
         args = self._bind_identity(args)
+        if name == "wait_for_updates":
+            wait = WaitArguments.model_validate(args)
+            return await self._wait_for_updates(wait.agent_id, wait.timeout, wait.event_cursor)
         async with self._client() as client:
-            if name == "wait_for_updates":
-                agent_id = args["agent_id"]
-                timeout = int(args.get("timeout", 120))
-                return await self._wait_for_updates(agent_id, timeout)
-
-            elif name == "post_message":
+            if name == "post_message":
                 message = PostMessageArguments.model_validate(args)
                 payload = {
                     "from_agent": message.from_agent,
@@ -367,50 +360,115 @@ class McpServer:
             else:
                 raise ValueError(f"Unknown tool: {name}")
 
-    async def _wait_for_updates(self, agent_id: str, timeout: int) -> dict[str, Any]:
-        """Verifica inbox pendiente o espera un evento SSE del bus hasta el timeout."""
+    async def _wait_for_updates(self, agent_id: str, timeout: int, event_cursor: str | None = None) -> dict[str, Any]:
+        """Capture a durable cursor before reading pending messages, within one deadline."""
+        wait = WaitArguments(agent_id=agent_id, timeout=timeout, event_cursor=event_cursor)
         if self.session and agent_id != self.agent_id:
             raise ValueError("agent_id must match the authenticated MCP session")
-        # 1. Chequeo rápido de pendientes existentes
-        async with self._client(timeout=10.0) as client:
-            try:
-                response = await client.get(f"/inbox/{agent_id}/messages", params={"limit": 5})
-                response.raise_for_status()
-                page = response.json()
-                messages = page["messages"]
-                if messages:
-                    return {
-                        "status": "pending_messages",
-                        "count": len(messages),
-                        "messages": messages,
-                        "next_cursor": page.get("next_cursor"),
-                        "hint": "Procesa y confirma con ack_messages; continúa con read_messages y next_cursor.",
-                    }
-            except Exception as exc:
-                return {"status": "error", "error": str(exc)}
+        cursor = wait.event_cursor or self._event_cursors.get(agent_id)
+        phase = "checkpoint"
 
-        # 2. Espera reactiva sobre el stream SSE
+        def remember(value):
+            nonlocal cursor
+            if not isinstance(value, str) or not value or len(value) > 2048:
+                raise ValueError("Hub returned no valid event cursor")
+            cursor = value
+            self._event_cursors[agent_id] = value
+
+        def error(code, message, **extra):
+            return {"status": "error", "code": code, "error": message,
+                    "event_cursor": cursor, **extra}
+
+        def pending(page, *, event=None):
+            result = {
+                "status": "pending_messages" if event is None else "event_received",
+                "count": len(page["messages"]), "messages": page["messages"],
+                "next_cursor": page.get("next_cursor"), "event_cursor": cursor,
+                "hint": "Procesa y confirma con ack_messages; next_cursor continúa el inbox, event_cursor reanuda eventos.",
+            }
+            if event is not None:
+                result["event"] = event
+            return result
+
         try:
-            async with self._client(timeout=timeout) as client:
-                async with client.stream("GET", f"/events/{agent_id}") as resp:
-                    resp.raise_for_status()
-                    async for line in resp.aiter_lines():
-                        if line.startswith("data:"):
-                            raw_data = line[len("data:") :].strip()
-                            try:
-                                event = json.loads(raw_data)
-                            except Exception:
-                                event = {"raw": raw_data}
-                            return {
-                                "status": "event_received",
-                                "event": event,
-                            }
-        except httpx.TimeoutException:
-            return {"status": "timeout", "message": f"No events received within {timeout}s"}
-        except Exception as exc:
-            return {"status": "error", "error": str(exc)}
+            # An HTTP read timeout restarts after each received chunk. This
+            # deadline also bounds lookup, connection, comments and checkpoints.
+            async with asyncio.timeout(wait.timeout):
+                async with self._client(timeout=None) as client:
+                    response = await client.get(
+                        f"/inbox/{agent_id}/events/cursor", params={"cursor": cursor} if cursor else {},
+                    )
+                    response.raise_for_status()
+                    remember(response.json()["cursor"])
 
-        return {"status": "timeout", "message": "Stream closed"}
+                    async def read_page():
+                        response = await client.get(f"/inbox/{agent_id}/messages", params={"limit": 5})
+                        response.raise_for_status()
+                        page = response.json()
+                        if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
+                            raise ValueError("Hub returned no inbox page")
+                        return page
+
+                    phase = "inbox"
+                    page = await read_page()
+                    if page["messages"]:
+                        return pending(page)
+                    phase = "stream"
+                    async with client.stream(
+                        "GET", f"/inbox/{agent_id}/events", headers={"Last-Event-ID": cursor},
+                    ) as response:
+                        if response.is_error:
+                            await response.aread()
+                        response.raise_for_status()
+                        async for frame in iter_sse_frames(response.aiter_lines()):
+                            kind = frame["event"]
+                            if kind == "checkpoint":
+                                remember(frame.get("id") or json.loads(frame["data"])["cursor"])
+                                continue
+                            if kind == "reset":
+                                control = json.loads(frame["data"])
+                                if not isinstance(control, dict) or control.get("error") != "cursor_expired":
+                                    raise ValueError("Hub returned an invalid reset event")
+                                remember(control["cursor"])
+                                return error("cursor_expired", "Event cursor expired; recover pending messages",
+                                             recovery="read_messages")
+                            if kind != "message":
+                                continue
+                            event = json.loads(frame["data"])
+                            if not isinstance(event, dict):
+                                raise ValueError("Hub returned an invalid event")
+                            # Events are hints; an archived historical delivery
+                            # must not cause a new response loop on reconnection.
+                            page = await read_page()
+                            remember(frame["id"])
+                            if page["messages"]:
+                                return pending(page, event=event if any(
+                                    item.get("message_id") == event.get("message_id")
+                                    for item in page["messages"]
+                                ) else None)
+                    return error("stream_closed", "Event stream closed before the deadline")
+        except TimeoutError:
+            return {"status": "timeout", "message": f"No pending updates within the total {timeout}s deadline",
+                    "event_cursor": cursor}
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 410:
+                try:
+                    remember(exc.response.json()["cursor"])
+                except (ValueError, KeyError):
+                    return error("protocol_error", "Expired-cursor response has no recovery cursor")
+                return error("cursor_expired", "Event cursor expired; recover pending messages",
+                             recovery="read_messages")
+            code = {401: "unauthenticated", 403: "forbidden", 422: "cursor_invalid"}.get(status, "hub_error")
+            return error(code, f"Hub rejected the {phase} request (HTTP {status})")
+        except AuthenticationError as exc:
+            return error("unauthenticated", str(exc))
+        except httpx.ConnectError:
+            return error("bus_unavailable", "Cannot connect to the hub")
+        except httpx.TransportError as exc:
+            return error("stream_closed" if phase == "stream" else "bus_unavailable", str(exc))
+        except (ValueError, KeyError, TypeError) as exc:
+            return error("protocol_error", str(exc))
 
 
 async def run_mcp_server(bus_url: str = "http://127.0.0.1:8420", agent_id: str | None = None) -> None:
