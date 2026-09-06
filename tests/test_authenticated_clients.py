@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from click.testing import CliRunner
+from mcp import Client
 
 from agent_bus import security
 from agent_bus.mcp.server import McpServer
@@ -58,10 +59,12 @@ async def test_mcp_binds_actor_and_token_at_startup(credentials, monkeypatch):
     with pytest.raises(ValueError, match="authenticated MCP session"):
         await server.execute_tool("post_message", {"from_agent": "bob", "to_agent": "alice", "text": "Spoof"})
     assert len(requests) == 1
-    tools = (await server.handle_request({"id": 1, "method": "tools/list"}))["result"]["tools"]
+    async with Client(server.sdk_server()) as client:
+        tools = (await client.list_tools()).tools
     for tool in tools:
-        assert not {"agent_id", "from_agent", "decided_by"} & tool["inputSchema"]["properties"].keys()
-        assert not {"agent_id", "from_agent", "decided_by"} & set(tool["inputSchema"].get("required", []))
+        assert not {"agent_id", "from_agent", "decided_by"} & tool.input_schema["properties"].keys()
+        assert not {"agent_id", "from_agent", "decided_by"} & set(tool.input_schema.get("required", []))
+        assert tool.input_schema["additionalProperties"] is False
 
 
 async def test_mcp_decision_uses_session_actor(credentials, monkeypatch):

@@ -5,25 +5,25 @@ from uuid import UUID
 
 import httpx
 import pytest
-from agent_bus.mcp.server import McpServer, TOOLS_DEFINITIONS
+from mcp import Client
+from agent_bus.mcp.server import McpServer
 
 
 @pytest.mark.asyncio
 async def test_mcp_initialize():
     server = McpServer()
-    resp = await server.handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
-    assert resp["jsonrpc"] == "2.0"
-    assert resp["id"] == 1
-    assert resp["result"]["serverInfo"]["name"] == "agent-bus"
-    assert "tools" in resp["result"]["capabilities"]
+    async with Client(server.sdk_server()) as client:
+        assert client.server_info.name == "agent-bus"
+        assert client.server_capabilities.tools is not None
+
 
 
 @pytest.mark.asyncio
 async def test_mcp_tools_list():
     server = McpServer()
-    resp = await server.handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-    tools = resp["result"]["tools"]
-    tool_names = [t["name"] for t in tools]
+    async with Client(server.sdk_server()) as client:
+        tools = (await client.list_tools()).tools
+    tool_names = [tool.name for tool in tools]
     assert "wait_for_updates" in tool_names
     assert "post_message" in tool_names
     assert "ack_messages" in tool_names
@@ -39,18 +39,18 @@ async def test_mcp_wait_for_updates_timeout(live_bus_url):
     assert res["status"] == "timeout"
 
 
-async def call_tool(server, name, arguments):
-    response = await server.handle_request({
-        "jsonrpc": "2.0", "id": 10, "method": "tools/call",
-        "params": {"name": name, "arguments": arguments},
-    })
-    assert "error" not in response, response
-    return json.loads(response["result"]["content"][0]["text"])
+async def call_tool(server, name, arguments, *, expected_error=False):
+    async with Client(server.sdk_server()) as client:
+        response = await client.call_tool(name, arguments)
+    assert bool(response.is_error) is expected_error, response
+    data = json.loads(response.content[0].text)
+    assert response.structured_content == data
+    return data
 
 
 async def test_mcp_wait_for_updates_bus_unavailable(unavailable_bus_url):
     server = McpServer(bus_url=unavailable_bus_url)
-    res = await call_tool(server, "wait_for_updates", {"agent_id": "claude", "timeout": 1})
+    res = await call_tool(server, "wait_for_updates", {"agent_id": "claude", "timeout": 1}, expected_error=True)
     assert res["status"] == "error"
     assert res["error"]
 
@@ -127,11 +127,7 @@ async def test_mcp_record_decision_minimal_and_context(live_bus_url, context):
 ])
 async def test_mcp_record_decision_invalid_arguments(live_bus_url, invalid):
     server = McpServer(bus_url=live_bus_url)
-    response = await server.handle_request({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "record_decision", "arguments": invalid},
-    })
-    assert "error" in response
-    assert "validation error" in response["error"]["message"]
+    response = await call_tool(server, "record_decision", invalid, expected_error=True)
+    assert response["code"] == "invalid_arguments"
     async with httpx.AsyncClient(base_url=live_bus_url) as client:
         assert (await client.get("/decisions")).json() == []
