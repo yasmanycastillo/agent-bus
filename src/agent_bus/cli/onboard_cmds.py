@@ -18,10 +18,12 @@ def _run(*args: str) -> None:
 @click.option("--agents", default=None, help="Lista agente:proveedor separada por comas.")
 @click.option("--admin", default="integrator", show_default=True, help="Identidad administradora.")
 @click.option("--mock", is_flag=True, help="Usar workers mock durante la prueba inicial.")
-def onboard(agents: str | None, admin: str, mock: bool) -> None:
+@click.option("--port", default=8421, type=click.IntRange(1, 65535), show_default=True,
+              help="Puerto aislado del hub de este proyecto.")
+def onboard(agents: str | None, admin: str, mock: bool, port: int) -> None:
     """Preparar un proyecto completo con preguntas guiadas y confirmaciones."""
     click.echo("\nagent-bus: asistente de puesta en marcha\n")
-    _run("init")
+    _run("init", "--bus-url", f"http://127.0.0.1:{port}")
     if not agents:
         agents = click.prompt("Agentes (ej. claude:claude,agy:agy,grok:grok)",
                               default="claude:claude,agy:agy,grok:grok")
