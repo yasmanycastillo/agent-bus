@@ -478,10 +478,12 @@ class MessageBus:
         @self.app.post("/tasks/{task_id}/done")
         async def complete_task(task_id: str, request: Request):
             principal = request.state.principal
-            task = await self.tasks.complete(task_id, actor=principal.agent_id if principal else None)
+            actor = None if (principal and principal.is_admin) else (principal.agent_id if principal else None)
+            task = await self.tasks.complete(task_id, actor=actor)
             if not task:
                 return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
+
 
         @self.app.post("/tasks/{task_id}/review")
         async def review_task(task_id: str, request: Request):
@@ -869,9 +871,10 @@ class MessageBus:
         task = await self.tasks.get(task_id)
         if not task:
             return JSONResponse({"error": "Task not found"}, status_code=404)
-        if principal and task.owner != principal.agent_id:
+        if principal and not principal.is_admin and task.owner != principal.agent_id:
             return JSONResponse({"error": "Task belongs to another agent"}, status_code=403)
         return JSONResponse({"error": "Task state does not permit this transition"}, status_code=409)
+
 
     async def _authenticate(self, authorization: str | None) -> tuple[Principal | None, str | None]:
         if authorization is None and os.environ.get("AGENT_BUS_ALLOW_UNSIGNED", "0") == "1":

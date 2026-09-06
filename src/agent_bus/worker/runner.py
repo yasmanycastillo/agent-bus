@@ -229,10 +229,27 @@ class AgentRunner:
             cmd.extend(["--model", self.model])
 
         result = await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
-        if thread_id and result.session_id:
-            self.session_map[thread_id] = result.session_id
+        if not result.success:
+            return result
+        response = None
+        conversation_id = result.session_id
+        for line in result.output.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if event.get("event") == "result" and isinstance(event.get("result"), dict):
+                payload = event["result"]
+                response = payload.get("response")
+                conversation_id = payload.get("conversation_id") or conversation_id
+                if payload.get("status") != "SUCCESS":
+                    return RunnerResult(False, "", session_id=conversation_id, error=str(response or payload.get("status")), exit_code=1)
+        if not isinstance(response, str) or not response.strip():
+            return RunnerResult(False, "", session_id=conversation_id, error="AGY stream returned no successful response", exit_code=1)
+        if thread_id and conversation_id:
+            self.session_map[thread_id] = conversation_id
             self._save_sessions()
-        return result
+        return RunnerResult(True, response.strip(), session_id=conversation_id)
 
     async def _execute_aider_cli(
         self,
@@ -255,27 +272,11 @@ class AgentRunner:
             cmd.extend(["--model", self.model])
 
         result = await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
-        if not result.success:
-            return result
-        response = None
-        conversation_id = result.session_id
-        for line in result.output.splitlines():
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if event.get("event") == "result" and isinstance(event.get("result"), dict):
-                payload = event["result"]
-                response = payload.get("response")
-                conversation_id = payload.get("conversation_id") or conversation_id
-                if payload.get("status") != "SUCCESS":
-                    return RunnerResult(False, "", session_id=conversation_id, error=str(response or payload.get("status")), exit_code=1)
-        if not isinstance(response, str) or not response.strip():
-            return RunnerResult(False, "", session_id=conversation_id, error="AGY stream returned no successful response", exit_code=1)
-        if thread_id and conversation_id:
-            self.session_map[thread_id] = conversation_id
+        if thread_id and result.session_id:
+            self.session_map[thread_id] = result.session_id
             self._save_sessions()
-        return RunnerResult(True, response.strip(), session_id=conversation_id)
+        return result
+
 
     async def _execute_grok_cli(self, prompt: str, thread_id: str | None, timeout_seconds: float) -> RunnerResult:
         """Invokes Grok Build's single-turn headless mode, avoiding its interactive TUI."""
