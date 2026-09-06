@@ -222,7 +222,7 @@ async def test_sse_revocation_closes_stream_without_new_delivery(secured, invali
         sent.append(message)
         if message["type"] == "http.response.start":
             started.set()
-        if message.get("body", b"").startswith(b"event: message"):
+        if b"event: message" in message.get("body", b""):
             delivered.set()
 
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
@@ -233,14 +233,18 @@ async def test_sse_revocation_closes_stream_without_new_delivery(secured, invali
     try:
         await asyncio.wait_for(started.wait(), 2)
         assert sent[0]["status"] == 200
-        await bus._push_to_agent("alice", Envelope(from_agent="bob", to_agent="alice", message_type=MessageType.INBOX, body={"text": "Before revoke"}))
+        event = Envelope(from_agent="bob", to_agent="alice", message_type=MessageType.INBOX, body={"text": "Before revoke"})
+        await bus.inbox.deliver(event)
+        await bus._push_to_agent("alice", event)
         await asyncio.wait_for(delivered.wait(), 2)
         if invalidate == "revoke":
             await bus.sessions.revoke(sessions["alice"]["session_id"])
         else:
             await bus.db.conn.execute("UPDATE sessions SET expires_at = 0 WHERE session_id = ?", (sessions["alice"]["session_id"],))
             await bus.db.conn.commit()
-        await bus._push_to_agent("alice", Envelope(from_agent="bob", to_agent="alice", message_type=MessageType.INBOX, body={"text": "After revoke"}))
+        event = Envelope(from_agent="bob", to_agent="alice", message_type=MessageType.INBOX, body={"text": "After revoke"})
+        await bus.inbox.deliver(event)
+        await bus._push_to_agent("alice", event)
         await asyncio.wait_for(task, 2)
     finally:
         disconnect.set()

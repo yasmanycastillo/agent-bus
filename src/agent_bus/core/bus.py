@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 from sse_starlette.sse import EventSourceResponse
 
+from agent_bus.core.events import CursorExpired, CursorInvalid, EventLog
 from agent_bus.core.decisions import DecisionLog
 from agent_bus.core.inbox import (
     IdempotencyConflict, InboxManager, InvalidCursor, MessageNotFound, SendResult,
@@ -122,6 +123,7 @@ class MessageBus:
         self.db = db
         self.project_id = project_id or os.environ.get("AGENT_BUS_PROJECT_ID", "default")
         self.sessions = SessionStore(db, self.project_id)
+        self.events = EventLog(db)
         self.registry = registry
         self.inbox = inbox
         self.tasks = TaskManager(db)
@@ -130,8 +132,8 @@ class MessageBus:
         self.skills = SkillRegistry(db)
         self.kickoff = KickoffManager(db)
         self.app = FastAPI(title="agent-bus", version="0.1.0")
-        self._sse_subscribers: dict[str, set[asyncio.Queue[str]]] = defaultdict(set)
-        self._global_sse_subscribers: set[asyncio.Queue[str]] = set()
+        self._sse_subscribers: dict[str, set[asyncio.Event]] = defaultdict(set)
+        self._global_sse_subscribers: set[asyncio.Event] = set()
         self._ws_connections: dict[str, WebSocket] = {}
         self._setup_routes()
 
@@ -165,7 +167,7 @@ class MessageBus:
             if principal:
                 parts = path.strip("/").split("/")
                 admin_only = (
-                    path.startswith("/room/api/") or path == "/events/all"
+                    path.startswith("/room/api/") or path in ("/events/all", "/events/all/cursor")
                     or path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect")
                     or (request.method not in ("GET", "HEAD", "OPTIONS") and (
                         path.startswith("/skills/") or path.startswith("/kickoff/")
@@ -176,7 +178,7 @@ class MessageBus:
                 if admin_only and not principal.is_admin:
                     return JSONResponse({"error": "Administrator role required"}, status_code=403)
                 if len(parts) >= 2 and parts[0] in ("inbox", "events", "agents"):
-                    if path != "/events/all" and parts[1] != principal.agent_id:
+                    if path not in ("/events/all", "/events/all/cursor") and parts[1] != principal.agent_id:
                         return JSONResponse({"error": "Identity does not own this resource"}, status_code=403)
                 # Legacy actor arguments are accepted only when consistent with
                 # the verified session. They never confer authority.
@@ -297,6 +299,25 @@ class MessageBus:
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from exc
 
+        # Register canonical event routes before the generic message-id lookup.
+        @self.app.get("/events/all/cursor")
+        async def global_event_cursor(request: Request):
+            return await self._checkpoint_response(None, request.query_params.get("cursor"))
+
+        @self.app.get("/events/all")
+        async def sse_all_stream(request: Request):
+            return await self._event_response(request, None, self._global_sse_subscribers)
+
+        @self.app.get("/inbox/{agent_id}/events/cursor")
+        @self.app.get("/events/{agent_id}/cursor")
+        async def personal_event_cursor(agent_id: str, request: Request):
+            return await self._checkpoint_response(agent_id, request.query_params.get("cursor"))
+
+        @self.app.get("/inbox/{agent_id}/events")
+        @self.app.get("/events/{agent_id}")
+        async def sse_stream(agent_id: str, request: Request):
+            return await self._event_response(request, agent_id, self._sse_subscribers[agent_id])
+
         @self.app.get("/inbox/{agent_id}")
         async def get_inbox(agent_id: str):
             messages = await self.inbox.get_inbox(agent_id)
@@ -322,14 +343,6 @@ class MessageBus:
         async def archive_message(agent_id: str, message_id: str):
             await self.inbox.archive(agent_id, message_id)
             return {"status": "archived"}
-
-        @self.app.get("/events/all")
-        async def sse_all_stream(request: Request):
-            return self._event_response(request, self._global_sse_subscribers)
-
-        @self.app.get("/events/{agent_id}")
-        async def sse_stream(agent_id: str, request: Request):
-            return self._event_response(request, self._sse_subscribers[agent_id])
 
         @self.app.websocket("/ws/{agent_id}")
         async def websocket_endpoint(websocket: WebSocket, agent_id: str):
@@ -814,34 +827,98 @@ class MessageBus:
         except AuthenticationError:
             return False
 
-    def _event_response(self, request: Request, subscribers: set) -> EventSourceResponse:
-        queue: asyncio.Queue[str] = asyncio.Queue()
-        subscribers.add(queue)
+    async def _event_error(self, scope: str | None, error: ValueError) -> JSONResponse:
+        if isinstance(error, CursorExpired):
+            return JSONResponse({
+                "error": "cursor_expired", "cursor": await self.events.checkpoint(scope),
+                "recovery": "read_inbox",
+            }, status_code=410)
+        return JSONResponse({"error": "cursor_invalid"}, status_code=422)
+
+    async def _checkpoint_response(self, scope: str | None, cursor: str | None):
+        try:
+            if cursor is not None:
+                # Validate without advancing: a caller can checkpoint, inspect
+                # pending deliveries, then connect without losing the gap.
+                await self.events.read(scope, cursor, limit=1)
+            else:
+                cursor = await self.events.checkpoint(scope)
+            return {"cursor": cursor}
+        except (CursorInvalid, CursorExpired) as exc:
+            return await self._event_error(scope, exc)
+
+    async def _event_response(self, request: Request, scope: str | None, subscribers: set):
+        wake = asyncio.Event()
+        subscribers.add(wake)
         token = request.state.token
+        cursor = request.headers.get("last-event-id", request.query_params.get("cursor"))
+        try:
+            if cursor is None:
+                cursor = await self.events.checkpoint(scope)
+            await self.events.read(scope, cursor, limit=1)
+        except (CursorInvalid, CursorExpired) as exc:
+            subscribers.discard(wake)
+            return await self._event_error(scope, exc)
+        except BaseException:
+            subscribers.discard(wake)
+            raise
 
         async def event_generator():
+            nonlocal cursor
             try:
+                if not await self._session_valid(token):
+                    return
+                yield {"event": "checkpoint", "id": cursor, "data": json.dumps({"cursor": cursor})}
                 while await self._session_valid(token):
+                    # A one-bit wake hint bounds memory even for slow readers.
+                    # Polling the durable log also recovers commits without push.
+                    wake.clear()
                     try:
-                        data = await asyncio.wait_for(queue.get(), timeout=1)
-                    except asyncio.TimeoutError:
+                        page = await self.events.read(scope, cursor, limit=50)
+                    except CursorExpired as exc:
+                        reset = await self._event_error(scope, exc)
+                        if await self._session_valid(token):
+                            yield {"event": "reset", "data": reset.body.decode()}
+                        return
+                    except CursorInvalid:
+                        if await self._session_valid(token):
+                            yield {"event": "reset", "data": json.dumps({
+                                "error": "cursor_invalid", "recovery": "read_inbox",
+                                "cursor": await self.events.checkpoint(scope),
+                            })}
+                        return
+                    for event in page["events"]:
+                        if not await self._session_valid(token):
+                            return
+                        yield {"id": event["id"], "event": event["event"],
+                               "data": json.dumps(event["data"], ensure_ascii=False)}
+                        cursor = event["id"]
+                    # Advance gaps in a personal stream without inventing a
+                    # message; clients persist this control checkpoint too.
+                    if page["next_cursor"] != cursor:
+                        if not await self._session_valid(token):
+                            return
+                        cursor = page["next_cursor"]
+                        yield {"event": "checkpoint", "id": cursor, "data": json.dumps({"cursor": cursor})}
+                    if page["has_more"]:
                         continue
-                    if not await self._session_valid(token):
-                        break
-                    yield {"event": "message", "data": data}
+                    try:
+                        await asyncio.wait_for(wake.wait(), timeout=1)
+                    except asyncio.TimeoutError:
+                        pass
             except (asyncio.CancelledError, GeneratorExit):
                 pass
             finally:
-                subscribers.discard(queue)
+                subscribers.discard(wake)
 
-        return EventSourceResponse(event_generator())
+        return EventSourceResponse(event_generator(), send_timeout=10)
 
     async def _push_to_agent(self, agent_id: str, envelope: Envelope) -> None:
         data = envelope.model_dump_json()
-        for q in list(self._sse_subscribers.get(agent_id, set())):
-            await q.put(data)
-        for q in list(self._global_sse_subscribers):
-            await q.put(data)
+        for wake in list(self._sse_subscribers.get(agent_id, set())):
+            wake.set()
+        for wake in list(self._global_sse_subscribers):
+            wake.set()
         if agent_id in self._ws_connections:
             try:
                 websocket = self._ws_connections[agent_id]
