@@ -71,6 +71,47 @@ async def test_claim_retry_and_missing_task(tmp_db):
     assert await manager.get("T1") == first
 
 
+async def test_claim_allows_other_writer_commit_on_shared_connection(tmp_db, monkeypatch):
+    manager = TaskManager(tmp_db)
+    await manager.create("T1", "Claim this task")
+    await manager.create("T2", "Complete this other task")
+    claim_executed = asyncio.Event()
+    other_committed = asyncio.Event()
+
+    # Suspend immediately after the claim SQL has executed, before its caller
+    # resumes. This exposes an undrained RETURNING cursor deterministically.
+    def pause_after_claim(original):
+        async def wrapped(sql, *args, **kwargs):
+            result = await original(sql, *args, **kwargs)
+            if "RETURNING" in sql:
+                claim_executed.set()
+                await other_committed.wait()
+            return result
+        return wrapped
+
+    for method in ("execute", "execute_fetchall"):
+        monkeypatch.setattr(tmp_db.conn, method, pause_after_claim(getattr(tmp_db.conn, method)))
+
+    async def competing_write():
+        await claim_executed.wait()
+        try:
+            return await manager.complete("T2")
+        finally:
+            other_committed.set()
+
+    claimed, completed = await asyncio.wait_for(
+        asyncio.gather(manager.claim("T1", "alice"), competing_write(), return_exceptions=True),
+        timeout=5,
+    )
+    assert not isinstance(claimed, BaseException), repr(claimed)
+    assert not isinstance(completed, BaseException), repr(completed)
+    assert claimed.owner == "alice"
+    assert claimed.status == TaskStatus.IN_PROGRESS
+    assert completed.status == TaskStatus.DONE
+    assert (await manager.get("T1")) == claimed
+    assert (await manager.get("T2")) == completed
+
+
 async def test_http_claim_has_one_winner(claim_buses):
     first, second = claim_buses
     await first.tasks.create("T1", "Claim once")
