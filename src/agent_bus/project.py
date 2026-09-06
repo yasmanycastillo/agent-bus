@@ -71,9 +71,7 @@ def resolve_project_root(cwd: Path | None = None) -> Path | None:
     marker. A linked checkout resolves marker paths against the primary checkout.
     """
     explicit = _explicit_root()
-    if explicit is not None:
-        return explicit
-    base = _base(cwd)
+    base = explicit if explicit is not None else _base(cwd)
     roots = _git_roots(base)
     if roots:
         checkout, common = roots
@@ -86,6 +84,9 @@ def resolve_project_root(cwd: Path | None = None) -> Path | None:
             if candidate == checkout:
                 break
         return common
+    # Explicit non-Git locations intentionally establish their own boundary.
+    if explicit is not None:
+        return explicit
     for candidate in (base, *base.parents):
         if _has_project_marker(candidate):
             return candidate

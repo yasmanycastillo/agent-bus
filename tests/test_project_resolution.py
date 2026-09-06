@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
 import subprocess
 
 import pytest
@@ -259,3 +257,39 @@ def test_external_without_project_retains_explicit_legacy_runtime(tmp_path, proj
 def test_bus_url_rejects_invalid_or_credential_urls(url, project_env):
     with pytest.raises(ValueError):
         get_bus_url(url)
+
+
+def test_explicit_git_location_canonicalizes_subdirectory_and_worktree(tmp_path, project_env):
+    primary = repository(tmp_path / "primary")
+    git(primary, "commit", "--allow-empty", "-m", "base")
+    linked = tmp_path / "linked"
+    git(primary, "worktree", "add", "--detach", str(linked), "HEAD")
+    marker = init_project(primary)
+    before = load_project_config(primary)["project_id"]
+    nested = linked / "src" / "deep"
+    nested.mkdir(parents=True)
+    try:
+        project_env.chdir(tmp_path)
+        for location in (primary, linked, nested):
+            project_env.setenv("AGENT_BUS_PROJECT_ROOT", str(location))
+            assert resolve_project_root() == primary
+            assert get_config_dir() == marker / "runtime"
+            assert load_config().bus.project_id == before
+            assert init_project() == marker
+        assert not (linked / ".agent-bus").exists()
+        assert not (nested / ".agent-bus").exists()
+    finally:
+        git(primary, "worktree", "remove", "--force", str(linked))
+
+
+def test_explicit_plain_directory_does_not_inherit_parent(tmp_path, project_env):
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    project_env.setenv("AGENT_BUS_PROJECT_ROOT", str(outer))
+    outer_marker = init_project()
+    selected = outer / "selected"
+    selected.mkdir()
+    project_env.setenv("AGENT_BUS_PROJECT_ROOT", str(selected))
+    assert resolve_project_root() == selected
+    assert get_config_dir() == selected / ".agent-bus/runtime"
+    assert init_project() != outer_marker
