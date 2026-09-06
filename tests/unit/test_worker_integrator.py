@@ -4,6 +4,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 
+import httpx
 import pytest
 
 from agent_bus.security import async_bus_client
@@ -434,15 +435,30 @@ def _author_worktree(tmp_path: Path, env: dict) -> Path:
     return wt
 
 
+@pytest.fixture
+def http_responses(monkeypatch):
+    """Observe real responses so authentication failures cannot mimic missing tasks."""
+    responses = []
+    original_send = httpx.AsyncClient.send
+
+    async def capture_send(client, request, **kwargs):
+        response = await original_send(client, request, **kwargs)
+        responses.append((request.method, request.url.path, response.status_code))
+        return response
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", capture_send)
+    return responses
+
+
 @pytest.mark.asyncio
-async def test_record_review_real_404_fails_closed(tmp_path, live_bus_url):
+async def test_record_review_real_400_fails_closed(tmp_path, secure_bus, http_responses):
     """POST /reviews for a payload the bus rejects (400) must fail closed."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     env = _git_env(repo)
     wt = _author_worktree(repo, env)
 
-    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=secure_bus.url, agent_id="human")
 
     # Corrupt the decision after evaluation so the server rejects it (400).
     http_evidence: list = []
@@ -472,12 +488,13 @@ async def test_record_review_real_404_fails_closed(tmp_path, live_bus_url):
     assert res.status == "error"
     # The HTTP request really happened and the server answered 400
     assert http_evidence and http_evidence[0] == 400
+    assert http_responses == [("POST", "/reviews", 400)]
     # main untouched
     assert "feature.txt" not in [p.name for p in repo.iterdir()]
 
 
 @pytest.mark.asyncio
-async def test_done_real_404_leaves_published_requires_reconciliation(tmp_path, live_bus_url):
+async def test_done_real_404_leaves_published_requires_reconciliation(tmp_path, secure_bus, http_responses):
     """POST /tasks/<unknown>/done 404 after publication: no reset, reconciliation required."""
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -485,7 +502,7 @@ async def test_done_real_404_leaves_published_requires_reconciliation(tmp_path, 
     wt = _author_worktree(repo, env)
     main_before = _run_git("rev-parse", "main", cwd=repo, env=env)
 
-    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=secure_bus.url, agent_id="human")
 
     async def mock_record(decision):
         return True
@@ -504,7 +521,9 @@ async def test_done_real_404_leaves_published_requires_reconciliation(tmp_path, 
     res = await integrator.integrate_task(
         "T911-unknown", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
+    assert http_responses == [("POST", "/tasks/T911-unknown/done", 404)]
     assert res.success is False
+    assert res.merged is True
     assert res.status == "error"
     assert res.metadata.get("reconciliation_required") is True
     # No rollback was attempted: the verified tested commit stays published
@@ -516,7 +535,7 @@ async def test_done_real_404_leaves_published_requires_reconciliation(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_done_failure_concurrent_advance_survives_reports_reconciliation(tmp_path, live_bus_url):
+async def test_done_failure_concurrent_advance_survives_reports_reconciliation(tmp_path, secure_bus, http_responses):
     """If main advances after publication, the advance SURVIVES and we reconcile.
 
     The /done failure handler performs no reset or rewind; a concurrent
@@ -528,7 +547,7 @@ async def test_done_failure_concurrent_advance_survives_reports_reconciliation(t
     env = _git_env(repo)
     wt = _author_worktree(repo, env)
 
-    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=secure_bus.url, agent_id="human")
 
     async def mock_record(decision):
         return True
@@ -541,6 +560,7 @@ async def test_done_failure_concurrent_advance_survives_reports_reconciliation(t
 
     # Fail /done AND advance main concurrently after publication.
     raced: dict = {}
+    real_finalize = integrator._finalize_merge
 
     async def racing_finalize(task_id):
         # Advance main beyond integration_sha; this concurrent writer must
@@ -554,7 +574,7 @@ async def test_done_failure_concurrent_advance_survives_reports_reconciliation(t
             cwd=repo,
         )
         raced["main"] = _run_git("rev-parse", "main", cwd=repo, env=env)
-        return (False, "simulated 500 from /done")
+        return await real_finalize(task_id)
 
     integrator._finalize_merge = racing_finalize  # type: ignore
 
@@ -562,6 +582,7 @@ async def test_done_failure_concurrent_advance_survives_reports_reconciliation(t
         "T912", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.success is False
+    assert http_responses == [("POST", "/tasks/T912/done", 404)]
     assert res.merged is True  # publication happened
     assert res.status == "error"
     assert res.metadata.get("reconciliation_required") is True
@@ -970,17 +991,18 @@ async def test_cancelled_integrate_task_cleans_pending_ref(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_fetch_acceptance_criteria_distinguishes_404_from_empty(tmp_path, live_bus_url):
+async def test_fetch_acceptance_criteria_distinguishes_404_from_empty(tmp_path, secure_bus, http_responses):
     """A 404 fetching criteria returns None (fail-closed), not an empty list."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     env = _git_env(repo)
     wt = _author_worktree(repo, env)
 
-    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=secure_bus.url, agent_id="human")
 
     # Task does not exist on the bus: GET /tasks/T924 -> 404 -> None
     assert await integrator._fetch_acceptance_criteria("T924-unknown") is None
+    assert http_responses == [("GET", "/tasks/T924-unknown", 404)]
 
     # And integrate_task fails closed instead of reviewing blind
     async def mock_record(decision):
@@ -991,12 +1013,13 @@ async def test_fetch_acceptance_criteria_distinguishes_404_from_empty(tmp_path, 
         "T924-unknown", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
     )
     assert res.status == "error"
+    assert http_responses == [("GET", "/tasks/T924-unknown", 404)] * 2
     assert "acceptance criteria" in res.error
     assert res.merged is False
 
 
 @pytest.mark.asyncio
-async def test_feedback_failure_reported_not_claimed(tmp_path, live_bus_url):
+async def test_feedback_failure_reported_not_claimed(tmp_path, secure_bus, http_responses):
     """When reassign/post-messages fail, the result says feedback was NOT sent."""
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1012,7 +1035,7 @@ async def test_feedback_failure_reported_not_claimed(tmp_path, live_bus_url):
         cwd=repo,
     )
 
-    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=secure_bus.url, agent_id="human")
 
     async def mock_record(decision):
         return True
@@ -1025,11 +1048,16 @@ async def test_feedback_failure_reported_not_claimed(tmp_path, live_bus_url):
         "T925-unknown", "claude", "boom", 1,
     )
     assert sent is False
+    assert http_responses == [("POST", "/tasks/T925-unknown/reassign", 404)]
 
     # And the retry_requested result carries feedback_sent=False
     res = await integrator.integrate_task(
         "T925", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.status == "retry_requested"
+    assert http_responses == [
+        ("POST", "/tasks/T925-unknown/reassign", 404),
+        ("POST", "/tasks/T925/reassign", 404),
+    ]
     assert res.metadata.get("feedback_sent") is False
     assert "FAILED to deliver feedback" in (res.error or "")
