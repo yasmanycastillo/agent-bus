@@ -1,0 +1,196 @@
+# TASK — Plan de estabilización MCP
+
+Base: [evaluación inicial](docs/evaluacion-mcp.md). Contexto: [context.md](context.md).
+
+## Reglas de seguimiento
+
+- Estados: pendiente, en curso, bloqueada, completada. Consultar la tabla y los criterios marcados para distinguir avance parcial de cierre.
+- Antes de trabajar, respetar AGENTS.md, consultar inbox/locks y revisar cambios ajenos.
+- Al iniciar, registrar responsable y estado. Al cerrar, añadir pruebas, resultado, commit si existe y decisiones relevantes.
+- Una tarea bloqueada debe indicar causa y dependencia. Una tarea completada debe satisfacer sus criterios de aceptación.
+- P0: integridad o identidad. P1: necesario para el MVP. P2: posterior al MVP.
+- Los identificadores siguientes son del backlog documental; todavía no son tareas creadas en el bus.
+
+## Orden recomendado
+
+T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/T-06 y T-07. Continuar con T-08/T-09/T-10/T-11/T-12. Cerrar el MVP con T-13. T-14/T-15 son posteriores.
+
+| ID | Prioridad | Trabajo | Dependencias | Estado | Responsable |
+| --- | --- | --- | --- | --- | --- |
+| T-01 | P1 | Pruebas aisladas y contratos | — | completada | codex-integrator |
+| T-02 | P0 | Persistencia de broadcasts | T-01 | completada | codex-broadcast |
+| T-03 | P0 | Claim atómico de tareas | T-01 | completada | codex-claims |
+| T-04 | P0 | Adquisición atómica de locks | T-01 | completada | codex-locks |
+| T-05 | P0 | Identidad y credenciales confiables | T-01 | pendiente | — |
+| T-06 | P0 | Autorización de operaciones | T-03, T-05 | pendiente | — |
+| T-07 | P1 | Contrato de decisiones | T-01; cierre de identidad: T-05/T-06 | bloqueada (cierre de identidad) | codex-integrator |
+| T-08 | P1 | Confirmación, respuestas e idempotencia | T-02, T-05, T-06 | pendiente | — |
+| T-09 | P1 | Eventos recuperables y espera acotada | T-08 | pendiente | — |
+| T-10 | P1 | SDK MCP y pruebas stdio | T-05, T-07, T-08, T-09 | pendiente | — |
+| T-11 | P1 | Aislamiento por proyecto y sesión | T-05, T-06 | pendiente | — |
+| T-12 | P1 | Renovación y alcance de locks | T-04, T-11 | pendiente | — |
+| T-13 | P1 | Validación con dos clientes reales | T-01 a T-12 | pendiente | — |
+| T-14 | P2 | Workers recuperables y adaptadores | T-13 | pendiente | — |
+| T-15 | P2 | Integración Git verificada | T-14 | pendiente | — |
+
+## T-01 — Pruebas aisladas y contratos
+
+Eliminar la dependencia de un hub personal en `tests/test_mcp_server.py`. Preparar fixtures con base, credenciales y servidor efímeros. Reproducir H-01 a H-06 mediante regresiones que se incorporen con sus correcciones; evitar dejar fallos esperados ocultando defectos.
+
+- [x] La prueba de espera distingue timeout, bus caído y mensaje pendiente con resultados deterministas.
+- [x] La suite corre con `localhost:8420` apagado sin consultar ni modificar servicios del usuario.
+- [x] Los recursos temporales se limpian aun cuando falla una aserción.
+- [x] Cada herramienta MCP tiene una prueba de contrato contra el backend real de pruebas.
+
+## T-02 — Persistencia de broadcasts (H-01)
+
+Separar identidad del mensaje de entrega por destinatario. Definir una migración que conserve mensajes y estado de archivo existentes.
+
+- [x] Un broadcast a tres agentes queda disponible para los tres tras reconectar o reiniciar.
+- [x] Confirmar una entrega no elimina las de otros destinatarios.
+- [x] El reintento con la misma clave no crea entregas duplicadas.
+- [x] La migración desde el esquema anterior se prueba con datos existentes.
+
+## T-03 — Claim atómico (H-02)
+
+Comprobar filas afectadas o usar una operación equivalente que identifique al ganador. Revisar el consumidor del resultado en el worker.
+
+- [x] Ante claims concurrentes de agentes distintos, solo uno obtiene éxito; los demás reciben conflicto.
+- [x] El perdedor no ejecuta el runner para esa tarea.
+- [x] Una tarea finalizada no se reclama; las transiciones permitidas quedan documentadas.
+- [x] Se define y prueba el comportamiento del reintento del mismo propietario.
+
+## T-04 — Locks atómicos (H-03)
+
+Eliminar el falso éxito producido por consultar antes de insertar e ignorar el conflicto.
+
+- [x] Solo un solicitante obtiene el lock ante adquisiciones concurrentes.
+- [x] El perdedor recibe un conflicto explícito con el propietario actual.
+- [x] Liberar un lock ajeno falla; la liberación no borra una adquisición posterior de otra sesión.
+- [x] Se prueban contención y reintentos con conexiones independientes.
+
+## T-05 — Identidad confiable (H-04)
+
+Definir el modelo local de confianza, registro y vinculación de credenciales. Verificar contra credenciales registradas, no contra una clave arbitraria enviada en el request. Integrar autenticación en los clientes que escriben.
+
+Preparación: revisión de contratos realizada, propuesta resumida en [context.md](context.md#preparación-de-t-05t-06). Todavía no hay implementación. No cambiar solo el default de firmas: los clientes actuales no firman y existen accesos alternativos por HTTP/WS.
+
+- [ ] La reproducción de suplantación con clave desconocida es rechazada.
+- [ ] Firmante, identidad declarada y sesión autorizada coinciden.
+- [ ] Si se conservan firmas por operación, se define protección ante replay mediante nonce/expiración y su prueba.
+- [ ] HTTP y WebSocket aplican la política; revisar también lecturas y SSE según el modelo de acceso elegido.
+- [ ] El modo local seguro usa loopback y rechaza escrituras sin credenciales; cualquier modo de desarrollo inseguro es explícito.
+- [ ] MCP, CLI y workers autorizados siguen funcionando con la política activada.
+
+## T-06 — Autorización de operaciones (H-05)
+
+Aplicar permisos a finalizar/reasignar tareas, liberar locks, confirmar inbox y registrar decisiones. Derivar el actor del contexto autenticado. Distinguir operaciones de agente y administración humana.
+
+- [ ] Un agente no finaliza tareas ni confirma mensajes ajenos.
+- [ ] La reasignación administrativa requiere el permiso definido y deja trazabilidad.
+- [ ] Un cambio de propietario invalida los permisos anteriores de forma consistente.
+- [ ] Hay pruebas positivas y negativas por operación protegida.
+
+## T-07 — Contrato de decisiones (H-06)
+
+Compartir o adaptar explícitamente los modelos MCP/HTTP. Resolver generación de ID, campos requeridos y valores opcionales.
+
+- [x] `record_decision` crea una decisión válida y esta puede recuperarse.
+- [x] El payload mínimo documentado no produce HTTP 422.
+- [x] Los argumentos inválidos generan errores accionables.
+- [ ] La integración final respeta la identidad definida por T-05/T-06.
+
+Contrato funcional corregido en `b284c24`. La tarea queda parcialmente resuelta: su cierre depende del principal autenticado de T-05/T-06, que aún no existe. Validación: 12 pruebas MCP aprobadas antes de la integración combinada.
+
+## T-08 — Ciclo completo de mensajes
+
+Agregar operaciones equivalentes a `read_messages(cursor, limit)`, `ack_messages`, `reply_message` e idempotencia de envío. Definir mensaje, conversación, correlación y entrega en el contrato.
+
+- [ ] Leer no confirma automáticamente; confirmar es explícito e idempotente.
+- [ ] Una respuesta conserva correlación con la solicitud y conversación.
+- [ ] Repetir un envío tras perder su respuesta no duplica el mensaje lógico.
+- [ ] Si el runner falla, el mensaje sigue recuperable y se registra el fallo.
+- [ ] Los mensajes confirmados no provocan un bucle infinito de espera/respuesta.
+- [ ] La paginación es estable y evita cargar el inbox completo en el contexto del agente.
+
+## T-09 — Eventos recuperables y espera acotada
+
+Persistir secuencia/cursor de eventos y usar SSE como señal. Cerrar la ventana entre consulta y suscripción. Definir retención y recuperación de un cursor vencido.
+
+- [ ] Un evento que llega entre lectura y suscripción se recupera.
+- [ ] Desconexión y reinicio no pierden entregas pendientes.
+- [ ] `wait_for_updates` termina en su plazo total incluso recibiendo keepalives.
+- [ ] Un cliente lento no produce crecimiento ilimitado de colas.
+- [ ] Cursor inválido/vencido, stream cerrado y bus caído tienen respuestas documentadas.
+
+## T-10 — SDK MCP y transporte stdio
+
+Elegir SDK mantenido y versiones compatibles con clientes objetivo. Migrar el transporte preservando los contratos corregidos; no basta con cambiar `PROTOCOL_VERSION`.
+
+- [ ] Un cliente MCP de prueba realiza initialize, tools/list y tools/call sobre un proceso stdio real.
+- [ ] Una espera activa permite atender otra solicitud y puede cancelarse.
+- [ ] EOF y cierre durante una espera liberan los recursos del proceso.
+- [ ] stdout contiene exclusivamente mensajes del protocolo; logs van a stderr.
+- [ ] Errores de herramienta y de protocolo se distinguen y los schemas se validan.
+- [ ] Cada conexión deriva su identidad de configuración/credenciales, sin remitente libre elegido por el modelo.
+
+## T-11 — Proyecto y sesión
+
+Definir namespace, descubrimiento de raíz y aislamiento de configuración/datos. Incluir subdirectorios y worktrees. Evitar identidad operativa única por nombre del proveedor.
+
+- [ ] Dos proyectos simultáneos no mezclan mensajes, tareas ni locks.
+- [ ] Dos sesiones del mismo proveedor tienen identidades distinguibles.
+- [ ] Cada entrada resuelve explícitamente el proyecto correcto desde un worktree o subdirectorio.
+- [ ] Una sesión expirada no mantiene permisos indefinidos.
+- [ ] Si se admite reconectar una misma sesión desde varios procesos, se define quién puede consumir/ejecutar trabajo.
+
+## T-12 — Renovación y alcance de locks
+
+Definir recurso protegido, ruta canónica, propietario por sesión, lease y renovación. Coordinar el namespace con los worktrees.
+
+- [ ] Rutas equivalentes identifican el mismo recurso cuando corresponde.
+- [ ] Los recursos compartidos siguen protegidos y los archivos aislados no se bloquean entre sí por accidente.
+- [ ] Un lock abandonado expira según la política y una sesión viva puede renovarlo.
+- [ ] Un titular vencido no renueva ni libera el lock de su sucesor; usar token de adquisición o mecanismo equivalente.
+- [ ] Documentar los límites de los locks cooperativos frente a editores externos.
+
+## T-13 — Aceptación del MVP y documentación realista
+
+Elegir dos clientes reales y registrar versiones, configuración y evidencias. Crear una matriz que distinga comunicación, espera, continuación de sesión y headless. Corregir el README según resultados, incluyendo el alias Codex/Aider.
+
+- [ ] Dos agentes envían, leen, responden y confirman mensajes sin retransmisión humana.
+- [ ] El receptor se desconecta, recibe mensajes mientras está fuera y los recupera al volver.
+- [ ] Competir por una tarea o lock produce un único ganador.
+- [ ] Los reintentos controlados no duplican efectos en el escenario de aceptación.
+- [ ] Cada cliente demuestra su mecanismo de espera/activación o documenta explícitamente su limitación.
+- [ ] La suite completa pasa con servicios efímeros; las pruebas manuales incluyen pasos reproducibles.
+- [ ] README, configuración MCP y context.md reflejan lo comprobado.
+
+## T-14 — Workers y adaptadores, posterior al MVP
+
+- [ ] Proveedores tienen adaptadores propios o alias honestamente documentados; Codex no invoca Aider bajo una promesa de soporte nativo.
+- [ ] Fallos del runner no descartan mensajes; reintentos y límites persisten tras reiniciar.
+- [ ] Presupuestos y límites detienen o bloquean trabajo con estado observable, sin bucles silenciosos.
+- [ ] La continuación de sesión se verifica por cliente y se distingue de iniciar otro subproceso.
+- [ ] `submit` entrega el objetivo a los agentes previstos; revisar que el destinatario `*` con tipo `inbox` actual no se trate como un inbox literal. La prueba de CLI de T-01 comprueba la respuesta HTTP, no esta garantía de distribución.
+
+## T-15 — Integración Git, posterior al MVP
+
+- [ ] El integrador se conecta explícitamente al flujo de entrega de trabajo.
+- [ ] Integra en un worktree dedicado, verificando rama objetivo, limpieza y SHA candidato.
+- [ ] Se prueban los cambios combinados con la base actual antes de actualizar la rama objetivo.
+- [ ] Se serializan integraciones y se verifican códigos de salida de merge, commit y abort.
+- [ ] Un commit fallido nunca produce estado integrado; reintentos/conflictos quedan trazables.
+- [ ] No se pierde trabajo sin commit durante limpieza de worktrees y se conserva trabajo ajeno.
+
+## Registro de avance
+
+| Fecha | Tarea | Resultado y evidencia |
+| --- | --- | --- |
+| 2026-09-05 | Preparación documental | Análisis, contexto y backlog creados. Sin correcciones de producción ni tareas de implementación completadas. |
+| 2026-09-05 | T-01 | Completada: hubs efímeros y guardia HTTP; `902d480` + ajuste `762ffcf`. Cobertura de las nueve herramientas completada con T-07. |
+| 2026-09-05 | T-02 | Completada: `0efe8ae` (origen `b7d904b`), migración y entregas independientes. 21 pruebas dirigidas en worktree del autor. Idempotencia HTTP general queda en T-08. |
+| 2026-09-05 | T-03 | Completada: `bea86f8` + `4089b8e` (origen `165eac4` + `4b41ff9`). Revisión cruzada detectó cursor RETURNING activo; regresión falla antes y pasa después. 32 pruebas dirigidas. |
+| 2026-09-05 | T-04 | Completada: `14f44e4` (origen `49c869f`). 14 pruebas dirigidas, contención con conexiones independientes y liberación frente a sucesor distinto. |
+| 2026-09-05 | T-07 | Contrato funcional corregido en `b284c24`, 12 pruebas MCP; cierre de identidad bloqueado por T-05/T-06. |
+| 2026-09-05 | Integración primera tanda | `218 passed` en 27,16 s sobre código combinado `4089b8e`; dos avisos de deprecación del soporte WebSocket de dependencias. `git diff --check` limpio. Sin aceptación con clientes MCP externos todavía. |
