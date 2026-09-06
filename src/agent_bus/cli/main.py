@@ -713,7 +713,8 @@ def top_cmd(interval: float, once: bool):
 @app.command("quickstart")
 @click.option("--agents", default="claude,antigravity", help="Agentes a registrar e inicializar")
 @click.option("--mock", is_flag=True, default=False, help="Usar runners mock")
-def quickstart(agents: str, mock: bool):
+@click.option("--interactive", is_flag=True, help="Preguntar agentes y confirmar cada paso")
+def quickstart(agents: str, mock: bool, interactive: bool):
     """Onboarding en 1 solo paso: inicializa bus, registra agentes y lanza equipo."""
     import time
     from agent_bus.project import init_project
@@ -724,6 +725,9 @@ def quickstart(agents: str, mock: bool):
     from agent_bus.cli.display import set_current_agent
     from agent_bus.worker.client import worker_environment
 
+    if interactive:
+        agents = click.prompt("Agentes (separados por coma)", default=agents)
+        mock = click.confirm("Usar workers mock (sin llamadas a modelos)?", default=mock)
     agent_list = [a.strip() for a in agents.split(",") if a.strip()]
     if not agent_list:
         raise click.ClickException("Especifica al menos un agente")
@@ -781,6 +785,8 @@ def quickstart(agents: str, mock: bool):
     click.echo(f"  🤖 Agentes registrados: {', '.join(agent_list)}")
     click.get_current_context().invoke(run_team, agents=agents, mock=mock, base_ref="main", bus_url=get_bus_url())
     click.echo("\nEquipo iniciado. Verifica agent-bus worker status --agent <id>.")
+    if interactive:
+        click.echo("Para activar integración automática: agent-bus integrator start --agent integrator")
 
 
 @show.command("tasks")

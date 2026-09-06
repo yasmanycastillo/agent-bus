@@ -4,6 +4,7 @@ import asyncio
 import logging
 import hashlib
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -276,8 +277,43 @@ class WorkerDaemon:
 
         result = await self.runner.execute_turn(prompt)
 
+        if result.success:
+            await self._commit_and_submit_review(task_id)
+
         await self._set_agent_status(AgentStatus.ONLINE, work=None)
         return result
+
+    async def _commit_and_submit_review(self, task_id: str) -> None:
+        """Commit the worker checkout and enqueue it for serialized integration."""
+        checkout = self.runner.worktree_dir.resolve()
+        # Test/custom runners may execute from the coordinator checkout. Never
+        # stage that shared tree implicitly.
+        if checkout == Path.cwd().resolve() or not (checkout / ".git").exists():
+            return
+        try:
+            status = await asyncio.create_subprocess_exec(
+                "git", "status", "--porcelain", cwd=str(checkout),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await status.communicate()
+            if not stdout.strip():
+                logger.warning("Task %s completed without committed changes", task_id)
+                return
+            add = await asyncio.create_subprocess_exec("git", "add", "-A", cwd=str(checkout))
+            if await add.wait() != 0:
+                raise RuntimeError("git add failed")
+            commit = await asyncio.create_subprocess_exec(
+                "git", "commit", "-m", f"feat(agent): complete {task_id}", cwd=str(checkout),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await commit.communicate()
+            if commit.returncode != 0:
+                raise RuntimeError((err or out).decode(errors="replace")[-500:])
+            if self._client:
+                response = await self._client.post(f"/tasks/{task_id}/review")
+                response.raise_for_status()
+        except Exception as exc:
+            logger.error("Could not submit task %s for review: %s", task_id, exc)
 
     async def _fetch_recent_decisions(self) -> list[dict[str, Any]]:
         if not self._client:
