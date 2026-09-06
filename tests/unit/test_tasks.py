@@ -31,9 +31,8 @@ async def test_claim_already_owned(tmp_db: Database):
     tm = TaskManager(tmp_db)
     await tm.create("T1", "Task 1", owner="codex")
     claimed = await tm.claim("T1", "claude")
-    # Should not claim since owner != 'free'
-    assert claimed is not None
-    assert claimed.owner == "codex"
+    assert claimed is None
+    assert (await tm.get("T1")).owner == "codex"
 
 
 async def test_complete(tmp_db: Database):

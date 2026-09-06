@@ -54,14 +54,18 @@ class TaskManager:
         return [self._row_to_task(row) for row in cursor]
 
     async def claim(self, task_id: str, agent_id: str) -> Task | None:
+        """Claim a free pending task once; retries and competing claims conflict."""
         now = datetime.now(timezone.utc).isoformat()
-        await self._db.conn.execute(
+        cursor = await self._db.conn.execute(
             """UPDATE tasks SET owner = ?, status = 'in_progress', updated_at = ?
-               WHERE task_id = ? AND owner = 'free'""",
+               WHERE task_id = ? AND owner = 'free' AND status = 'pending'
+               RETURNING *""",
             (agent_id, now, task_id),
         )
+        row = await cursor.fetchone()
+        await cursor.close()
         await self._db.conn.commit()
-        return await self.get(task_id)
+        return self._row_to_task(row) if row is not None else None
 
     async def reassign(self, task_id: str, new_owner: str) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
