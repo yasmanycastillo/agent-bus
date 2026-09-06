@@ -626,11 +626,13 @@ app.add_command(show)
 
 from agent_bus.cli.worker_cmds import run_team, submit_goal, worker  # noqa: E402
 from agent_bus.cli.integrator_cmds import integrator  # noqa: E402
+from agent_bus.cli.onboard_cmds import onboard  # noqa: E402
 
 app.add_command(worker)
 app.add_command(run_team)
 app.add_command(submit_goal)
 app.add_command(integrator)
+app.add_command(onboard)
 
 
 from agent_bus.cli.auth_cmds import auth  # noqa: E402
