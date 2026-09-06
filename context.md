@@ -196,3 +196,17 @@ Completada e integrada en `main` (`0d3e177` / merge). Suite completa: **600 prue
 - Correcciones de compatibilidad aplicadas a `AgentRunner` (stream-json de AGY) y `TaskManager` / `MessageBus` para transición y completitud fluida de tareas en revisión.
 
 Las siguientes tareas operativas (DAG de dependencias T-17, HermesOrchestrator T-18, Gatekeeper T-19, cuotas/presupuesto T-20 y consola local React T-21) continúan según el backlog de [TASK.md](TASK.md).
+
+## T-17: Contrato de tareas, dependencias y DAG
+
+Completada e integrada en `main`. Suite completa: **613 pruebas aprobadas** en **153,15 s**, dos avisos de deprecación WebSocket (`uv run pytest -q`).
+
+- `Task` enriquecida con `acceptance_criteria: list[str]`, `test_cmd: list[str] | None`, `depends_on: list[str]` y `operation_key: str | None`.
+- Migración no destructiva en `Database._migrate_tasks()` con índice `idx_tasks_operation_key`.
+- Validación atómica de dependencias y detección de ciclos en grafos dirigidos (DFS de 3 colores) al crear tareas individuales o desgloses en lote (`POST /tasks/batch`, `POST /tasks/breakdown`).
+- Desglose idempotente: llamadas con la misma `operation_key` devuelven las tareas existentes sin duplicación.
+- Control de desbloqueo: tareas con dependencias incompletas inician en estado `blocked`. Al completarse una tarea (`done`), sus dependientes se desbloquean automáticamente a `pending`.
+- `WorkerDaemon` consulta exclusivamente tareas desbloqueadas (`ready_only=true`). Intentos de reclamo sobre tareas bloqueadas son rechazados con 409 Conflict.
+- Dashboard (`generate_dashboard_renderable`, `print_tasks_table`, CLI `agent-bus top`, `agent-bus show tasks`) muestra columnas `Depends On` e indicador visual `[blocked]`.
+
+Las siguientes tareas operativas (HermesOrchestrator T-18, Gatekeeper T-19, cuotas/presupuesto T-20 y consola local React T-21) continúan según el backlog de [TASK.md](TASK.md).

@@ -224,9 +224,22 @@ Validación: **600 passed**, 2 warnings en 151,11 s con `uv run pytest -q`.
 
 Extender las tareas con criterios de aceptación, comando de pruebas, dependencias y un grafo acíclico persistente.
 
-- [ ] Las dependencias se validan atómicamente y los ciclos son rechazados.
-- [ ] Crear/reintentar un desglose es idempotente mediante una clave de operación.
-- [ ] El worker recibe sólo tareas desbloqueadas y el dashboard muestra la cadena de dependencias.
+- [x] Las dependencias se validan atómicamente y los ciclos son rechazados.
+- [x] Crear/reintentar un desglose es idempotente mediante una clave de operación.
+- [x] El worker recibe sólo tareas desbloqueadas y el dashboard muestra la cadena de dependencias.
+
+### Registro de T-17
+
+Se implementó el contrato enriquecido de tareas, soporte para grafos acíclicos dirigidos (DAG), validación atómica y desglose idempotente:
+1. Modelo de tareas extendido (`Task`, `TaskRequest`, base de datos SQLite) con `acceptance_criteria: list[str]`, `test_cmd: list[str] | None`, `depends_on: list[str]`, y `operation_key: str | None`.
+2. Migración automática en `Database.initialize()` (`_migrate_tasks`) con índice en `operation_key`.
+3. Validación atómica de DAG y detección de ciclos mediante DFS de 3 colores (`CycleDetectedError`, `MissingDependencyError`) al crear tareas individuales o por lote (`POST /tasks/batch`, `POST /tasks/breakdown`).
+4. Idempotencia completa de desglose: llamadas repetidas con la misma `operation_key` devuelven las tareas existentes en orden sin duplicar filas.
+5. Control de desbloqueo: tareas con dependencias no satisfechas se inicializan en estado `blocked`. Cuando una tarea finaliza (`POST /tasks/{id}/done`), sus dependientes se desbloquean atómicamente a `pending`.
+6. Intentos de reclamo (`POST /tasks/{id}/claim`) sobre tareas bloqueadas son rechazados con 409 Conflict y mensaje descriptivo. El `WorkerDaemon` consulta exclusivamente tareas desbloqueadas (`ready_only=true`).
+7. El dashboard (`generate_dashboard_renderable`, `print_tasks_table`) y los comandos CLI (`agent-bus top`, `agent-bus show tasks`, `agent-bus work task`) visualizan la columna `Depends On` y el indicador `[blocked]`.
+
+Validación: **613 passed**, 2 warnings en 153,15 s con `uv run pytest -q`.
 
 ## T-18 — HermesOrchestrator y salidas estructuradas
 
