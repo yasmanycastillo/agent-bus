@@ -38,7 +38,12 @@
 <body>
 <header>
   <h1>🚌 agent-bus — War Room</h1>
-  <span id="status"><span class="dot"></span>SSE conectado</span>
+  <form id="login-form">
+    <label>Sesión admin <input id="session-token" type="password" autocomplete="off" placeholder="Token de sesión"></label>
+    <button type="submit">Conectar</button>
+  </form>
+  <button id="logout" hidden>Cerrar sesión</button>
+  <span id="status">Conecta una sesión admin. El token solo se conserva en memoria.</span>
 </header>
 <aside>
   <h2 class="sec">Aprobaciones pendientes (<span id="ap-count">0</span>)</h2>
@@ -64,82 +69,153 @@
   </div>
 </main>
 <script>
-const api = (p, opts) => fetch(p, {headers:{'Content-Type':'application/json'}, ...opts}).then(r => r.json());
 const $ = id => document.getElementById(id);
-
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let token = '', principal = null, streamController = null, refreshTimer = null;
 const COLS = ['pending','in_progress','in_review','blocked','done'];
 
+function report(error) {
+  if (error.name !== 'AbortError') $('status').textContent = error.message || 'Error de conexión';
+}
+async function api(path, options = {}) {
+  if (!token) throw new Error('Conecta una sesión admin primero');
+  const sessionToken = token;
+  const response = await fetch(path, {...options, headers: {
+    'Content-Type': 'application/json', ...options.headers, 'Authorization': `Bearer ${sessionToken}`,
+  }});
+  if (token !== sessionToken) throw new DOMException('Sesión cerrada', 'AbortError');
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) signOut();
+    throw new Error(`Solicitud rechazada (${response.status}). Revisa la sesión y sus permisos.`);
+  }
+  const data = await response.json();
+  if (token !== sessionToken) throw new DOMException('Sesión cerrada', 'AbortError');
+  return data;
+}
+function signOut() {
+  token = ''; principal = null;
+  if (streamController) streamController.abort();
+  streamController = null;
+  clearInterval(refreshTimer); refreshTimer = null;
+  $('session-token').value = '';
+  $('login-form').hidden = false; $('logout').hidden = true;
+  for (const id of ['kanban','agents','locks','approvals','feed']) $(id).replaceChildren();
+  $('msg-to').replaceChildren(new Option('Broadcast', '*'));
+  $('msg-text').value = ''; $('ap-count').textContent = '0';
+  $('status').textContent = 'Sesión cerrada';
+}
+$('logout').onclick = signOut;
+$('login-form').onsubmit = async event => {
+  event.preventDefault();
+  const entered = $('session-token').value.trim();
+  signOut(); token = entered;
+  try {
+    principal = await api('/auth/me');
+    if (principal.role !== 'admin') throw new Error('War Room requiere una sesión con rol admin');
+    $('login-form').hidden = true; $('logout').hidden = false;
+    await refresh();
+    streamController = new AbortController();
+    streamEvents(streamController.signal).catch(report);
+    refreshTimer = setInterval(() => refresh().catch(report), 15000);
+  } catch (error) { signOut(); report(error); }
+};
 function renderOverview(d) {
-  // kanban
-  const kb = $('kanban'); kb.innerHTML = '';
+  const kb = $('kanban'); kb.replaceChildren();
   for (const col of COLS) {
     const div = document.createElement('div'); div.className = 'col';
     div.innerHTML = `<h3>${col} (${d.tasks.filter(t=>t.status===col).length})</h3>`;
     for (const t of d.tasks.filter(t=>t.status===col)) {
       const card = document.createElement('div'); card.className = 'card';
-      card.innerHTML = `<b>${t.task_id}</b> ${t.title}<div class="owner">${t.owner}</div>`;
+      card.innerHTML = `<b>${esc(t.task_id)}</b> ${esc(t.title)}<div class="owner">${esc(t.owner)}</div>`;
       const sel = document.createElement('select');
-      sel.innerHTML = '<option value="">reasignar…</option>' +
-        d.agents.map(a=>`<option value="${a.agent_id}">${a.agent_id}</option>`).join('');
-      sel.onchange = () => sel.value && api('/room/api/assign', {method:'POST', body:JSON.stringify({task_id:t.task_id, agent_id:sel.value})}).then(loadOverview);
+      sel.add(new Option('reasignar…', ''));
+      for (const a of d.agents) sel.add(new Option(a.agent_id, a.agent_id));
+      sel.onchange = () => sel.value && api('/room/api/assign', {method:'POST', body:JSON.stringify({task_id:t.task_id, agent_id:sel.value})}).then(refresh).catch(report);
       card.appendChild(sel); div.appendChild(card);
     }
     kb.appendChild(div);
   }
-  // agentes
-  $('agents').innerHTML = d.agents.map(a=>`<div class="agent"><span>${a.agent_id}</span><span>${a.status}</span></div>`).join('') || '<i>ninguno</i>';
-  // locks
-  $('locks').innerHTML = d.locks.map(l=>`<div class="agent"><span>${l.file_path}</span><span>${l.agent_id}</span></div>`).join('') || '<i>ninguno</i>';
+  $('agents').innerHTML = d.agents.map(a=>`<div class="agent"><span>${esc(a.agent_id)}</span><span>${esc(a.status)}</span></div>`).join('') || '<i>ninguno</i>';
+  $('locks').innerHTML = d.locks.map(l=>`<div class="agent"><span>${esc(l.file_path)}</span><span>${esc(l.locked_by)}</span></div>`).join('') || '<i>ninguno</i>';
+  const current = $('msg-to').value;
+  $('msg-to').replaceChildren(new Option('Broadcast', '*'));
+  for (const a of d.agents) $('msg-to').add(new Option(a.agent_id, a.agent_id));
+  $('msg-to').value = [...$('msg-to').options].some(o=>o.value===current) ? current : '*';
 }
-
 async function renderApprovals() {
   const aps = await api('/room/api/pending-approvals');
   $('ap-count').textContent = aps.length;
-  $('approvals').innerHTML = '';
+  $('approvals').replaceChildren();
   for (const m of aps.slice(0,5)) {
     const div = document.createElement('div'); div.className = 'approvals';
-    div.innerHTML = `<b>${m.from_agent}</b>: ${JSON.stringify(m.body).slice(0,120)}<br>`;
-    for (const dec of ['approve','reject']) {
-      const b = document.createElement('button'); b.textContent = dec;
-      b.onclick = () => api('/room/api/approve', {method:'POST', body:JSON.stringify({message_id:m.message_id, decision:dec, note:''})}).then(renderApprovals);
-      div.appendChild(b);
+    const text = document.createElement('p');
+    text.textContent = `${m.from_agent}: ${JSON.stringify(m.body).slice(0,120)}`;
+    div.appendChild(text);
+    for (const decision of ['approve','reject']) {
+      const button = document.createElement('button'); button.textContent = decision;
+      button.onclick = () => api('/room/api/approve', {method:'POST', body:JSON.stringify({message_id:m.message_id, decision, note:''})}).then(renderApprovals).catch(report);
+      div.appendChild(button);
     }
     $('approvals').appendChild(div);
   }
 }
-
-function loadOverview(){ api('/room/api/overview').then(renderOverview); }
-
-function sendMessage() {
+async function refresh() {
+  if (!principal) return;
+  const overview = await api('/room/api/overview');
+  renderOverview(overview);
+  await renderApprovals();
+}
+async function sendMessage() {
   const text = $('msg-text').value.trim(); if (!text) return;
-  api('/room/api/message', {method:'POST', body:JSON.stringify({to_agent:$('msg-to').value, text, reply_needed:$('msg-reply').checked})});
-  $('msg-text').value = '';
-}
-
-// feed SSE global
-const es = new EventSource('/events/all');
-es.onopen = () => $('status').innerHTML = '<span class="dot"></span>SSE conectado';
-es.onerror = () => $('status').innerHTML = '⚠ desconectado';
-es.addEventListener('message', e => {
   try {
-    const ev = JSON.parse(e.data);
-    const div = document.createElement('div'); div.className = 'evt';
-    div.innerHTML = `<time>${new Date().toLocaleTimeString()}</time><b>${ev.from_agent||'?'}</b> → ${ev.to_agent||'*'}: ${JSON.stringify(ev.body).slice(0,140)}`;
-    const feed = $('feed'); feed.prepend(div);
-    loadOverview(); renderApprovals(); refreshAgentOptions();
-  } catch {}
-});
-
-function refreshAgentOptions(){
-  api('/room/api/overview').then(d => {
-    const cur = $('msg-to').value;
-    $('msg-to').innerHTML = '<option value="*">Broadcast</option>' + d.agents.map(a=>`<option value="${a.agent_id}">${a.agent_id}</option>`).join('');
-    $('msg-to').value = cur;
-  });
+    await api('/room/api/message', {method:'POST', body:JSON.stringify({to_agent:$('msg-to').value, text, reply_needed:$('msg-reply').checked})});
+    $('msg-text').value = '';
+  } catch (error) { report(error); }
 }
-
-loadOverview(); renderApprovals(); refreshAgentOptions();
-setInterval(loadOverview, 15000);
+function renderEvent(data) {
+  let event;
+  try { event = JSON.parse(data); } catch { return; }
+  const div = document.createElement('div'); div.className = 'evt';
+  div.textContent = `${new Date().toLocaleTimeString()} ${event.from_agent||'?'} → ${event.to_agent||'*'}: ${JSON.stringify(event.body ?? {}).slice(0,140)}`;
+  $('feed').prepend(div);
+  while ($('feed').children.length > 200) $('feed').lastChild.remove();
+}
+async function streamEvents(signal) {
+  while (!signal.aborted && token) {
+    try {
+      const response = await fetch('/events/all', {headers:{Authorization:`Bearer ${token}`}, signal});
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) signOut();
+        throw new Error(`Eventos rechazados (${response.status})`);
+      }
+      if (signal.aborted) return;
+      $('status').textContent = `SSE conectado — ${principal.agent_id}`;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '', data = [];
+      try {
+        while (!signal.aborted) {
+          const chunk = await reader.read(); if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, {stream:true});
+          let end;
+          while ((end = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0,end).replace(/\r$/, ''); buffer = buffer.slice(end+1);
+            if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+            else if (!line && data.length) { renderEvent(data.join('\n')); data = []; }
+          }
+        }
+      } finally { await reader.cancel(); reader.releaseLock(); }
+    } catch (error) {
+      if (signal.aborted) return;
+      report(error);
+    }
+    if (!signal.aborted && token) await new Promise(resolve => {
+      const timer = setTimeout(done, 1000);
+      function done() { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); }
+      signal.addEventListener('abort', done, {once:true});
+    });
+  }
+}
 </script>
 </body>
 </html>

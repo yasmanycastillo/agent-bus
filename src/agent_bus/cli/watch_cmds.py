@@ -23,15 +23,18 @@ from pathlib import Path
 import click
 import httpx
 
-from agent_bus.config import DEFAULT_CONFIG_DIR
-from agent_bus.worker.client import BusEventClient
+from agent_bus.security import async_bus_client
+
+from agent_bus.config import DEFAULT_CONFIG_DIR, get_config_dir
+from agent_bus.worker.client import BusEventClient, worker_environment
 
 logger = logging.getLogger("agent_bus.cli.watch")
 
 SESSIONS_FILE = DEFAULT_CONFIG_DIR / "watch_sessions.json"
 
 
-def load_session_map(path: Path = SESSIONS_FILE) -> dict[str, str]:
+def load_session_map(path: Path | None = None) -> dict[str, str]:
+    path = path or get_config_dir() / "watch_sessions.json"
     if path.exists():
         try:
             return json.loads(path.read_text())
@@ -40,7 +43,8 @@ def load_session_map(path: Path = SESSIONS_FILE) -> dict[str, str]:
     return {}
 
 
-def save_session_map(mapping: dict[str, str], path: Path = SESSIONS_FILE) -> None:
+def save_session_map(mapping: dict[str, str], path: Path | None = None) -> None:
+    path = path or get_config_dir() / "watch_sessions.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(mapping, indent=1))
 
@@ -87,7 +91,7 @@ async def run_turn(
     session_map: dict[str, str],
     cli: str = "claude",
     dry_run: bool = False,
-    sessions_file: Path = SESSIONS_FILE,
+    sessions_file: Path | None = None,
     bus_url: str = "http://localhost:8420",
 ) -> str | None:
     """Ejecuta un turno del CLI por el mensaje dado, responde automáticamente al bus y devuelve el session_id."""
@@ -119,7 +123,7 @@ async def run_turn(
         logger.error("CLI '%s' not found in PATH", cli)
         return None
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=worker_environment(agent_id))
     if result.returncode != 0:
         logger.error("CLI turn failed: %s", result.stderr[:200])
         return session_id
@@ -135,8 +139,8 @@ async def run_turn(
     sender = message.get("from_agent")
     if sender and reply_text:
         try:
-            async with httpx.AsyncClient(base_url=bus_url.rstrip("/"), timeout=10.0) as client:
-                await client.post(
+            async with async_bus_client(agent_id, base_url=bus_url.rstrip("/"), timeout=10.0) as client:
+                response = await client.post(
                     "/messages",
                     json={
                         "from_agent": agent_id,
@@ -148,6 +152,7 @@ async def run_turn(
                         "correlation_id": message.get("message_id"),
                     },
                 )
+                response.raise_for_status()
                 logger.info("Respuesta enviada a '%s' por el bus.", sender)
         except Exception as exc:
             logger.warning("No se pudo enviar respuesta automática al bus: %s", exc)
@@ -171,7 +176,10 @@ def watch(agent_id: str | None, cli: str, bus_url: str, dry_run: bool, once: boo
             click.echo("No hay agente por defecto. Usa --agent o agent-bus work as <id>")
             raise SystemExit(1)
 
-    session_map = load_session_map()
+    # Fail immediately for missing/mismatched credentials, including dry-run.
+    worker_environment(agent_id)
+    session_file = get_config_dir() / "watch" / agent_id / "sessions.json"
+    session_map = load_session_map(session_file)
     seen_messages: set[str] = set()
     bus_client = BusEventClient(agent_id, bus_url=bus_url)
 
@@ -199,6 +207,7 @@ def watch(agent_id: str | None, cli: str, bus_url: str, dry_run: bool, once: boo
             cli=cli,
             dry_run=dry_run,
             bus_url=bus_url,
+            sessions_file=session_file,
         )
         if sid:
             click.echo(f"  ✅ turno completado (session {sid[:8]})")

@@ -228,10 +228,10 @@ class AgentRunner:
         timeout_seconds: float,
         thread_id: str | None = None,
     ) -> RunnerResult:
-        env = os.environ.copy()
-        env["AGENT_BUS_AGENT_ID"] = self.agent_id
+        from agent_bus.worker.client import worker_environment
 
         try:
+            env = worker_environment(self.agent_id)
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(self.worktree_dir),

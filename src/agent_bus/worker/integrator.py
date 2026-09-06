@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from agent_bus.security import async_bus_client
+
 logger = logging.getLogger("agent_bus.worker.integrator")
 
 
@@ -152,7 +154,7 @@ class BranchIntegrator:
 
     async def _notify_author_failure(self, task_id: str, author_agent: str, details: str, retry: int) -> None:
         """Sends a high priority feedback message to author on the bus."""
-        async with httpx.AsyncClient(base_url=self.bus_url, timeout=10.0) as client:
+        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
             try:
                 # Ensure task stays in_progress for author
                 await client.post(f"/tasks/{task_id}/reassign", json={"new_owner": author_agent})
@@ -178,7 +180,7 @@ class BranchIntegrator:
 
     async def _notify_bus_blocked(self, task_id: str, author_agent: str, details: str) -> None:
         """Alerts that a task exceeded max integration retries and is blocked."""
-        async with httpx.AsyncClient(base_url=self.bus_url, timeout=10.0) as client:
+        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
             try:
                 await client.post(
                     "/messages",
@@ -198,7 +200,7 @@ class BranchIntegrator:
                 logger.error(f"Failed to post blocker for {task_id}: {exc}")
 
     async def _mark_task_completed(self, task_id: str) -> None:
-        async with httpx.AsyncClient(base_url=self.bus_url, timeout=10.0) as client:
+        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
             try:
                 await client.post(f"/tasks/{task_id}/done")
             except Exception as exc:

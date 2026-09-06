@@ -8,6 +8,8 @@ para recibir eventos SSE en su misma sesión de forma nativa y sin intermediario
 from __future__ import annotations
 
 import asyncio
+import copy
+import os
 import json
 import logging
 import sys
@@ -16,6 +18,8 @@ from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, Field, StrictStr
+
+from agent_bus.security import async_bus_client, load_session
 
 logger = logging.getLogger("agent_bus.mcp")
 
@@ -149,8 +153,35 @@ TOOLS_DEFINITIONS = [
 
 
 class McpServer:
-    def __init__(self, bus_url: str = "http://localhost:8420") -> None:
+    def __init__(self, bus_url: str = "http://127.0.0.1:8420", agent_id: str | None = None) -> None:
         self.bus_url = bus_url.rstrip("/")
+        self.session = None
+        if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
+            self.session = load_session(agent_id)
+        self.agent_id = self.session["agent_id"] if self.session else agent_id
+        self.tools = copy.deepcopy(TOOLS_DEFINITIONS)
+        if self.session:
+            for tool in self.tools:
+                schema = tool["inputSchema"]
+                for field in ("agent_id", "from_agent", "decided_by"):
+                    schema.get("properties", {}).pop(field, None)
+                    if field in schema.get("required", []):
+                        schema["required"].remove(field)
+
+    def _client(self, timeout: float | None = 30.0):
+        return async_bus_client(
+            self.agent_id, session=self.session, base_url=self.bus_url, timeout=timeout,
+        )
+
+    def _bind_identity(self, args: dict[str, Any]) -> dict[str, Any]:
+        if not self.session:
+            return dict(args)
+        bound = dict(args)
+        for field in ("agent_id", "from_agent", "decided_by"):
+            if field in bound and bound[field] != self.agent_id:
+                raise ValueError(f"{field} must match the authenticated MCP session")
+            bound[field] = self.agent_id
+        return bound
 
     async def handle_request(self, req: dict[str, Any]) -> dict[str, Any] | None:
         req_id = req.get("id")
@@ -175,7 +206,7 @@ class McpServer:
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "result": {"tools": TOOLS_DEFINITIONS},
+                "result": {"tools": self.tools},
             }
 
         elif method == "tools/call":
@@ -208,7 +239,8 @@ class McpServer:
         }
 
     async def execute_tool(self, name: str, args: dict[str, Any]) -> Any:
-        async with httpx.AsyncClient(base_url=self.bus_url, timeout=30.0) as client:
+        args = self._bind_identity(args)
+        async with self._client() as client:
             if name == "wait_for_updates":
                 agent_id = args["agent_id"]
                 timeout = int(args.get("timeout", 120))
@@ -267,10 +299,15 @@ class McpServer:
                 return resp.json()
 
             elif name == "get_project_status":
-                status = (await client.get("/status")).json()
-                tasks = (await client.get("/tasks")).json()
-                locks = (await client.get("/locks")).json()
-                agents = (await client.get("/agents")).json()
+                async def get_json(path):
+                    response = await client.get(path)
+                    response.raise_for_status()
+                    return response.json()
+
+                status = await get_json("/status")
+                tasks = await get_json("/tasks")
+                locks = await get_json("/locks")
+                agents = await get_json("/agents")
                 return {
                     "server": status,
                     "tasks": tasks,
@@ -296,14 +333,20 @@ class McpServer:
 
     async def _wait_for_updates(self, agent_id: str, timeout: int) -> dict[str, Any]:
         """Verifica inbox pendiente o espera un evento SSE del bus hasta el timeout."""
+        if self.session and agent_id != self.agent_id:
+            raise ValueError("agent_id must match the authenticated MCP session")
         # 1. Chequeo rápido de pendientes existentes
-        async with httpx.AsyncClient(base_url=self.bus_url, timeout=10.0) as client:
+        async with self._client(timeout=10.0) as client:
             try:
-                pending = (await client.get(f"/inbox/{agent_id}/pending")).json()
+                response = await client.get(f"/inbox/{agent_id}/pending")
+                response.raise_for_status()
+                pending = response.json()
                 if pending.get("count", 0) > 0:
                     # solo reply_needed (requieren acción) y acotado a 5 para
                     # no saturar el contexto de la sesión despertada
-                    inbox = (await client.get(f"/inbox/{agent_id}")).json()
+                    response = await client.get(f"/inbox/{agent_id}")
+                    response.raise_for_status()
+                    inbox = response.json()
                     actionable = [
                         m for m in inbox if m.get("reply_needed")
                     ][:5] or inbox[-5:]
@@ -314,12 +357,12 @@ class McpServer:
                         "messages": actionable,
                         "hint": "usa read_messages para ver el inbox completo",
                     }
-            except Exception:
-                pass
+            except Exception as exc:
+                return {"status": "error", "error": str(exc)}
 
         # 2. Espera reactiva sobre el stream SSE
         try:
-            async with httpx.AsyncClient(base_url=self.bus_url, timeout=timeout) as client:
+            async with self._client(timeout=timeout) as client:
                 async with client.stream("GET", f"/events/{agent_id}") as resp:
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
@@ -341,9 +384,9 @@ class McpServer:
         return {"status": "timeout", "message": "Stream closed"}
 
 
-async def run_mcp_server(bus_url: str = "http://localhost:8420") -> None:
+async def run_mcp_server(bus_url: str = "http://127.0.0.1:8420", agent_id: str | None = None) -> None:
     """Corre el servidor MCP escuchando en stdin/stdout en formato JSON-RPC 2.0."""
-    server = McpServer(bus_url=bus_url)
+    server = McpServer(bus_url=bus_url, agent_id=agent_id)
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
     loop = asyncio.get_running_loop()

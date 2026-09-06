@@ -3,12 +3,41 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import Any
 
 import httpx
 
+from agent_bus.config import get_config_dir
+from agent_bus.security import async_bus_client, load_session
+
 logger = logging.getLogger("agent_bus.worker.client")
+
+
+def worker_environment(agent_id: str, *, per_agent: bool = False) -> dict[str, str]:
+    """Select one worker's credentials without sharing an administrator's session."""
+    env = os.environ.copy()
+    env["AGENT_BUS_AGENT_ID"] = agent_id
+    env["AGENT_BUS_CONFIG_DIR"] = str(get_config_dir())
+    if per_agent:
+        path = get_config_dir() / "credentials" / f"{agent_id}.json"
+    else:
+        path = env.get("AGENT_BUS_SESSION_FILE")
+    development = (
+        env.get("AGENT_BUS_ALLOW_UNSIGNED") == "1"
+        and not env.get("AGENT_BUS_SESSION_FILE")
+        and not (per_agent and path.exists())
+    )
+    if development:
+        env.pop("AGENT_BUS_SESSION_FILE", None)
+    else:
+        # Validates project, identity and expiry before any process is spawned.
+        load_session(agent_id, session_file=path)
+        env["AGENT_BUS_SESSION_FILE"] = str(
+            path or get_config_dir() / "credentials" / f"{agent_id}.json"
+        )
+    return env
 
 EventCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
@@ -59,7 +88,7 @@ class BusEventClient:
 
     async def _consume_sse(self) -> None:
         """Una sesión SSE completa; termina si la conexión se corta o se hace stop()."""
-        async with httpx.AsyncClient(base_url=self.bus_url, timeout=None) as client:
+        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=None) as client:
             async with client.stream("GET", f"/events/{self.agent_id}") as resp:
                 resp.raise_for_status()
                 logger.info("SSE connected for '%s'", self.agent_id)
@@ -97,7 +126,7 @@ async def iter_bus_events(
     stop: asyncio.Event | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Itera eventos SSE del bus; termina cuando se setea ``stop`` o se corta la conexión."""
-    async with httpx.AsyncClient(base_url=bus_url.rstrip("/"), timeout=None) as client:
+    async with async_bus_client(agent_id, base_url=bus_url.rstrip("/"), timeout=None) as client:
         async with client.stream("GET", f"/events/{agent_id}") as resp:
             resp.raise_for_status()
             event: dict[str, Any] | None = None

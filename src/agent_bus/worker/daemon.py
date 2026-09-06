@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from agent_bus.security import async_bus_client
+
 from agent_bus.types import AgentStatus
 from agent_bus.worker.client import BusEventClient
 from agent_bus.worker.runner import AgentRunner, RunnerResult
@@ -26,6 +28,8 @@ class WorkerDaemon:
         heartbeat_interval_seconds: float = 15.0,
         max_turns_per_task: int = 10,
     ) -> None:
+        if runner.agent_id != agent_id:
+            raise ValueError("Runner identity must match its daemon")
         self.agent_id = agent_id
         self.runner = runner
         self.bus_url = bus_url.rstrip("/")
@@ -40,8 +44,18 @@ class WorkerDaemon:
 
     async def start(self) -> None:
         """Starts the autonomous worker daemon loop."""
+        self._client = async_bus_client(self.agent_id, base_url=self.bus_url, timeout=30.0)
+        try:
+            response = await self._client.post("/register", json={
+                "agent_id": self.agent_id, "display_name": self.agent_id,
+            })
+            if response.status_code != 409:
+                response.raise_for_status()
+        except Exception:
+            await self._client.aclose()
+            self._client = None
+            raise
         self._running = True
-        self._client = httpx.AsyncClient(base_url=self.bus_url, timeout=30.0)
 
         # Setup SSE event listener for immediate push wakeup
         self._sse_client = BusEventClient(

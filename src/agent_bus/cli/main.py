@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import click
@@ -15,8 +16,9 @@ from agent_bus.cli.display import (
     print_tasks_table,
 )
 from agent_bus.config import DEFAULT_CONFIG_DIR
+from agent_bus.security import AuthenticationError, load_session, sync_bus_client
 
-DEFAULT_URL = "http://localhost:8420"
+DEFAULT_URL = os.environ.get("AGENT_BUS_URL", "http://127.0.0.1:8420")
 
 try:
     import httpx
@@ -24,15 +26,31 @@ except ImportError:
     httpx = None  # type: ignore
 
 
+def _raise_auth_error(response):
+    if response.status_code == 401:
+        raise click.ClickException("Sesión inválida o vencida. Provisiona una sesión con agent-bus auth create --agent <id>")
+    if response.status_code == 403:
+        raise click.ClickException("La sesión no tiene permiso para esta operación")
+
+
 def _client():
     if httpx is None:
         click.echo("httpx not installed. Run: uv sync --extra dev")
         raise SystemExit(1)
-    return httpx.Client(base_url=DEFAULT_URL, timeout=10.0)
+    try:
+        return sync_bus_client(get_current_agent(), base_url=DEFAULT_URL, timeout=10.0,
+                               event_hooks={"response": [_raise_auth_error]})
+    except AuthenticationError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _require_agent() -> str:
     agent = get_current_agent()
+    if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
+        try:
+            return load_session(agent)["agent_id"]
+        except AuthenticationError as exc:
+            raise click.ClickException(str(exc)) from exc
     if not agent:
         click.echo("No hay agente por defecto. Ejecuta: agent-bus setup")
         raise SystemExit(1)
@@ -123,7 +141,7 @@ def init():
 
 
 @app.command()
-@click.option("--host", default="0.0.0.0", help="Bind host")
+@click.option("--host", default="127.0.0.1", help="Bind host")
 @click.option("--port", default=8420, type=int, help="Bind port")
 @click.option("--daemon", "run_daemon", is_flag=True, help="Correr como daemon en background")
 @click.option("--stop", "do_stop", is_flag=True, help="Detener el daemon")
@@ -258,6 +276,11 @@ def work_as(agent_id: str):
     """Cambiar agente por defecto."""
     from agent_bus.cli.display import set_current_agent
 
+    if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
+        try:
+            load_session(agent_id)
+        except AuthenticationError as exc:
+            raise click.ClickException(str(exc)) from exc
     set_current_agent(agent_id)
     click.echo(f"Agente por defecto: {agent_id}")
 
@@ -487,6 +510,10 @@ app.add_command(run_team)
 app.add_command(submit_goal)
 
 
+from agent_bus.cli.auth_cmds import auth  # noqa: E402
+
+app.add_command(auth)
+
 from agent_bus.cli.watch_cmds import watch  # noqa: E402
 
 app.add_command(watch)
@@ -565,56 +592,63 @@ def top_cmd(interval: float, once: bool):
 @click.option("--mock", is_flag=True, default=False, help="Usar runners mock")
 def quickstart(agents: str, mock: bool):
     """Onboarding en 1 solo paso: inicializa bus, registra agentes y lanza equipo."""
-    import subprocess
     import time
     from agent_bus.project import init_project
 
     click.echo("✨ agent-bus Quickstart: Inicializando entorno multi-agente...\n")
 
-    # 1. Init project
+    # Existing credentials are an explicit prerequisite; HTTP cannot enroll identities.
+    from agent_bus.cli.display import set_current_agent
+    from agent_bus.worker.client import worker_environment
+
+    agent_list = [a.strip() for a in agents.split(",") if a.strip()]
+    if not agent_list:
+        raise click.ClickException("Especifica al menos un agente")
+    secure = os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or bool(os.environ.get("AGENT_BUS_SESSION_FILE"))
+    sessions = {}
+    if secure:
+        try:
+            for agent in agent_list:
+                environment = worker_environment(agent, per_agent=True)
+                sessions[agent] = load_session(agent, session_file=environment["AGENT_BUS_SESSION_FILE"])
+        except AuthenticationError as exc:
+            raise click.ClickException(
+                f"{exc}. Provisiona cada identidad localmente primero: "
+                "agent-bus auth create --agent <id>. Para administrar: "
+                "agent-bus auth create --agent operator --role admin"
+            ) from exc
+
     project_path = init_project()
     _ensure_global_config()
     click.echo(f"  📁 Proyecto configurado en: {project_path}")
-
-    # 2. Start server daemon if not already online
-    server_online = False
-    try:
-        with _client() as client:
-            resp = client.get("/status")
-            if resp.status_code == 200:
-                server_online = True
-    except Exception:
-        server_online = False
-
-    if not server_online:
-        click.echo("  ⚡ Iniciando servidor agent-bus daemon...")
-        subprocess.run(["agent-bus", "serve", "--daemon"], check=False)
-        time.sleep(1.0)
-    else:
-        click.echo("  ⚡ Servidor agent-bus ya activo.")
-
-    # 3. Setup agents and protocols
-    agent_list = [a.strip() for a in agents.split(",") if a.strip()]
-    for ag in agent_list:
-        set_current_agent(ag)
+    first = agent_list[0]
+    with sync_bus_client(first, session=sessions.get(first), base_url=DEFAULT_URL, timeout=10) as client:
         try:
-            with _client() as client:
-                client.post("/register", json={"agent_id": ag, "display_name": ag.capitalize()})
-        except Exception:
-            pass
+            response = client.get("/status")
+            response.raise_for_status()
+        except httpx.ConnectError:
+            _start_daemon("127.0.0.1", 8420)
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    response = client.get("/status")
+                    response.raise_for_status()
+                    break
+                except httpx.ConnectError:
+                    if time.monotonic() >= deadline:
+                        raise click.ClickException("Servidor no inició; revisa agent-bus serve --status")
+                    time.sleep(0.1)
+
+    for agent in agent_list:
+        with sync_bus_client(agent, session=sessions.get(agent), base_url=DEFAULT_URL, timeout=10) as client:
+            response = client.post("/register", json={"agent_id": agent, "display_name": agent.capitalize()})
+            if response.status_code != 409:
+                response.raise_for_status()
+    if not get_current_agent() and not os.environ.get("AGENT_BUS_SESSION_FILE"):
+        set_current_agent(first)
     click.echo(f"  🤖 Agentes registrados: {', '.join(agent_list)}")
-
-    # 4. Run team
-    click.echo("  🚀 Lanzando equipo autónomo con worktrees y workers...")
-    cmd = ["agent-bus", "run-team", "--agents", agents]
-    if mock:
-        cmd.append("--mock")
-    subprocess.run(cmd, check=False)
-
-    click.echo("\n🎉 ¡Listo! El entorno multi-agente está completamente operativo.")
-    click.echo("   👉 Ver dashboard vivo:     agent-bus top")
-    click.echo("   👉 Enviar un objetivo:     agent-bus submit 'Tu requerimiento'")
-    click.echo("   👉 Monitorear logs:        agent-bus worker status")
+    click.get_current_context().invoke(run_team, agents=agents, mock=mock, base_ref="main", bus_url=DEFAULT_URL)
+    click.echo("\nEquipo iniciado. Verifica agent-bus worker status --agent <id>.")
 
 
 @show.command("tasks")
@@ -752,7 +786,7 @@ def work_context(update_field: tuple[str, str] | None):
 
 
 @app.command("start", hidden=True)
-@click.option("--host", default="0.0.0.0", help="Bind host")
+@click.option("--host", default="127.0.0.1", help="Bind host")
 @click.option("--port", default=8420, type=int, help="Bind port")
 def start(host: str, port: int):
     """Alias para 'serve' (deprecated, usa 'serve')."""
@@ -762,12 +796,13 @@ def start(host: str, port: int):
     click.echo(f"Iniciando agent-bus en {host}:{port}")
 @app.command("mcp-server")
 @click.option("--bus-url", default="http://localhost:8420", help="URL del hub agent-bus")
-def mcp_server_cmd(bus_url: str):
+@click.option("--agent", "agent_id", default=None, help="Identidad de la sesión MCP")
+def mcp_server_cmd(bus_url: str, agent_id: str | None):
     """Iniciar el servidor MCP de agent-bus sobre stdio (JSON-RPC 2.0)."""
     import asyncio
     from agent_bus.mcp.server import run_mcp_server
 
-    asyncio.run(run_mcp_server(bus_url=bus_url))
+    asyncio.run(run_mcp_server(bus_url=bus_url, agent_id=agent_id))
 
 
 if __name__ == "__main__":

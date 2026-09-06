@@ -10,6 +10,8 @@ from pathlib import Path
 import click
 
 from agent_bus.config import DEFAULT_CONFIG_DIR
+from agent_bus.security import AuthenticationError, load_session, sync_bus_client
+from agent_bus.worker.client import worker_environment
 
 WORKERS_DIR = DEFAULT_CONFIG_DIR / "workers"
 
@@ -52,6 +54,10 @@ def worker_start(agent_id: str | None, provider: str, model: str | None, worktre
             click.echo("No hay agente por defecto. Usa --agent o agent-bus work as <id>")
             raise SystemExit(1)
 
+    try:
+        child_env = worker_environment(agent_id)
+    except AuthenticationError as exc:
+        raise click.ClickException(str(exc)) from exc
     WORKERS_DIR.mkdir(parents=True, exist_ok=True)
     pid_file = _pid_file(agent_id)
     if pid_file.exists():
@@ -86,7 +92,7 @@ except KeyboardInterrupt:
 """
     cmd = [sys.executable, "-c", code]
     with open(_log_file(agent_id), "a") as log:
-        proc = subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True)
+        proc = subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True, env=child_env)
     pid_file.write_text(str(proc.pid))
     click.echo(f"Worker '{agent_id}' iniciado (PID {proc.pid})")
     click.echo(f"  Log: {_log_file(agent_id)}")
@@ -164,10 +170,16 @@ def run_team(agents: str, mock: bool, base_ref: str, bus_url: str):
         click.echo("Especifica al menos un agente en --agents")
         return
 
+    # Validate every identity before creating worktrees or starting any worker.
+    try:
+        environments = {agent: worker_environment(agent, per_agent=True) for agent in agent_list}
+    except AuthenticationError as exc:
+        raise click.ClickException(str(exc)) from exc
     wm = WorktreeManager()
     click.echo(f"🚀 Preparando equipo autónomo: {', '.join(agent_list)}")
 
     for agent_id in agent_list:
+        child_env = environments[agent_id]
         # 1. Crear worktree si estamos dentro de git repo
         worktree_path = None
         if wm.is_repo():
@@ -215,7 +227,7 @@ except KeyboardInterrupt:
 """
         cmd = [sys.executable, "-c", code]
         with open(_log_file(agent_id), "a") as log:
-            proc = subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True)
+            proc = subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True, env=child_env)
         pid_file.write_text(str(proc.pid))
         click.echo(f"  🤖 Worker '{agent_id}' iniciado en background (PID {proc.pid})")
 
@@ -230,15 +242,22 @@ except KeyboardInterrupt:
 @click.option("--bus-url", default="http://localhost:8420", help="URL del bus")
 def submit_goal(goal: str, bus_url: str):
     """Envía un objetivo global al equipo para descomposición y ejecución autónoma."""
-    import httpx
+    from agent_bus.cli.display import get_current_agent
 
+    actor = get_current_agent()
+    try:
+        if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
+            actor = load_session(actor)["agent_id"]
+        client = sync_bus_client(actor, base_url=bus_url, timeout=10.0)
+    except AuthenticationError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"🎯 Enviando objetivo al equipo: {goal}")
-    with httpx.Client(base_url=bus_url, timeout=10.0) as client:
+    with client:
         # Enviar mensaje broadcast a todos los agentes
         resp = client.post(
             "/messages",
             json={
-                "from_agent": "human",
+                "from_agent": actor or "human",
                 "to_agent": "*",
                 "message_type": "inbox",
                 "body": {"text": f"Nuevo objetivo del equipo: {goal}"},
@@ -248,4 +267,4 @@ def submit_goal(goal: str, bus_url: str):
         if resp.status_code == 200:
             click.echo("✅ Objetivo transmitido a todos los workers activos.")
         else:
-            click.echo(f"⚠️  Error comunicando con el bus: {resp.text}")
+            raise click.ClickException(f"Error comunicando con el bus ({resp.status_code})")

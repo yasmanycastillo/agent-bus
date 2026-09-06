@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import click
@@ -7,6 +8,8 @@ import yaml
 from rich.console import Console
 
 from agent_bus.cli.display import set_current_agent
+from agent_bus.config import get_config_dir
+from agent_bus.security import load_session, sync_bus_client
 from agent_bus.project import create_agent_config, create_plan, find_project_dir, get_agents_dir
 
 console = Console()
@@ -69,6 +72,15 @@ def run_setup(client, cwd: Path | None = None) -> None:
         console.print("[red]No se puede conectar al servidor. Ejecuta 'agent-bus serve' primero.[/red]")
         return
 
+    secure = os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or bool(os.environ.get("AGENT_BUS_SESSION_FILE"))
+    actor = None
+    if secure:
+        response = client.get("/auth/me")
+        response.raise_for_status()
+        actor = response.json()
+        if actor["role"] != "admin":
+            raise click.ClickException("Setup requiere una sesión admin: agent-bus auth create --agent operator --role admin")
+
     # Project goal — leer de README o plan.md si existen
     plan_path = project / "plan.md"
     readme_content = _read_readme(base)
@@ -129,10 +141,15 @@ def run_setup(client, cwd: Path | None = None) -> None:
         global_path = _create_global_profile(agent_id)
 
         # Register on bus
-        resp = client.post(
-            "/register",
-            json={"agent_id": agent_id, "display_name": display_name, "capabilities": caps},
-        )
+        payload = {"agent_id": agent_id, "display_name": display_name, "capabilities": caps}
+        if secure:
+            session = load_session(agent_id, session_file=get_config_dir() / "credentials" / f"{agent_id}.json")
+            with sync_bus_client(agent_id, session=session, base_url=str(client.base_url), timeout=10) as agent_client:
+                resp = agent_client.post("/register", json=payload)
+        else:
+            resp = client.post("/register", json=payload)
+        if resp.status_code != 409:
+            resp.raise_for_status()
         if resp.status_code == 201:
             console.print(f"    [green]ok[/green] registrado")
         elif resp.status_code == 409:
@@ -160,11 +177,12 @@ def run_setup(client, cwd: Path | None = None) -> None:
     console.print("\n[bold]3. Kickoff[/bold]")
     do_kickoff = click.confirm("  Iniciar kickoff?", default=True)
     if do_kickoff:
-        client.post("/kickoff/start")
-        client.post(
+        client.post("/kickoff/start").raise_for_status()
+        response = client.post(
             "/kickoff/step/0",
-            json={"result": {"name": base.name, "description": goal}, "completed_by": current},
+            json={"result": {"name": base.name, "description": goal}, "completed_by": actor["agent_id"] if actor else current},
         )
+        response.raise_for_status()
         console.print("  [green]ok[/green] kickoff iniciado (paso 0 completado)")
 
     # Summary
