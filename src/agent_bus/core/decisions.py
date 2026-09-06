@@ -23,11 +23,12 @@ class DecisionLog:
         supersedes: str | None = None,
     ) -> Decision:
         now = datetime.now(timezone.utc).isoformat()
-        await self._db.conn.execute_insert(
-            """INSERT OR IGNORE INTO decisions
+        rows = await self._db.conn.execute_fetchall(
+            """INSERT INTO decisions
                (decision_id, title, context, decision, alternatives, consequences,
                 decided_by, supersedes, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(decision_id) DO NOTHING RETURNING *""",
             (
                 decision_id,
                 title,
@@ -41,7 +42,9 @@ class DecisionLog:
             ),
         )
         await self._db.conn.commit()
-        return (await self.get(decision_id))  # type: ignore[return-value]
+        if not rows:
+            raise ValueError("Decision already exists")
+        return self._row_to_decision(rows[0])
 
     async def get(self, decision_id: str) -> Decision | None:
         cursor = await self._db.conn.execute_fetchall(

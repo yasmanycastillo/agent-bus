@@ -83,7 +83,7 @@ async def test_claim_allows_other_writer_commit_on_shared_connection(tmp_db, mon
     def pause_after_claim(original):
         async def wrapped(sql, *args, **kwargs):
             result = await original(sql, *args, **kwargs)
-            if "RETURNING" in sql:
+            if "RETURNING" in sql and "owner = 'free'" in sql:
                 claim_executed.set()
                 await other_committed.wait()
             return result

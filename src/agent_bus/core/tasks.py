@@ -22,8 +22,8 @@ class TaskManager:
         await self._db.conn.execute_insert(
             """INSERT OR IGNORE INTO tasks
                (task_id, title, description, owner, status, locked_files, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 'pending', '[]', ?, ?)""",
-            (task_id, title, description, owner, now, now),
+               VALUES (?, ?, ?, ?, ?, '[]', ?, ?)""",
+            (task_id, title, description, owner, "pending" if owner == "free" else "in_progress", now, now),
         )
         await self._db.conn.commit()
         return (await self.get(task_id))  # type: ignore[return-value]
@@ -77,25 +77,77 @@ class TaskManager:
         await self._db.conn.commit()
         return await self.get(task_id)
 
-    async def complete(self, task_id: str) -> Task | None:
+    async def complete(self, task_id: str, actor: str | None = None) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
-        await self._db.conn.execute(
-            """UPDATE tasks SET status = 'done', updated_at = ?
-               WHERE task_id = ?""",
-            (now, task_id),
+        condition = " AND owner = ? AND status = 'in_progress'" if actor else ""
+        params = (now, task_id, actor) if actor else (now, task_id)
+        rows = await self._db.conn.execute_fetchall(
+            "UPDATE tasks SET status = 'done', updated_at = ? WHERE task_id = ?"
+            + condition + " RETURNING *", params,
         )
         await self._db.conn.commit()
-        return await self.get(task_id)
+        return self._row_to_task(rows[0]) if rows else None
 
-    async def lock_files(self, task_id: str, paths: list[str]) -> Task | None:
+    async def lock_files(self, task_id: str, paths: list[str], actor: str | None = None) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
-        await self._db.conn.execute(
-            """UPDATE tasks SET locked_files = ?, updated_at = ?
-               WHERE task_id = ?""",
-            (json.dumps(paths), now, task_id),
+        condition = " AND owner = ? AND status != 'done'" if actor else ""
+        params = (json.dumps(paths), now, task_id)
+        if actor:
+            params += (actor,)
+        rows = await self._db.conn.execute_fetchall(
+            "UPDATE tasks SET locked_files = ?, updated_at = ? WHERE task_id = ?"
+            + condition + " RETURNING *", params,
         )
         await self._db.conn.commit()
-        return await self.get(task_id)
+        return self._row_to_task(rows[0]) if rows else None
+
+    async def transfer(
+        self, task_id: str, new_owner: str, *, actor: str, session_id: str,
+        require_owner: bool = False,
+    ) -> Task | None:
+        """Transfer a nonterminal task and audit it in one SQLite transaction.
+
+        All statements run in one aiosqlite worker operation: other coroutines
+        sharing the connection cannot commit between mutation and audit.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        condition = "task_id = ? AND status != 'done'"
+        params = (task_id,)
+        if require_owner:
+            condition += " AND owner = ?"
+            params += (actor,)
+        action = "handoff" if require_owner else "reassign"
+
+        def transaction(connection):
+            connection.execute("SAVEPOINT task_transfer")
+            try:
+                audit = connection.execute(
+                    """INSERT INTO audit_log
+                    (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, created_at)
+                    SELECT ?, task_id, ?, ?, owner, ?, ? FROM tasks WHERE """ + condition,
+                    (action, actor, session_id, new_owner, now) + params,
+                )
+                if audit.rowcount == 0:
+                    connection.execute("RELEASE task_transfer")
+                    return None
+                status = ", status = 'pending'" if new_owner == "free" else ", status = 'in_progress'"
+                rows = connection.execute(
+                    "UPDATE tasks SET owner = ?, updated_at = ?" + status
+                    + " WHERE " + condition + " RETURNING *",
+                    (new_owner, now) + params,
+                ).fetchall()
+                connection.execute("RELEASE task_transfer")
+                return rows[0]
+            except BaseException:
+                connection.execute("ROLLBACK TO task_transfer")
+                connection.execute("RELEASE task_transfer")
+                raise
+
+        # aiosqlite has no public API for a multi-statement worker callback.
+        # Keep this private-API dependency confined to this transaction boundary.
+        row = await self._db.conn._execute(transaction, self._db.conn._conn)
+        await self._db.conn.commit()
+        return self._row_to_task(row) if row is not None else None
 
     async def unlock_files(self, task_id: str) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()

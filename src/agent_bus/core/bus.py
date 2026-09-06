@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import os
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -21,11 +21,11 @@ from agent_bus.core.skills import SkillRegistry
 from agent_bus.core.tasks import TaskManager
 from agent_bus.reputation.database import Database
 from agent_bus.types import AgentInfo, AutonomyLevel, Envelope, MessageType
-from agent_bus.worker.auth import WorkerAuth
+from agent_bus.security import AuthenticationError, Principal, SessionStore
 
 
 class SendMessageRequest(BaseModel):
-    from_agent: str
+    from_agent: str | None = None
     to_agent: str | None = None
     message_type: MessageType = MessageType.INBOX
     body: dict | None = None
@@ -53,7 +53,7 @@ class TaskRequest(BaseModel):
 
 
 class ClaimRequest(BaseModel):
-    agent_id: str
+    agent_id: str | None = None
 
 
 class ReassignRequest(BaseModel):
@@ -62,13 +62,13 @@ class ReassignRequest(BaseModel):
 
 class LockRequest(BaseModel):
     file_path: str
-    agent_id: str
+    agent_id: str | None = None
     reason: str | None = None
 
 
 class ReleaseRequest(BaseModel):
     file_path: str
-    agent_id: str
+    agent_id: str | None = None
 
 
 class DecisionRequest(BaseModel):
@@ -76,7 +76,7 @@ class DecisionRequest(BaseModel):
     title: str
     context: str
     decision: str
-    decided_by: str
+    decided_by: str | None = None
     alternatives: list[str] | None = None
     consequences: str | None = None
     supersedes: str | None = None
@@ -94,8 +94,10 @@ class KickoffStepRequest(BaseModel):
 
 
 class MessageBus:
-    def __init__(self, db: Database, registry: AgentRegistry, inbox: InboxManager) -> None:
+    def __init__(self, db: Database, registry: AgentRegistry, inbox: InboxManager, project_id: str | None = None) -> None:
         self.db = db
+        self.project_id = project_id or os.environ.get("AGENT_BUS_PROJECT_ID", "default")
+        self.sessions = SessionStore(db, self.project_id)
         self.registry = registry
         self.inbox = inbox
         self.tasks = TaskManager(db)
@@ -110,51 +112,78 @@ class MessageBus:
         self._setup_routes()
 
     def _setup_routes(self) -> None:
-        auth_validator = WorkerAuth()
-
         @self.app.middleware("http")
-        async def verify_signature_middleware(request: Request, call_next):
-            allow_unsigned = os.environ.get("AGENT_BUS_ALLOW_UNSIGNED", "1") == "1"
-            if request.method in ("POST", "PUT", "DELETE"):
-                path = request.url.path
-                if not (path == "/register" or "/heartbeat" in path or path.startswith("/agents/")):
-                    agent_id = request.headers.get("x-agent-id")
-                    signature = request.headers.get("x-agent-signature")
-                    public_key = request.headers.get("x-agent-public-key")
-
-                    if agent_id and signature:
-                        body_bytes = await request.body()
-                        body_json = None
-                        if body_bytes:
-                            try:
-                                body_json = json.loads(body_bytes.decode())
-                            except Exception:
-                                pass
-
-                        async def receive():
-                            return {"type": "http.request", "body": body_bytes}
-
-                        request._receive = receive
-
-                        valid = auth_validator.verify_operation(
-                            agent_id=agent_id,
-                            method=request.method,
-                            path=path,
-                            body=body_json,
-                            signature_hex=signature,
-                            public_key_hex=public_key,
-                        )
-                        if not valid:
-                            return JSONResponse({"error": "Invalid Ed25519 signature"}, status_code=401)
-                    elif not allow_unsigned:
-                        return JSONResponse({"error": "Authentication required: missing signature"}, status_code=401)
-
+        async def authenticate_request(request: Request, call_next):
+            request.state.principal = None
+            request.state.token = None
+            path = request.url.path
+            if path in ("/health", "/room"):
+                return await call_next(request)
+            try:
+                principal, token = await self._authenticate(request.headers.get("authorization"))
+            except AuthenticationError:
+                return JSONResponse({"error": "Valid bearer session required"}, status_code=401, headers={"WWW-Authenticate": "Bearer"})
+            request.state.principal = principal
+            request.state.token = token
+            if principal:
+                parts = path.strip("/").split("/")
+                admin_only = (
+                    path.startswith("/room/api/") or path == "/events/all"
+                    or path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect")
+                    or (request.method not in ("GET", "HEAD", "OPTIONS") and (
+                        path.startswith("/skills/") or path.startswith("/kickoff/")
+                        or path == "/project/context"
+                        or (len(parts) == 3 and parts[0] == "tasks" and parts[2] == "reassign")
+                    ))
+                )
+                if admin_only and not principal.is_admin:
+                    return JSONResponse({"error": "Administrator role required"}, status_code=403)
+                if len(parts) >= 2 and parts[0] in ("inbox", "events", "agents"):
+                    if path != "/events/all" and parts[1] != principal.agent_id:
+                        return JSONResponse({"error": "Identity does not own this resource"}, status_code=403)
+                # Legacy actor arguments are accepted only when consistent with
+                # the verified session. They never confer authority.
+                if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+                    try:
+                        body = await request.json()
+                    except (ValueError, UnicodeDecodeError):
+                        body = {}
+                    if isinstance(body, dict):
+                        actors = []
+                        if path in ("/messages",) or path.endswith("/handoff"):
+                            actors.append("from_agent")
+                        if path == "/decisions":
+                            actors.append("decided_by")
+                        if path == "/register" or path.startswith("/locks/") or (
+                            len(parts) == 3 and parts[0] == "tasks"
+                            and parts[2] in ("claim", "done", "lock-files")
+                        ):
+                            actors.append("agent_id")
+                        if path.startswith("/kickoff/step/"):
+                            actors.append("completed_by")
+                        if any(body.get(field) is not None and body[field] != principal.agent_id for field in actors):
+                            return JSONResponse({"error": "Actor does not match authenticated session"}, status_code=403)
             return await call_next(request)
+
+        @self.app.get("/health")
+        async def health():
+            return {"status": "ok"}
+
+        @self.app.get("/auth/me")
+        async def auth_me(request: Request):
+            principal = request.state.principal
+            if principal is None:
+                return JSONResponse({"error": "No authenticated session"}, status_code=401)
+            return {key: getattr(principal, key) for key in (
+                "agent_id", "session_id", "project_id", "role", "expires_at"
+            )}
 
         # --- Agent endpoints ---
 
         @self.app.post("/register")
-        async def register(req: RegisterRequest):
+        async def register(req: RegisterRequest, request: Request):
+            if request.state.principal and req.public_key is not None:
+                raise HTTPException(422, "Presence registration does not enroll public keys")
             info = AgentInfo(
                 agent_id=req.agent_id,
                 display_name=req.display_name,
@@ -187,7 +216,8 @@ class MessageBus:
         # --- Message endpoints ---
 
         @self.app.post("/messages")
-        async def post_message(req: SendMessageRequest):
+        async def post_message(req: SendMessageRequest, request: Request):
+            req.from_agent = self._actor(request, req.from_agent)
             envelope = Envelope(
                 from_agent=req.from_agent,
                 to_agent=req.to_agent,
@@ -248,53 +278,54 @@ class MessageBus:
             return {"status": "archived"}
 
         @self.app.get("/events/all")
-        async def sse_all_stream():
-            queue: asyncio.Queue[str] = asyncio.Queue()
-            self._global_sse_subscribers.add(queue)
-
-            async def event_generator():
-                try:
-                    while True:
-                        data = await queue.get()
-                        yield {"event": "message", "data": data}
-                except (asyncio.CancelledError, GeneratorExit):
-                    pass
-                finally:
-                    self._global_sse_subscribers.discard(queue)
-
-            return EventSourceResponse(event_generator())
+        async def sse_all_stream(request: Request):
+            return self._event_response(request, self._global_sse_subscribers)
 
         @self.app.get("/events/{agent_id}")
-        async def sse_stream(agent_id: str):
-            queue: asyncio.Queue[str] = asyncio.Queue()
-            self._sse_subscribers[agent_id].add(queue)
-
-            async def event_generator():
-                try:
-                    while True:
-                        data = await queue.get()
-                        yield {"event": "message", "data": data}
-                except (asyncio.CancelledError, GeneratorExit):
-                    pass
-                finally:
-                    self._sse_subscribers[agent_id].discard(queue)
-
-            return EventSourceResponse(event_generator())
+        async def sse_stream(agent_id: str, request: Request):
+            return self._event_response(request, self._sse_subscribers[agent_id])
 
         @self.app.websocket("/ws/{agent_id}")
         async def websocket_endpoint(websocket: WebSocket, agent_id: str):
+            try:
+                principal, token = await self._authenticate(websocket.headers.get("authorization"))
+            except AuthenticationError:
+                await websocket.close(code=1008)
+                return
+            if principal and principal.agent_id != agent_id:
+                await websocket.close(code=1008)
+                return
+            websocket.state.token = token
             await websocket.accept()
+            previous = self._ws_connections.get(agent_id)
+            if previous:
+                await previous.close(code=1000)
             self._ws_connections[agent_id] = websocket
             try:
-                while True:
-                    raw = await websocket.receive_text()
-                    data = json.loads(raw)
-                    envelope = Envelope.model_validate(data)
+                while await self._session_valid(token):
+                    try:
+                        raw = await asyncio.wait_for(websocket.receive_text(), timeout=1)
+                    except asyncio.TimeoutError:
+                        continue
+                    if not await self._session_valid(token):
+                        break
+                    try:
+                        data = json.loads(raw)
+                        envelope = Envelope.model_validate(data)
+                    except ValueError:
+                        await websocket.close(code=1008)
+                        return
+                    if principal and envelope.from_agent != principal.agent_id:
+                        await websocket.close(code=1008)
+                        return
                     if envelope.message_type == MessageType.HEARTBEAT:
+                        if principal and envelope.to_agent not in (None, agent_id):
+                            await websocket.close(code=1008)
+                            return
                         await self.registry.heartbeat(agent_id)
                         await websocket.send_json({"type": "heartbeat_ack"})
                         continue
-                    if envelope.to_agent:
+                    if envelope.to_agent and envelope.message_type != MessageType.BROADCAST:
                         msg_id = await self.inbox.deliver(envelope)
                         await self._push_to_agent(envelope.to_agent, envelope)
                         await websocket.send_json({"type": "delivered", "message_id": msg_id})
@@ -307,15 +338,20 @@ class MessageBus:
                             await self.inbox.deliver(env_copy)
                             await self._push_to_agent(agent.agent_id, env_copy)
                         await websocket.send_json({"type": "broadcast_sent"})
-            except WebSocketDisconnect:
+                await websocket.close(code=1008)
+            except (WebSocketDisconnect, RuntimeError):
                 pass
             finally:
-                self._ws_connections.pop(agent_id, None)
+                if self._ws_connections.get(agent_id) is websocket:
+                    self._ws_connections.pop(agent_id, None)
 
         # --- Task endpoints ---
 
         @self.app.post("/tasks")
-        async def create_task(req: TaskRequest):
+        async def create_task(req: TaskRequest, request: Request):
+            principal = request.state.principal
+            if principal and not principal.is_admin and req.owner not in ("free", principal.agent_id):
+                raise HTTPException(403, "Cannot assign tasks to another agent")
             task = await self.tasks.create(
                 req.task_id, req.title, req.description, req.owner
             )
@@ -337,44 +373,54 @@ class MessageBus:
             return task.model_dump(mode="json")
 
         @self.app.post("/tasks/{task_id}/claim")
-        async def claim_task(task_id: str, req: ClaimRequest):
+        async def claim_task(task_id: str, req: ClaimRequest, request: Request):
+            req.agent_id = self._actor(request, req.agent_id)
             task = await self.tasks.claim(task_id, req.agent_id)
             if not task:
                 return JSONResponse({"error": "Task not found or already owned"}, status_code=409)
             return task.model_dump(mode="json")
 
         @self.app.post("/tasks/{task_id}/reassign")
-        async def reassign_task(task_id: str, req: ReassignRequest):
-            task = await self.tasks.reassign(task_id, req.new_owner)
+        async def reassign_task(task_id: str, req: ReassignRequest, request: Request):
+            principal = request.state.principal
+            if principal:
+                task = await self.tasks.transfer(task_id, req.new_owner,
+                    actor=principal.agent_id, session_id=principal.session_id)
+            else:
+                task = await self.tasks.reassign(task_id, req.new_owner)
             if not task:
-                return JSONResponse({"error": "Task not found"}, status_code=404)
+                return await self._task_failure(task_id)
             return task.model_dump(mode="json")
 
         @self.app.post("/tasks/{task_id}/done")
-        async def complete_task(task_id: str):
-            task = await self.tasks.complete(task_id)
+        async def complete_task(task_id: str, request: Request):
+            principal = request.state.principal
+            task = await self.tasks.complete(task_id, actor=principal.agent_id if principal else None)
             if not task:
-                return JSONResponse({"error": "Task not found"}, status_code=404)
+                return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
 
         @self.app.post("/tasks/{task_id}/lock-files")
-        async def lock_task_files(task_id: str, req: dict):
+        async def lock_task_files(task_id: str, req: dict, request: Request):
             paths = req.get("files", [])
-            task = await self.tasks.lock_files(task_id, paths)
+            principal = request.state.principal
+            task = await self.tasks.lock_files(task_id, paths, actor=principal.agent_id if principal else None)
             if not task:
-                return JSONResponse({"error": "Task not found"}, status_code=404)
+                return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
 
         # --- Decision endpoints ---
 
         @self.app.post("/decisions")
-        async def add_decision(req: DecisionRequest):
-            d = await self.decisions.add(
-                req.decision_id, req.title, req.context, req.decision,
-                req.decided_by, req.alternatives, req.consequences, req.supersedes,
-            )
-            if req.supersedes:
-                await self.decisions.supersede(req.supersedes, req.decision_id)
+        async def add_decision(req: DecisionRequest, request: Request):
+            req.decided_by = self._actor(request, req.decided_by)
+            try:
+                d = await self.decisions.add(
+                    req.decision_id, req.title, req.context, req.decision,
+                    req.decided_by, req.alternatives, req.consequences, req.supersedes,
+                )
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
             return d.model_dump(mode="json")
 
         @self.app.get("/decisions")
@@ -391,7 +437,8 @@ class MessageBus:
         # --- Lock endpoints ---
 
         @self.app.post("/locks/acquire")
-        async def acquire_lock(req: LockRequest):
+        async def acquire_lock(req: LockRequest, request: Request):
+            req.agent_id = self._actor(request, req.agent_id)
             try:
                 lock = await self.locks.acquire(req.file_path, req.agent_id, req.reason)
                 return lock.model_dump(mode="json")
@@ -399,7 +446,8 @@ class MessageBus:
                 return JSONResponse({"error": str(e)}, status_code=409)
 
         @self.app.post("/locks/release")
-        async def release_lock(req: ReleaseRequest):
+        async def release_lock(req: ReleaseRequest, request: Request):
+            req.agent_id = self._actor(request, req.agent_id)
             try:
                 await self.locks.release(req.file_path, req.agent_id)
                 return {"status": "released"}
@@ -454,7 +502,7 @@ class MessageBus:
             return [m.model_dump(mode="json") for m in human_inbox if m.reply_needed]
 
         @self.app.post("/room/api/approve")
-        async def room_approve(req: dict):
+        async def room_approve(req: dict, request: Request):
             """Aprobar/rechazar/responder una solicitud del humano; notifica al agente."""
             message_id = req.get("message_id", "")
             decision = req.get("decision", "")  # approve | reject | respond
@@ -468,7 +516,7 @@ class MessageBus:
             await self.inbox.archive("human", message_id)
 
             envelope = Envelope(
-                from_agent="human",
+                from_agent=self._actor(request, "human"),
                 to_agent=msg.from_agent,
                 message_type=MessageType.INBOX,
                 body={
@@ -485,26 +533,27 @@ class MessageBus:
             return {"status": "notified", "message_id": msg_id, "agent": msg.from_agent}
 
         @self.app.post("/room/api/assign")
-        async def room_assign(req: dict):
+        async def room_assign(req: dict, request: Request):
             """Asignar una tarea a un agente desde el War Room; notifica al agente."""
             task_id = req.get("task_id", "")
             agent_id = req.get("agent_id", "")
             if not task_id or not agent_id:
                 return JSONResponse({"error": "task_id and agent_id required"}, status_code=400)
 
-            task = await self.tasks.get(task_id)
+            principal = request.state.principal
+            if principal:
+                task = await self.tasks.transfer(task_id, agent_id, actor=principal.agent_id,
+                    session_id=principal.session_id)
+            else:
+                task = await self.tasks.reassign(task_id, agent_id)
+                if task:
+                    await self.db.conn.execute("UPDATE tasks SET status = 'in_progress' WHERE task_id = ?", (task_id,))
+                    await self.db.conn.commit()
             if not task:
-                return JSONResponse({"error": "Task not found"}, status_code=404)
-
-            now_iso = datetime.now(timezone.utc).isoformat()
-            await self.db.conn.execute(
-                "UPDATE tasks SET owner = ?, status = 'in_progress', updated_at = ? WHERE task_id = ?",
-                (agent_id, now_iso, task_id),
-            )
-            await self.db.conn.commit()
+                return await self._task_failure(task_id)
 
             envelope = Envelope(
-                from_agent="human",
+                from_agent=self._actor(request, "human"),
                 to_agent=agent_id,
                 message_type=MessageType.INBOX,
                 body={
@@ -521,7 +570,7 @@ class MessageBus:
             return {"status": "assigned", "task_id": task_id, "agent": agent_id, "message_id": msg_id}
 
         @self.app.post("/room/api/message")
-        async def room_message(req: dict):
+        async def room_message(req: dict, request: Request):
             """Mensaje del humano a un agente (o broadcast con to_agent='*')."""
             to_agent = req.get("to_agent", "")
             text = req.get("text", "")
@@ -529,7 +578,7 @@ class MessageBus:
                 return JSONResponse({"error": "text required"}, status_code=400)
 
             envelope = Envelope(
-                from_agent="human",
+                from_agent=self._actor(request, "human"),
                 to_agent=None if to_agent in ("*", "") else to_agent,
                 message_type=MessageType.INBOX if to_agent not in ("*", "") else MessageType.BROADCAST,
                 body={"text": text},
@@ -543,7 +592,7 @@ class MessageBus:
             agents = await self.registry.list_all()
             results = []
             for a in agents:
-                if a.agent_id == "human":
+                if a.agent_id == envelope.from_agent:
                     continue
                 env_copy = envelope.model_copy(update={"to_agent": a.agent_id})
                 results.append(await self.inbox.deliver(env_copy))
@@ -570,22 +619,22 @@ class MessageBus:
             }
 
         @self.app.post("/tasks/{task_id}/handoff")
-        async def handoff_task(task_id: str, req: dict):
-            from_agent = req.get("from_agent", "")
+        async def handoff_task(task_id: str, req: dict, request: Request):
+            from_agent = self._actor(request, req.get("from_agent"))
             to_agent = req.get("to_agent", "")
             if not from_agent or not to_agent:
                 return JSONResponse({"error": "from_agent and to_agent required"}, status_code=400)
+            if to_agent == "free":
+                return JSONResponse({"error": "Handoff requires an agent; administrators may reassign to free"}, status_code=422)
 
-            task = await self.tasks.get(task_id)
+            principal = request.state.principal
+            if principal:
+                task = await self.tasks.transfer(task_id, to_agent, actor=principal.agent_id,
+                    session_id=principal.session_id, require_owner=True)
+            else:
+                task = await self.tasks.reassign(task_id, to_agent)
             if not task:
-                return JSONResponse({"error": "Task not found"}, status_code=404)
-
-            now_iso = datetime.now(timezone.utc).isoformat()
-            await self.db.conn.execute(
-                """UPDATE tasks SET owner = ?, updated_at = ? WHERE task_id = ?""",
-                (to_agent, now_iso, task_id),
-            )
-            await self.db.conn.commit()
+                return await self._task_failure(task_id, principal)
 
             handoff_body = {
                 "type": "handoff",
@@ -612,10 +661,9 @@ class MessageBus:
             msg_id = await self.inbox.deliver(envelope)
             await self._push_to_agent(to_agent, envelope)
 
-            updated = await self.tasks.get(task_id)
             return {
                 "status": "handed_off",
-                "task": updated.model_dump(mode="json") if updated else None,
+                "task": task.model_dump(mode="json"),
                 "message_id": msg_id,
             }
 
@@ -679,11 +727,68 @@ class MessageBus:
             return [s.model_dump(mode="json") for s in steps]
 
         @self.app.post("/kickoff/step/{step}")
-        async def complete_kickoff_step(step: int, req: KickoffStepRequest):
+        async def complete_kickoff_step(step: int, req: KickoffStepRequest, request: Request):
+            req.completed_by = self._actor(request, req.completed_by)
             result = await self.kickoff.complete_step(step, req.result, req.completed_by)
             if not result:
                 return JSONResponse({"error": "Step not found"}, status_code=404)
             return result.model_dump(mode="json")
+
+    async def _task_failure(self, task_id: str, principal: Principal | None = None) -> JSONResponse:
+        # This read only explains a failed conditional write; it never authorizes
+        # a later mutation, so a concurrent owner change cannot bypass the SQL.
+        task = await self.tasks.get(task_id)
+        if not task:
+            return JSONResponse({"error": "Task not found"}, status_code=404)
+        if principal and task.owner != principal.agent_id:
+            return JSONResponse({"error": "Task belongs to another agent"}, status_code=403)
+        return JSONResponse({"error": "Task state does not permit this transition"}, status_code=409)
+
+    async def _authenticate(self, authorization: str | None) -> tuple[Principal | None, str | None]:
+        if authorization is None and os.environ.get("AGENT_BUS_ALLOW_UNSIGNED", "0") == "1":
+            return None, None
+        scheme, _, token = (authorization or "").partition(" ")
+        if scheme.lower() != "bearer" or not token or " " in token:
+            raise AuthenticationError("Valid bearer session required")
+        return await self.sessions.authenticate(token), token
+
+    @staticmethod
+    def _actor(request: Request, legacy_actor: str | None) -> str:
+        principal = request.state.principal
+        if principal:
+            return principal.agent_id
+        if not legacy_actor:
+            raise HTTPException(422, "An actor is required in legacy mode")
+        return legacy_actor
+
+    async def _session_valid(self, token: str | None) -> bool:
+        try:
+            await self._authenticate(f"Bearer {token}" if token else None)
+            return True
+        except AuthenticationError:
+            return False
+
+    def _event_response(self, request: Request, subscribers: set) -> EventSourceResponse:
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        subscribers.add(queue)
+        token = request.state.token
+
+        async def event_generator():
+            try:
+                while await self._session_valid(token):
+                    try:
+                        data = await asyncio.wait_for(queue.get(), timeout=1)
+                    except asyncio.TimeoutError:
+                        continue
+                    if not await self._session_valid(token):
+                        break
+                    yield {"event": "message", "data": data}
+            except (asyncio.CancelledError, GeneratorExit):
+                pass
+            finally:
+                subscribers.discard(queue)
+
+        return EventSourceResponse(event_generator())
 
     async def _push_to_agent(self, agent_id: str, envelope: Envelope) -> None:
         data = envelope.model_dump_json()
@@ -693,7 +798,11 @@ class MessageBus:
             await q.put(data)
         if agent_id in self._ws_connections:
             try:
-                await self._ws_connections[agent_id].send_text(data)
+                websocket = self._ws_connections[agent_id]
+                if await self._session_valid(websocket.state.token):
+                    await websocket.send_text(data)
+                else:
+                    await websocket.close(code=1008)
             except Exception:
                 pass
 
@@ -715,6 +824,6 @@ def create_app() -> FastAPI:
 
     registry = AgentRegistry(heartbeat_miss_threshold=config.bus.heartbeat_miss_threshold)
     inbox = InboxManager(db)
-    bus = MessageBus(db=db, registry=registry, inbox=inbox)
+    bus = MessageBus(db=db, registry=registry, inbox=inbox, project_id=config.bus.project_id)
     bus.app.router.lifespan_context = lifespan
     return bus.app
