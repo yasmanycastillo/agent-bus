@@ -12,6 +12,8 @@
 
 > Estado: prototipo en estabilización. Las garantías verificadas y pendientes están en [TASK.md](TASK.md); la autonomía y compatibilidad con clientes externos requieren todavía la aceptación de T-13.
 
+Guía de [proyectos y sesiones](docs/projects.md): runtime compartido entre worktrees, hubs separados por proyecto e identidades independientes por sesión de proveedor.
+
 ---
 
 ## 🌟 Características Principales

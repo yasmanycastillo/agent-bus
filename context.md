@@ -51,10 +51,10 @@ Decisión: sesiones Bearer locales persistentes, provisionadas por el operador d
 - HTTP exige sesión excepto `/health` y la página estática `/room`. WS y SSE verifican identidad y revalidan la sesión mientras permanecen abiertos. `AGENT_BUS_ALLOW_UNSIGNED=1` es compatibilidad explícita de desarrollo.
 - MCP fija la sesión al arrancar y elimina remitente/autor de los schemas seguros. CLI, watcher, hook, workers e integrador usan clientes comunes; los runners reciben el archivo de su agente, sin heredar autoridad administrativa.
 - Las operaciones de tareas comprueban propietario/estado dentro de SQL. Reasignación administrativa y handoff dejan auditoría de actor, sesión y cambio de propietario en una misma operación SQLite; decisiones existentes no se modifican mediante un ID reutilizado.
-- La configuración admite directorio, base y proyecto explícitos por entorno; selección de identidad dinámica y rutas absolutas en subprocesos. `quickstart` todavía autoinicia solo 127.0.0.1:8420; otras URL deben tener hub iniciado explícitamente (T-11). Los clientes restringen credenciales al origen del hub y requieren HTTPS fuera de loopback. Cada proyecto debe usar una base separada: el namespace integral de T-11 sigue pendiente.
+- La configuración admite directorio, base y proyecto explícitos por entorno; selección de identidad dinámica y rutas absolutas en subprocesos. `quickstart` autoinicia el origen HTTP loopback configurado, incluido su puerto (T-11). Los clientes restringen credenciales al origen del hub y requieren HTTPS fuera de loopback. Cada proyecto usa una base y un hub propios; T-11 persiste su vinculación y rechaza proyectos incompatibles.
 - El panel recibe un token administrativo en un formulario y lo mantiene en memoria; usa `fetch` con Authorization para HTTP/SSE.
 
-El token puede reutilizarse hasta revocación/vencimiento; por sí solo no aporta anti-replay por solicitud ni idempotencia. T-08 implementa esta última para envíos con clave, como se describe abajo. Tareas y locks continúan asociados al nombre del agente, sin leases por sesión (T-11/T-12). Compartir usuario Unix con acceso a todas las credenciales o a la base no protege frente a un agente malicioso.
+El token puede reutilizarse hasta revocación/vencimiento; por sí solo no aporta anti-replay por solicitud ni idempotencia. T-08 implementa esta última para envíos con clave, como se describe abajo. Tareas y locks continúan asociados al nombre del agente, sin leases por sesión (T-12). Compartir usuario Unix con acceso a todas las credenciales o a la base no protege frente a un agente malicioso.
 
 La suite legacy usa compatibilidad explícita; las pruebas nuevas de seguridad usan sesiones estrictas. La aceptación automatizada incluye provisión CLI y clientes MCP en proceso contra un hub efímero; la prueba de procesos stdio reales se incorpora en T-10; la aceptación con aplicaciones externas y navegador completo sigue en T-13.
 
@@ -71,7 +71,7 @@ Validación de T-08: **374 pruebas aprobadas** en 65,92 s sobre `a774a8c`, con d
 - Worker/watcher usan almacenamiento como fuente de pendientes y SSE como aviso. Un fallo conserva la entrega y registra error; un éxito guarda respuesta+ack. Claude `is_error` con exit0 no es éxito; cancelar recoge el subproceso directo.
 - Retención: se conservan secuencias y registros de idempotencia aunque se limpien entregas confirmadas; responder requiere que el padre siga disponible. HTTP sin clave es compatibilidad, sin garantía de idempotencia de request.
 
-No hay ejecución exactamente una vez de efectos externos ni exclusión entre procesos del mismo agente (T-11/T-14). T-09 incorpora plazo total y recuperación; T-10 incorpora cancelación concurrente por JSON-RPC/stdio. La aceptación con clientes MCP externos por stdio sigue en T-13.
+No hay ejecución exactamente una vez de efectos externos (T-14). T-11 excluye ejecutores automáticos locales del mismo agente; conexiones MCP compartidas requieren coordinación. T-09 incorpora plazo total y recuperación; T-10 incorpora cancelación concurrente por JSON-RPC/stdio. La aceptación con clientes MCP externos por stdio sigue en T-13.
 
 Worktrees: `codex-t08-storage`, `codex-t08-clients`, `codex-t08-workers` e integrador. Se integran commits revisados manualmente a `main`; los listeners permanecen activos y el hub de coordinación previo no se reinició.
 
@@ -92,7 +92,7 @@ Worktrees: `codex-t09-storage`, `codex-t09-server`, `codex-t09-clients` e integr
 
 ## T-10: SDK MCP y transporte stdio
 
-Validación combinada: **493 pruebas aprobadas** en **109,70 s** sobre `7fad883`, dos avisos de deprecación WebSocket. Antes de esta tanda, T-09 se publicó en `origin/main` hasta `7fa6b54`. La siguiente tarea es **T-11**, aislamiento por proyecto y sesión. Configuración y contrato en [mcp-setup.md](docs/mcp-setup.md).
+Validación combinada: **493 pruebas aprobadas** en **109,70 s** sobre `7fad883`, dos avisos de deprecación WebSocket. Antes de esta tanda, T-09 se publicó en `origin/main` hasta `7fa6b54`. T-11 se describe a continuación. Configuración y contrato en [mcp-setup.md](docs/mcp-setup.md).
 
 - SDK oficial Python `mcp==2.1.1`, con lock reproducible. Se usa `mcp.server.Server` para preservar once herramientas y dejar negociación, protocolo, concurrencia y cancelación al SDK. Se elimina el dispatcher manual y `PROTOCOL_VERSION`.
 - La API Python de pruebas es `Client(McpServer(...).sdk_server())`; desaparece `handle_request`. Se conserva `execute_tool` como lógica de aplicación.
@@ -146,3 +146,16 @@ Al terminar una tarea: actualizar estado, evidencia y decisiones en TASK.md; act
 En la sesión inicial se inició el hub en `127.0.0.1:8420` para adquirir locks. Había un watcher `codex-review` en modo observación. Estos son datos de sesión, no garantía de procesos activos en sesiones futuras; comprobarlos y cumplir AGENTS.md.
 
 El hub de coordinación existente no se reinició durante la segunda tanda: conserva el proceso anterior aunque el código de main cambie. Activar la política requiere provisión y reinicio coordinado de servidor/clientes; no confundir las pruebas efímeras aprobadas con una migración del servicio en ejecución. Los listeners se dejaron activos según AGENTS.md.
+
+
+## T-11: aislamiento por proyecto y sesión
+
+T-10 se publicó en `origin/main` hasta `9010455` antes de iniciar esta tanda. Implementación integrada hasta `6e573d5`: suite completa de **539 pruebas** en **129,10 s**, más **28 pruebas dirigidas** tras el ajuste final de rutas relativas; dos avisos de deprecación WebSocket. Contrato completo, precedencias y migración en [projects.md](docs/projects.md).
+
+- Un hub/base por proyecto; `project_metadata` impide reprovisionar o abrir una base bajo otro ID. Una base heredada se adopta sólo si las sesiones existentes son compatibles. Las tablas de negocio no son multitenant.
+- Descubrimiento ascendente con límites de repositorio Git; los worktrees comparten `.agent-bus/runtime` del checkout canónico. `--project` o `AGENT_BUS_PROJECT_ROOT` permiten selección explícita. El contexto del hub usa el runtime fijado, no el cwd de cada petición.
+- `auth create --provider claude` genera participantes distintos; `--agent` conserva identidad explícita. MCP captura proyecto/URL/credencial y los subprocesos reciben entorno absoluto.
+- Worker y watcher automático comparten guard `flock` por base/proyecto/agente. Observadores dry-run coexisten. Varias conexiones MCP con la misma identidad comparten inbox sin reserva de lectura; deben coordinar consumo/ACK. El guard es local Unix, no una lease distribuida.
+- `quickstart` respeta el puerto HTTP loopback configurado y rechaza un hub de otro proyecto; los destinos remotos no se autoinician.
+
+La siguiente tarea es **T-12**, alcance y renovación de locks por sesión. T-13 conserva la aceptación con aplicaciones MCP externas. El hub previo y sus listeners siguen activos sin reiniciarse ni migrarse automáticamente.

@@ -27,7 +27,7 @@ T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/
 | T-08 | P1 | Confirmación, respuestas e idempotencia | T-02, T-05, T-06 | completada | codex-integrator / codex-t08-storage / codex-t08-clients / codex-t08-workers |
 | T-09 | P1 | Eventos recuperables y espera acotada | T-08 | completada | codex-integrator / codex-t09-storage / codex-t09-server / codex-t09-clients |
 | T-10 | P1 | SDK MCP y pruebas stdio | T-05, T-07, T-08, T-09 | completada | codex-integrator / codex-t10-stdio / codex-t10-contracts |
-| T-11 | P1 | Aislamiento por proyecto y sesión | T-05, T-06 | pendiente | — |
+| T-11 | P1 | Aislamiento por proyecto y sesión | T-05, T-06 | completada | codex-integrator / codex-t11-project / codex-t11-security / codex-t11-workers |
 | T-12 | P1 | Renovación y alcance de locks | T-04, T-11 | pendiente | — |
 | T-13 | P1 | Validación con dos clientes reales | T-01 a T-12 | pendiente | — |
 | T-14 | P2 | Workers recuperables y adaptadores | T-13 | pendiente | — |
@@ -138,11 +138,11 @@ Elegir SDK mantenido y versiones compatibles con clientes objetivo. Migrar el tr
 
 Definir namespace, descubrimiento de raíz y aislamiento de configuración/datos. Incluir subdirectorios y worktrees. Revisar `quickstart`: conecta con AGENT_BUS_URL pero su autostart conserva 127.0.0.1:8420. Evitar identidad operativa única por nombre del proveedor.
 
-- [ ] Dos proyectos simultáneos no mezclan mensajes, tareas ni locks.
-- [ ] Dos sesiones del mismo proveedor tienen identidades distinguibles.
-- [ ] Cada entrada resuelve explícitamente el proyecto correcto desde un worktree o subdirectorio.
-- [x] Una sesión expirada no mantiene permisos indefinidos. T-05 valida requests y revalida streams; el resto del aislamiento T-11 sigue pendiente.
-- [ ] Si se admite reconectar una misma sesión desde varios procesos, se define quién puede consumir/ejecutar trabajo.
+- [x] Dos proyectos simultáneos no mezclan mensajes, tareas ni locks.
+- [x] Dos sesiones del mismo proveedor tienen identidades distinguibles.
+- [x] Cada entrada resuelve explícitamente el proyecto correcto desde un worktree o subdirectorio.
+- [x] Una sesión expirada no mantiene permisos indefinidos. T-05 valida requests y revalida streams.
+- [x] Si se admite reconectar una misma sesión desde varios procesos, se define quién puede consumir/ejecutar trabajo.
 
 ## T-12 — Renovación y alcance de locks
 
@@ -253,3 +253,18 @@ La aceptación automatizada verifica SDK 2.1.1/moderno `2026-07-28`, initialize 
 La revisión y las reproducciones detectaron bloqueos del transporte por lectura/escritura en threads, espera indefinida de drain tras EOF y descarte silencioso de errores de entrada. La capa local conserva el parser/serializador del SDK y corrige esos cierres/respuestas; no reintroduce un dispatcher JSON-RPC propio. El contrato y el cambio de API Python se documentan en [mcp-setup.md](docs/mcp-setup.md).
 
 **Siguiente tarea: T-11**, aislamiento por proyecto y sesión. La aceptación con dos aplicaciones cliente externas, sus mecanismos de reactivación y navegador completo sigue en T-13; estas pruebas de procesos se ejecutaron en Linux. El hub previo y los listeners permanecen activos, sin migrar ese servicio automáticamente.
+
+
+## Registro de T-11
+
+T-10 publicado previamente en `origin/main` hasta `9010455`. Desarrollo paralelo en worktrees de configuración, seguridad y workers; integración revisada en `agent/codex-integrator` hasta `6e573d5`.
+
+Se implementó un hub/base por proyecto, vinculación persistente del propietario de la base, descubrimiento ascendente y canónico entre worktrees, runtime y contexto aislados, URL configurada en todos los clientes, identidades generadas por proveedor y exclusión local de ejecutores automáticos. MCP conserva proyecto/URL/sesión; `--project` conserva el significado de rutas relativas de invocación. Contrato y migración en [projects.md](docs/projects.md).
+
+Validación: **539 passed**, dos avisos de deprecación WebSocket, en **129,10 s** con `uv run --locked pytest -q`. Tras el ajuste final de rutas relativas de `--project`, **28 passed** en **9,19 s** sobre CLI, clientes autenticados y aceptación de dos hubs; incluye una regresión adicional. `ruff check --select F,E9` sobre configuración, proyecto, seguridad, DB, bus, CLI principal, MCP, guard y nuevos contratos seleccionados, más `git diff --check`, limpios.
+
+La aceptación automatizada cubre dos hubs HTTP simultáneos con nombres de tarea/lock/clave idénticos, rechazo de credenciales/cabeceras cruzadas, contextos persistidos independientes, MCP fijado pese a cambios de entorno, provisión CLI desde un worktree real/subdirectorio, autostart en el puerto configurado, migraciones legacy y exclusión entre procesos con recuperación por muerte del propietario.
+
+Límites: varias conexiones manuales con la misma identidad comparten autoridad e inbox; no se promete consumo exclusivo por lectura. El guard automático es cooperativo, local Unix y requiere la misma base canónica; no es lease distribuida ni garantía exactamente una vez de efectos externos. Bases legacy con sesiones de distintos proyectos fallan sin separación automática.
+
+**Siguiente tarea: T-12**, alcance, propietario por sesión y renovación de locks de recursos. T-13 conserva aceptación con aplicaciones MCP externas. Se mantienen el hub previo y los listeners, sin reiniciar ni migrar automáticamente el servicio de coordinación.

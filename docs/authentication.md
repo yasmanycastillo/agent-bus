@@ -19,11 +19,11 @@ uv run agent-bus auth create --agent bob --role agent
 uv run agent-bus serve --host 127.0.0.1
 ```
 
-Usar las mismas variables al provisionar y al arrancar el hub. Cada proyecto debe usar su propia base y directorio de configuración: el identificador de sesión se valida por proyecto, pero las tablas de tareas/mensajes todavía no tienen namespace compartido (T-11). El directorio `.agent-bus/` está excluido de Git. La provisión imprime la ubicación del archivo, no el token.
+Usar las mismas variables al provisionar y al arrancar el hub. Cada proyecto debe usar su propia base y directorio de configuración: la base completa queda vinculada persistentemente a un proyecto (T-11). El directorio `.agent-bus/` está excluido de Git. La provisión imprime la ubicación del archivo, no el token.
 
 La configuración también admite `database_path` y `bus.project_id` en YAML. Las variables de entorno tienen precedencia. Si existe una base del formato antiguo en la raíz del directorio de configuración y no existe la base predeterminada de `data/`, se conserva aquella ubicación. Una ruta explícita elimina cualquier ambigüedad.
 
-`quickstart` conserva el arranque automático local en `127.0.0.1:8420`. Si se configura otra URL, iniciar ese hub explícitamente antes; la generalización del descubrimiento/arranque pertenece a T-11.
+`quickstart` autoinicia la URL HTTP loopback configurada, incluido su puerto. Los hubs remotos se inician explícitamente. Ver [proyectos y sesiones](projects.md) para descubrimiento en subdirectorios/worktrees, identidades por proveedor y migración.
 
 ## Conectar un agente
 
@@ -66,7 +66,7 @@ Ejemplo de configuración stdio:
 
 La instancia MCP fija su identidad al arrancar. Sus herramientas seguras no ofrecen al modelo campos para elegir el remitente o autor. Los argumentos antiguos de identidad solo se admiten si coinciden con esa sesión; no otorgan autoridad.
 
-Esto no implementa todavía la migración del transporte al SDK MCP de T-10 ni demuestra interoperabilidad con todos los clientes anunciados. Ver [TASK.md](../TASK.md).
+T-10 incorpora el SDK MCP y pruebas stdio; la interoperabilidad con las aplicaciones externas anunciadas continúa en T-13. Ver [TASK.md](../TASK.md).
 
 ## Permisos
 
@@ -106,7 +106,7 @@ El token es una credencial reutilizable hasta su vencimiento o revocación. No d
 
 - Proveer sesiones antes de activar el nuevo servidor y actualizar los clientes conjuntamente.
 - Las claves `.pub` anteriores no se convierten automáticamente en sesiones confiables.
-- Los mensajes, tareas y locks existentes se conservan. La identidad de propietario de tareas/locks continúa siendo `agent_id`; los leases y la diferenciación de sus sesiones corresponden a T-11/T-12.
+- Los mensajes, tareas y locks existentes se conservan. La identidad de propietario de tareas/locks continúa siendo `agent_id`; los leases y la diferenciación de sus sesiones corresponden a T-12.
 - `AGENT_BUS_ALLOW_UNSIGNED=1` habilita explícitamente compatibilidad sin autenticación para desarrollo y pruebas. No es el modo seguro. No usarlo para dar por aprobadas pruebas de autorización.
 - La suite mantiene pruebas legacy aisladas en ese modo y añade pruebas estrictas con sesiones y servicios efímeros.
 

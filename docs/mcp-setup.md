@@ -28,9 +28,9 @@ responde por el bus.
 
 - Sin pendientes: salida vacía, la sesión duerme normal.
 - Bus caído o credencial inválida: no bloquea (fail-open). El hook es una ayuda al ciclo de sesión, no una garantía de entrega o ejecución.
-- Variables: `AGENT_BUS_URL` (default `http://localhost:8420`),
+- Variables: `AGENT_BUS_URL` (opcional; hereda la configuración del proyecto),
   `AGENT_BUS_AGENT_ID` (o identidad seleccionada en la configuración/sesión), `AGENT_BUS_CONFIG_DIR`,
-  `AGENT_BUS_PROJECT_ID` y `AGENT_BUS_SESSION_FILE`. El hook usa el cliente autenticado común.
+  `AGENT_BUS_PROJECT_ROOT`, `AGENT_BUS_PROJECT_ID` y `AGENT_BUS_SESSION_FILE`. El hook usa el cliente autenticado común.
 - Runtime: usa `agent-bus` instalado en PATH o `uv run --no-sync` sobre el repositorio del hook. Si se copia a otro proyecto o se ejecuta desde un worktree sin entorno instalado, definir `AGENT_BUS_PACKAGE_DIR` con la ruta de la instalación preparada.
 
 ## 2. Servidor MCP nativo (`agent-bus mcp-server`)
@@ -52,7 +52,7 @@ completo, visible en terminal).
 
 ### Instalación y contrato del transporte
 
-Preparar el entorno antes de conectar el cliente: `uv sync --locked --extra dev`. Arrancar con `uv run --locked agent-bus mcp-server --agent <id> --bus-url <url>`. `--bus-url` tiene prioridad sobre `AGENT_BUS_URL`; por defecto usa `http://127.0.0.1:8420`. Las credenciales se cargan una vez al iniciar; no se autoinicia el hub desde este comando.
+Preparar el entorno antes de conectar el cliente: `uv sync --locked --extra dev`. Arrancar con `uv run --locked agent-bus mcp-server --agent <id> --bus-url <url>`. `--bus-url` tiene prioridad sobre `AGENT_BUS_URL`; después se consulta la configuración del proyecto y finalmente `http://127.0.0.1:8420`. Las credenciales se cargan una vez al iniciar; no se autoinicia el hub desde este comando.
 
 Se eligió el [servidor de bajo nivel del SDK oficial](https://py.sdk.modelcontextprotocol.io/advanced/low-level-server/) para conservar los schemas y resultados del bus. Esa API deja la validación de argumentos a la aplicación: aquí se valida JSON Schema 2020-12 antes de vincular la identidad. Los schemas seguros excluyen actores y rechazan propiedades adicionales, incluso un actor aportado con el mismo nombre de la sesión. Los clientes deben actualizar su catálogo mediante `tools/list`.
 
@@ -115,3 +115,5 @@ Las pruebas de autenticación ejercitan clientes MCP en proceso contra un hub HT
 - Opción B (tmux send-keys) descartada: reinjecta en TUI pero requiere tmux.
 - A2A (Linux Foundation): backlog — capa de interoperabilidad para agentes
   externos, NO para el problema local. Ver análisis en el bus.
+
+El proyecto y la URL también se fijan al arrancar MCP. Para varias sesiones del mismo proveedor y resolución desde worktrees, seguir [proyectos y sesiones](projects.md).
