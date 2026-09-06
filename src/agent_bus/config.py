@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 
 import yaml
 
 
-DEFAULT_CONFIG_DIR = Path.home() / ".agent-bus"
+DEFAULT_CONFIG_DIR = Path(os.environ.get("AGENT_BUS_CONFIG_DIR", Path.home() / ".agent-bus"))
+
+
+def get_config_dir() -> Path:
+    """Resolve explicit configuration at use time, including child processes."""
+    return Path(os.environ.get("AGENT_BUS_CONFIG_DIR", DEFAULT_CONFIG_DIR)).expanduser()
 
 
 @dataclass
 class BusConfig:
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8420
+    project_id: str = "default"
     heartbeat_interval_seconds: int = 30
     heartbeat_miss_threshold: int = 3
 
@@ -53,8 +60,8 @@ class LoggingConfig:
 
 @dataclass
 class KeysConfig:
-    private_key_path: str = str(DEFAULT_CONFIG_DIR / "private.key")
-    public_key_path: str = str(DEFAULT_CONFIG_DIR / "public.key")
+    private_key_path: str = field(default_factory=lambda: str(get_config_dir() / "private.key"))
+    public_key_path: str = field(default_factory=lambda: str(get_config_dir() / "public.key"))
 
 
 @dataclass
@@ -65,20 +72,19 @@ class AppConfig:
     reputation: ReputationConfig = field(default_factory=ReputationConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     keys: KeysConfig = field(default_factory=KeysConfig)
-    data_dir: str = str(DEFAULT_CONFIG_DIR / "data")
-    database_path: str = str(DEFAULT_CONFIG_DIR / "agent_bus.db")
+    data_dir: str = field(default_factory=lambda: str(get_config_dir() / "data"))
+    database_path: str = field(default_factory=lambda: str(get_config_dir() / "data" / "agent_bus.db"))
 
 
 def load_config(path: Path | None = None) -> AppConfig:
     """Load config from YAML file, falling back to defaults."""
     config = AppConfig()
     if path is None:
-        path = DEFAULT_CONFIG_DIR / "config.yaml"
-    if not path.exists():
-        return config
-
-    with open(path) as f:
-        raw = yaml.safe_load(f) or {}
+        path = get_config_dir() / "config.yaml"
+    raw = {}
+    if path.exists():
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
 
     if "bus" in raw:
         for k, v in raw["bus"].items():
@@ -115,7 +121,17 @@ def load_config(path: Path | None = None) -> AppConfig:
             if hasattr(config.keys, k):
                 setattr(config.keys, k, v)
 
-    # Override database path relative to data_dir
-    config.database_path = str(Path(config.data_dir) / "agent_bus.db")
+    config.data_dir = str(Path(raw.get("data_dir", config.data_dir)).expanduser())
+    configured_db = raw.get("database_path")
+    default_db = Path(config.data_dir) / "agent_bus.db"
+    legacy_db = get_config_dir() / "agent_bus.db"
+    # Older no-config startup used a different default. Keep an existing legacy
+    # database without silently moving its data or losing its registrations.
+    if not configured_db and "data_dir" not in raw and legacy_db.exists() and not default_db.exists():
+        default_db = legacy_db
+    config.database_path = str(Path(
+        os.environ.get("AGENT_BUS_DATABASE_PATH", configured_db or default_db)
+    ).expanduser())
+    config.bus.project_id = os.environ.get("AGENT_BUS_PROJECT_ID", config.bus.project_id)
 
     return config

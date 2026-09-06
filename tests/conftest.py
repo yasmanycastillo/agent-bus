@@ -25,6 +25,10 @@ def isolated_agent_config(tmp_path, monkeypatch):
     from agent_bus.worker import auth
 
     config_dir = tmp_path / "agent-config"
+    monkeypatch.setenv("AGENT_BUS_CONFIG_DIR", str(config_dir))
+    monkeypatch.delenv("AGENT_BUS_DATABASE_PATH", raising=False)
+    monkeypatch.delenv("AGENT_BUS_PROJECT_ID", raising=False)
+    monkeypatch.delenv("AGENT_BUS_SESSION_FILE", raising=False)
     for module in (config, main, auth):
         monkeypatch.setattr(module, "DEFAULT_CONFIG_DIR", config_dir)
     monkeypatch.setattr(display, "CURRENT_AGENT_FILE", config_dir / "current_agent")
