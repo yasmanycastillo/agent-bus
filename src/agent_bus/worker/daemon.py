@@ -174,8 +174,8 @@ class WorkerDaemon:
                 await self._handle_active_task(task)
                 return
 
-        # 3. Check for free pending tasks to claim
-        free_tasks_resp = await self._client.get("/tasks", params={"owner": "free", "status": "pending"})
+        # 3. Check for free pending tasks to claim (unlocked only)
+        free_tasks_resp = await self._client.get("/tasks", params={"owner": "free", "status": "pending", "ready_only": "true"})
         if free_tasks_resp.status_code == 200:
             free_tasks = free_tasks_resp.json()
             if free_tasks:

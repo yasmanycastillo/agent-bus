@@ -24,9 +24,9 @@ from agent_bus.core.locks import LockBusyError, LockError, LockManager
 from agent_bus.core.lock_paths import server_lock_path
 from agent_bus.core.registry import AgentRegistry
 from agent_bus.core.skills import SkillRegistry
-from agent_bus.core.tasks import TaskManager
+from agent_bus.core.tasks import TaskDependencyError, TaskManager
 from agent_bus.reputation.database import Database, ProjectMismatchError
-from agent_bus.types import AgentInfo, AutonomyLevel, Envelope, MessageType
+from agent_bus.types import AgentInfo, AutonomyLevel, Envelope, MessageType, TaskStatus
 from agent_bus.security import AuthenticationError, Principal, SessionStore
 
 
@@ -76,6 +76,15 @@ class TaskRequest(BaseModel):
     title: str
     description: str | None = None
     owner: str = "free"
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    test_cmd: list[str] | None = None
+    depends_on: list[str] = Field(default_factory=list)
+    operation_key: str | None = None
+
+
+class TaskBatchRequest(BaseModel):
+    tasks: list[TaskRequest]
+    operation_key: str | None = None
 
 
 class ClaimRequest(BaseModel):
@@ -435,17 +444,49 @@ class MessageBus:
             principal = request.state.principal
             if principal and not principal.is_admin and req.owner not in ("free", principal.agent_id):
                 raise HTTPException(403, "Cannot assign tasks to another agent")
-            task = await self.tasks.create(
-                req.task_id, req.title, req.description, req.owner
-            )
-            return task.model_dump(mode="json")
+            try:
+                task = await self.tasks.create(
+                    task_id=req.task_id,
+                    title=req.title,
+                    description=req.description,
+                    owner=req.owner,
+                    acceptance_criteria=req.acceptance_criteria,
+                    test_cmd=req.test_cmd,
+                    depends_on=req.depends_on,
+                    operation_key=req.operation_key,
+                )
+                return task.model_dump(mode="json")
+            except TaskDependencyError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+
+        @self.app.post("/tasks/batch")
+        @self.app.post("/tasks/breakdown")
+        async def create_tasks_batch(req: TaskBatchRequest, request: Request):
+            principal = request.state.principal
+            for t in req.tasks:
+                if principal and not principal.is_admin and t.owner not in ("free", principal.agent_id):
+                    raise HTTPException(403, f"Cannot assign task {t.task_id} to another agent")
+            try:
+                tasks_dicts = [t.model_dump() for t in req.tasks]
+                tasks = await self.tasks.create_batch(tasks_dicts, operation_key=req.operation_key)
+                return [t.model_dump(mode="json") for t in tasks]
+            except TaskDependencyError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
 
         @self.app.get("/tasks")
-        async def list_tasks(status: str | None = None, owner: str | None = None):
+        async def list_tasks(
+            status: str | None = None,
+            owner: str | None = None,
+            ready_only: bool = False,
+        ):
             from agent_bus.types import TaskStatus
 
             ts = TaskStatus(status) if status else None
-            task_list = await self.tasks.list_all(status=ts, owner=owner)
+            task_list = await self.tasks.list_all(status=ts, owner=owner, ready_only=ready_only)
             return [t.model_dump(mode="json") for t in task_list]
 
         @self.app.get("/tasks/{task_id}")
@@ -460,6 +501,12 @@ class MessageBus:
             req.agent_id = self._actor(request, req.agent_id)
             task = await self.tasks.claim(task_id, req.agent_id)
             if not task:
+                existing = await self.tasks.get(task_id)
+                if existing and existing.status == TaskStatus.BLOCKED:
+                    return JSONResponse(
+                        {"error": f"Task {task_id} is blocked by unmet dependencies: {existing.depends_on}"},
+                        status_code=409,
+                    )
                 return JSONResponse({"error": "Task not found or already owned"}, status_code=409)
             return task.model_dump(mode="json")
 
