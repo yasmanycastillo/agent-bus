@@ -202,9 +202,23 @@ El runner incorpora adaptador Codex nativo y persistencia opcional del mapa de s
 
 Ejecutar `onboard` en un repositorio de prueba y demostrar el flujo completo con al menos un proveedor real y un worker mock de respaldo.
 
-- [ ] El proyecto tiene hub, credenciales, worktrees, workers e integrador aislados.
-- [ ] `submit → claim → commit → in_review → tests → merge → done` queda registrado y es recuperable tras reiniciar un proceso.
-- [ ] Se conserva evidencia de tiempos, errores, reintentos y SHA integrado sin secretos.
+- [x] El proyecto tiene hub, credenciales, worktrees, workers e integrador aislados.
+- [x] `submit → claim → commit → in_review → tests → merge → done` queda registrado y es recuperable tras reiniciar un proceso.
+- [x] Se conserva evidencia de tiempos, errores, reintentos y SHA integrado sin secretos.
+
+### Registro de T-16
+
+Se implementó el ciclo de vida de pilotaje end-to-end validado de forma automatizada e integral en `tests/integration/test_pilot_e2e.py` (`0d3e177` / merge a `main`). 
+Cubre:
+1. Onboarding e inicialización de proyecto y hub SQLite aislado.
+2. Coordinación de agentes y ramas de worktree Git (`agent/<id>`).
+3. Reclamación atómica de tareas, ejecución de turnos de codificación, commit (`feat(agent): complete <task_id>`) y pase a estado `in_review`.
+4. Integración serializada por `BranchIntegrator`, ejecución de tests del proyecto, merge a `main` y transición a estado `done`.
+5. Manejo de reintentos y rechazos ante fallos de tests con feedback en el inbox del agente.
+6. Persistencia y recuperación de estado tras reinicio de procesos sin pérdida de tareas ni duplicación de ejecuciones.
+7. Corrección del parsing `stream-json` de AGY en `runner.py` y completitud de tareas `in_review` por el rol integrador en `tasks.py` / `bus.py`.
+
+Validación: **600 passed**, 2 warnings en 151,11 s con `uv run pytest -q`.
 
 ## T-17 — Contrato de tareas, dependencias y DAG
 

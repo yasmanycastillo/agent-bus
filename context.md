@@ -185,3 +185,14 @@ Evidencias y reproducción en [acceptance-t13.md](docs/acceptance-t13.md), resum
 - La skill OpenAI Docs se usó para contrastar configuración MCP y reanudación de Codex con la versión instalada. La evidencia local prevalece para afirmar qué se ejecutó.
 
 T-14 y T-15 quedan completadas: el runner tiene adaptadores separados y sesiones persistentes opcionales; el worker puede crear el commit y pasar la tarea a `in_review`; el integrador valida, fusiona y expone `agent-bus integrator start/status/stop`. La aceptación operativa con proyectos reales, cuotas/costes persistentes, DAG de tareas y Hermes siguen en el roadmap de [product-roadmap-improvements.md](docs/product-roadmap-improvements.md). Las referencias anteriores a T-13 pendiente describen el estado histórico al cerrar cada tanda. El hub personal y sus listeners siguen con su proceso anterior; ninguna aceptación reinició ese servicio. Los archivos privados de la corrida viven en `/tmp/agent-bus-t13-n21ax5md` y pueden desaparecer; el resumen sanitizado y el harness quedan en Git.
+
+## T-16: Piloto real de operación end-to-end
+
+Completada e integrada en `main` (`0d3e177` / merge). Suite completa: **600 pruebas aprobadas** en **151,11 s**, dos avisos de deprecación WebSocket (`uv run pytest -q`).
+
+- Validado el ciclo operativo completo: `init/onboard → submit → claim → commit → in_review → tests → merge → done` en un repositorio y hub SQLite aislados (`tests/integration/test_pilot_e2e.py`).
+- Flujo de feedback y reintentos del `BranchIntegrator` ante fallos de tests unitarios verificado.
+- Persistencia y recuperación del estado (decisiones ADR, tareas completadas e historial) comprobada ante reinicios de procesos simulados.
+- Correcciones de compatibilidad aplicadas a `AgentRunner` (stream-json de AGY) y `TaskManager` / `MessageBus` para transición y completitud fluida de tareas en revisión.
+
+Las siguientes tareas operativas (DAG de dependencias T-17, HermesOrchestrator T-18, Gatekeeper T-19, cuotas/presupuesto T-20 y consola local React T-21) continúan según el backlog de [TASK.md](TASK.md).
