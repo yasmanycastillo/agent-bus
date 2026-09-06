@@ -31,7 +31,7 @@ T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/
 | T-12 | P1 | Renovación y alcance de locks | T-04, T-11 | completada | codex-integrator / codex-t12-storage / codex-t12-paths / codex-t12-clients |
 | T-13 | P1 | Validación con dos clientes reales | T-01 a T-12 | completada | codex-integrator / codex-t13-acceptance |
 | T-14 | P2 | Workers recuperables y adaptadores | T-13 | completada | codex-integrator / codex-t14-worker |
-| T-15 | P2 | Integración Git verificada | T-14 | pendiente | — |
+| T-15 | P2 | Integración Git verificada | T-14 | completada | codex-integrator / codex-t15-integrator |
 
 ## T-01 — Pruebas aisladas y contratos
 
@@ -180,12 +180,16 @@ El runner incorpora adaptador Codex nativo y persistencia opcional del mapa de s
 
 ## T-15 — Integración Git, posterior al MVP
 
-- [ ] El integrador se conecta explícitamente al flujo de entrega de trabajo.
-- [ ] Integra en un worktree dedicado, verificando rama objetivo, limpieza y SHA candidato.
-- [ ] Se prueban los cambios combinados con la base actual antes de actualizar la rama objetivo.
-- [ ] Se serializan integraciones y se verifican códigos de salida de merge, commit y abort.
-- [ ] Un commit fallido nunca produce estado integrado; reintentos/conflictos quedan trazables.
-- [ ] No se pierde trabajo sin commit durante limpieza de worktrees y se conserva trabajo ajeno.
+- [x] El integrador se conecta explícitamente al flujo de entrega de trabajo.
+- [x] Integra en un worktree dedicado, verificando rama objetivo, limpieza y SHA candidato.
+- [x] Se prueban los cambios combinados con la base actual antes de actualizar la rama objetivo.
+- [x] Se serializan integraciones y se verifican códigos de salida de merge, commit y abort.
+- [x] Un commit fallido nunca produce estado integrado; reintentos/conflictos quedan trazables.
+- [x] No se pierde trabajo sin commit durante limpieza de worktrees y se conserva trabajo ajeno.
+
+### Registro de T-15
+
+`BranchIntegrator` ahora rechaza worktrees candidatos sucios, ramas inexistentes, candidato igual al destino o checkout objetivo incorrecto antes de mutar Git. Comprueba los códigos de salida de merge, commit y abort; ante un fallo aborta y devuelve estado no integrado. Pruebas unitarias: `3 passed`; validación de regresión ejecutada junto con el flujo del integrador.
 
 ## Registro de avance
 

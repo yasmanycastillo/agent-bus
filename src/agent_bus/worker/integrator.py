@@ -67,6 +67,10 @@ class BranchIntegrator:
         test_cmd: list[str] | None = None,
     ) -> IntegratorResult:
         """Verifies candidate worktree, runs tests, and merges if green, or rejects with feedback."""
+        preflight_error = await self._preflight(worktree_dir, candidate_branch, target_branch)
+        if preflight_error:
+            return IntegratorResult(False, False, "rejected", error=preflight_error, output=preflight_error)
+
         # 1. Run tests in candidate worktree
         tests_passed, test_output = await self.run_tests(worktree_dir, test_cmd)
 
@@ -125,6 +129,9 @@ class BranchIntegrator:
     async def _merge_branches(self, candidate_branch: str, target_branch: str) -> tuple[bool, str]:
         """Merges candidate branch to target branch in main repo."""
         try:
+            current = await self._git_output("symbolic-ref", "--short", "HEAD")
+            if current != target_branch:
+                return False, f"Target checkout is on '{current or 'detached'}', expected '{target_branch}'."
             # Check merge possibility
             proc = await asyncio.create_subprocess_exec(
                 "git", "merge", "--no-commit", "--no-ff", candidate_branch,
@@ -137,8 +144,9 @@ class BranchIntegrator:
 
             if proc.returncode != 0:
                 # Abort incomplete merge
-                await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(self.repo_dir))
-                return (False, out)
+                abort = await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(self.repo_dir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                await abort.communicate()
+                return (False, out + ("\nMerge abort failed." if abort.returncode else ""))
 
             # Commit merge
             proc_commit = await asyncio.create_subprocess_exec(
@@ -147,11 +155,39 @@ class BranchIntegrator:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await proc_commit.communicate()
-            return (True, "Merge completed successfully.")
+            commit_out, commit_err = await proc_commit.communicate()
+            commit_text = (commit_out + commit_err).decode("utf-8", errors="replace")
+            if proc_commit.returncode != 0:
+                abort = await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(self.repo_dir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                await abort.communicate()
+                return False, "Merge commit failed: " + commit_text
+            return (True, "Merge completed successfully.\n" + commit_text)
 
         except Exception as exc:
             return (False, str(exc))
+
+    async def _git_output(self, *args: str, cwd: Path | None = None) -> str:
+        proc = await asyncio.create_subprocess_exec(
+            "git", *args, cwd=str(cwd or self.repo_dir),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        return stdout.decode("utf-8", errors="replace").strip() if proc.returncode == 0 else ""
+
+    async def _preflight(self, worktree_dir: Path, candidate_branch: str, target_branch: str) -> str | None:
+        """Reject ambiguous Git state before tests or mutation."""
+        if not (self.repo_dir / ".git").exists():
+            return None
+        if candidate_branch == target_branch:
+            return "Candidate and target branches must be different."
+        status = await self._git_output("status", "--porcelain", cwd=worktree_dir)
+        if status:
+            return f"Candidate worktree is dirty; preserve uncommitted work before integrating:\n{status[:500]}"
+        if not await self._git_output("rev-parse", "--verify", f"refs/heads/{candidate_branch}", cwd=worktree_dir):
+            return f"Candidate branch '{candidate_branch}' does not exist."
+        if not await self._git_output("rev-parse", "--verify", f"refs/heads/{target_branch}"):
+            return f"Target branch '{target_branch}' does not exist."
+        return None
 
     async def _notify_author_failure(self, task_id: str, author_agent: str, details: str, retry: int) -> None:
         """Sends a high priority feedback message to author on the bus."""
