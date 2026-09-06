@@ -46,6 +46,22 @@ def _blocking_target_status(porcelain_status: str) -> str:
 
 
 @dataclass
+class PublicationOutcome:
+    """Explicit model of a publication attempt on the target branch.
+
+    ``published``: our tested integration commit was fast-forwarded onto the
+    target. ``reconciliation_required``: a concurrent advance landed after our
+    tested commit was published; the newer state must be reconciled by a human,
+    never erased, and the author must NOT be reassigned or asked to retry.
+    """
+
+    published: bool
+    reconciliation_required: bool
+    output: str = ""
+    error: str | None = None
+
+
+@dataclass
 class IntegratorResult:
     success: bool
     merged: bool
@@ -257,7 +273,12 @@ class BranchIntegrator:
         # Record the review decision in the bus audit trail (POST /reviews).
         # The review MUST be persisted before mutating main: if persistence
         # fails, the merged result would be unauditable, so fail closed here.
-        if not await self._record_review(decision):
+        # The bus response is authoritative (review_id/identity/created_at):
+        # replace the local decision with the persisted one so every
+        # downstream IntegratorResult metadata and reconciliation references
+        # the record that actually exists in GET /reviews.
+        persisted_decision = await self._record_review(decision)
+        if persisted_decision is None:
             return IntegratorResult(
                 success=False,
                 merged=False,
@@ -266,6 +287,7 @@ class BranchIntegrator:
                 error=f"Failed to persist review decision for task {task_id}; refusing to merge unaudited.",
                 metadata={"review": decision.model_dump(mode="json")},
             )
+        decision = persisted_decision
 
         effective_require_approval = (
             self.require_approval if require_approval is None else require_approval
@@ -329,9 +351,26 @@ class BranchIntegrator:
 
             # Verdict is APPROVE: integrate the exact tested state.
             if integration_sha:
-                merge_ok, merge_output = await self._integrate(
-                    integration_sha, target_branch, target_sha
-                )
+                publication = await self._publish(integration_sha, target_branch, target_sha)
+                if publication.reconciliation_required:
+                    # Our tested commit is published AND a concurrent writer
+                    # has since advanced the target. Their state survives; we
+                    # do NOT reassign the author or request a retry.
+                    return IntegratorResult(
+                        success=False,
+                        merged=True,
+                        status="reconciliation_required",
+                        output=publication.output,
+                        error=publication.error,
+                        metadata={
+                            "review": decision.model_dump(mode="json"),
+                            "candidate_sha": candidate_sha,
+                            "integration_sha": integration_sha,
+                            "reconciliation_required": True,
+                        },
+                    )
+                merge_ok = publication.published
+                merge_output = publication.output or (publication.error or "")
             else:
                 merge_ok, merge_output = await self._merge_branches(candidate_sha, target_branch)
             if not merge_ok:
@@ -408,9 +447,25 @@ class BranchIntegrator:
                 )
 
             if integration_sha:
-                merge_ok, merge_output = await self._integrate(
-                    integration_sha, target_branch, target_sha
-                )
+                publication = await self._publish(integration_sha, target_branch, target_sha)
+                if publication.reconciliation_required:
+                    # Published but concurrently advanced: preserve the newer
+                    # state, never reassign the author, never request a retry.
+                    return IntegratorResult(
+                        success=False,
+                        merged=True,
+                        status="reconciliation_required",
+                        output=publication.output,
+                        error=publication.error,
+                        metadata={
+                            "review": decision.model_dump(mode="json"),
+                            "candidate_sha": candidate_sha,
+                            "integration_sha": integration_sha,
+                            "reconciliation_required": True,
+                        },
+                    )
+                merge_ok = publication.published
+                merge_output = publication.output or (publication.error or "")
             else:
                 merge_ok, merge_output = await self._merge_branches(candidate_sha, target_branch)
             if not merge_ok:
@@ -548,89 +603,109 @@ class BranchIntegrator:
     ) -> tuple[bool, str]:
         """Publish the tested combined commit safely, never erasing concurrent advances.
 
-        Publication is an atomic compare-and-swap on the branch ref
-        (``git update-ref refs/heads/<target> <integration_sha> <target_sha>``):
-        it only succeeds if the target still points at the captured
-        ``target_sha``, so a concurrent advance is never overwritten. The
-        checked-out worktree/index is then synchronized with
-        ``git read-tree -u --reset`` (which touches only index and worktree,
-        never the ref). Finally the ref, HEAD and tree are verified to equal
-        the tested state exactly; any mismatch (e.g. someone advanced the
-        target between CAS and sync) is reported as conflict/reconciliation
-        without further mutation — a destructive ``reset --hard`` after the
-        CAS is never used.
+        Publication uses ``git merge --ff-only <integration_sha>`` on the
+        checked-out target so Git updates the ref, index and worktree
+        coherently under its own locking. The target SHA and a clean, idle
+        checkout are prevalidated first. A concurrent advance of the target
+        makes the ff-only merge fail (non-fast-forward) BEFORE anything is
+        published: that is a plain conflict (merged=False). If the ref moved
+        AFTER our tested commit was already published, the exact postcondition
+        check detects it and reports reconciliation_required with
+        published=True — the newer state is never erased and the author is
+        never reassigned.
         """
+        outcome = await self._publish(integration_sha, target_branch, target_sha)
+        return (outcome.published, outcome.output if outcome.published else (outcome.error or outcome.output or ""))
+
+    async def _publish(
+        self, integration_sha: str, target_branch: str, target_sha: str
+    ) -> PublicationOutcome:
+        """Safe checked-out-target publication primitive (see _integrate)."""
         try:
             current = await self._git_output("symbolic-ref", "--short", "HEAD")
             if current != target_branch:
-                return False, f"Target checkout is on '{current or 'detached'}', expected '{target_branch}'."
+                return PublicationOutcome(
+                    False, False,
+                    error=f"Target checkout is on '{current or 'detached'}', expected '{target_branch}'.",
+                )
 
-            # Revalidate immediately before the CAS: dirty tree, in-progress
-            # merge/rebase/cherry-pick, or a moved ref all abort publication.
+            # Prevalidate: dirty tree, in-progress merge/rebase/cherry-pick, or
+            # a moved ref/head all abort publication before any mutation.
             status = _blocking_target_status(await self._git_output("status", "--porcelain"))
             if status:
-                return False, f"Target worktree is dirty; refusing to publish:\n{status[:500]}"
+                return PublicationOutcome(
+                    False, False,
+                    error=f"Target worktree is dirty; refusing to publish:\n{status[:500]}",
+                )
             for state_file in ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
                 if (self._git_dir() / state_file).exists():
-                    return False, f"Git operation in progress ({state_file}); refusing to publish."
+                    return PublicationOutcome(
+                        False, False,
+                        error=f"Git operation in progress ({state_file}); refusing to publish.",
+                    )
             head = await self._git_output("rev-parse", "HEAD")
             if target_sha and head != target_sha:
-                return False, (
-                    f"Target '{target_branch}' moved from {target_sha} to {head} during integration; "
-                    "please retry to recombine with the updated target."
+                return PublicationOutcome(
+                    False, False,
+                    error=(
+                        f"Target '{target_branch}' moved from {target_sha} to {head} during integration; "
+                        "please retry to recombine with the updated target."
+                    ),
                 )
             ref_now = await self._git_output("rev-parse", f"refs/heads/{target_branch}")
             if target_sha and ref_now != target_sha:
-                return False, (
-                    f"Target ref '{target_branch}' moved from {target_sha} to {ref_now}; "
-                    "please retry to recombine with the updated target."
+                return PublicationOutcome(
+                    False, False,
+                    error=(
+                        f"Target ref '{target_branch}' moved from {target_sha} to {ref_now}; "
+                        "please retry to recombine with the updated target."
+                    ),
                 )
 
-            # Atomic compare-and-swap of the branch ref. update-ref fails if
-            # refs/heads/<target> does not still point at target_sha, so a
-            # concurrent advance can never be erased here.
-            cas = await asyncio.create_subprocess_exec(
-                "git", "update-ref", f"refs/heads/{target_branch}", integration_sha, target_sha,
+            # Single coherent publication step: ff-only merge updates ref,
+            # index and worktree together under Git's own locks. It refuses
+            # non-fast-forwards, so a concurrent advance of the target can
+            # never be overwritten here.
+            merge = await asyncio.create_subprocess_exec(
+                "git", "merge", "--ff-only", integration_sha,
                 cwd=str(self.repo_dir),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            cas_out, cas_err = await cas.communicate()
-            if cas.returncode != 0:
-                out = (cas_out + cas_err).decode("utf-8", errors="replace")
-                return False, f"Atomic ref update lost or failed: {out}"
+            m_out, m_err = await merge.communicate()
+            m_text = m_out.decode("utf-8", errors="replace") + m_err.decode("utf-8", errors="replace")
+            if merge.returncode != 0:
+                # The ff-only merge failed atomically: either the target had
+                # already advanced (plain pre-publication conflict, merged=False)
+                # or the local checkout diverged. Nothing was published.
+                return PublicationOutcome(False, False, output=m_text, error=f"Fast-forward publication failed: {m_text}")
 
-            # Synchronize index and worktree only (the ref is already
-            # published). read-tree never touches the ref, so a concurrent
-            # advance that lands between the CAS and this step survives.
-            read_tree = await asyncio.create_subprocess_exec(
-                "git", "read-tree", "-u", "--reset", integration_sha,
-                cwd=str(self.repo_dir),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            rt_out, rt_err = await read_tree.communicate()
-            if read_tree.returncode != 0:
-                out = (rt_out + rt_err).decode("utf-8", errors="replace")
-                return False, (
-                    f"Ref published at {integration_sha} but worktree sync failed: {out}\n"
-                    "Manual reconciliation of the target checkout is required."
-                )
-
-            # Exact postcondition: the final ref must be exactly the tested
-            # integration SHA (a concurrent advance makes this fail and is
-            # reported, never erased).
+            # Exact postcondition verification. A concurrent advance that
+            # landed after our tested commit was published leaves the ref
+            # pointing past integration_sha: report reconciliation, never
+            # rewind, never reassign the author.
             ref_after = await self._git_output("rev-parse", f"refs/heads/{target_branch}")
             head_after = await self._git_output("rev-parse", "HEAD")
             tree_head = await self._git_output("rev-parse", "HEAD^{tree}")
             tree_expected = await self._git_output("rev-parse", f"{integration_sha}^{{tree}}")
-            if ref_after != integration_sha or head_after != integration_sha or tree_head != tree_expected:
-                return False, (
-                    f"Post-publish verification failed: ref={ref_after} head={head_after} "
+            if ref_after == integration_sha and head_after == integration_sha and tree_head == tree_expected:
+                return PublicationOutcome(
+                    True, False, output=f"Published tested commit {integration_sha} onto '{target_branch}'.\n{m_text}"
+                )
+            # We published, but a concurrent writer has since advanced the
+            # target. Their state must survive untouched.
+            return PublicationOutcome(
+                published=True,
+                reconciliation_required=True,
+                output=f"Published {integration_sha} onto '{target_branch}' but the target has since advanced "
+                       f"(ref={ref_after}, head={head_after}); concurrent state preserved — reconciliation required.",
+                error=(
+                    f"Post-publish verification: ref={ref_after} head={head_after} "
                     f"expected={integration_sha} tree={tree_head} expected_tree={tree_expected}; "
                     "concurrent target activity detected — reconciliation required, nothing erased."
-                )
-            return (True, f"Published tested commit {integration_sha} onto '{target_branch}'.")
+                ),
+            )
         except Exception as exc:
-            return (False, str(exc))
+            return PublicationOutcome(False, False, error=str(exc))
 
     async def _handle_done_failure(
         self,
@@ -856,16 +931,26 @@ class BranchIntegrator:
             logger.error(f"Failed to fetch acceptance criteria for task {task_id}: {exc}")
             return None
 
-    async def _record_review(self, decision: ReviewDecision) -> bool:
-        """Persist the review decision; returns False if the audit trail was not written."""
+    async def _record_review(self, decision: ReviewDecision) -> ReviewDecision | None:
+        """Persist the review decision and return the authoritative persisted record.
+
+        POST /reviews returns the persisted ReviewDecision (authoritative
+        review_id/identity/created_at). The response is validated into a
+        ReviewDecision; None means the audit trail was not written (HTTP
+        failure or an unvalidatable response) and the caller must fail closed.
+        """
         try:
             async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
                 resp = await client.post("/reviews", json=decision.model_dump(mode="json"))
                 resp.raise_for_status()
-            return True
+                persisted = ReviewDecision.model_validate(resp.json())
+            if not persisted.review_id:
+                logger.error(f"Bus returned a review without review_id for task {decision.task_id}")
+                return None
+            return persisted
         except Exception as exc:
             logger.error(f"Failed to record review for task {decision.task_id}: {exc}")
-            return False
+            return None
 
     async def _mark_task_blocked(self, task_id: str, reason: str = "") -> bool:
         """Mark the task blocked; False if the bus rejected the request."""
