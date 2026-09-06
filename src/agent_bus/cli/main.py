@@ -13,6 +13,7 @@ from agent_bus.cli.display import (
     print_inbox_list,
     print_kickoff_progress,
     print_locks_list,
+    print_reviews_table,
     print_tasks_table,
 )
 from agent_bus.config import get_config_dir, get_bus_url, load_config
@@ -883,6 +884,20 @@ def show_agents():
     with _client() as client:
         agents = client.get("/agents").json()
         print_agents_table(agents)
+
+
+@show.command("reviews")
+@click.option("--task", "task_id", default=None, help="Filtrar revisiones por task ID.")
+def show_reviews(task_id: str | None):
+    """Ver revisiones de código realizadas por el Gatekeeper."""
+    with _client() as client:
+        params = {"task_id": task_id} if task_id else {}
+        resp = client.get("/reviews", params=params)
+        if resp.status_code == 200:
+            print_reviews_table(resp.json())
+        else:
+            click.echo(f"Error al consultar revisiones: {resp.text}")
+
 
 
 # ═══════════════════════════════════════════

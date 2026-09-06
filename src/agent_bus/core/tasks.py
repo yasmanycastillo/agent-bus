@@ -360,6 +360,16 @@ class TaskManager:
         await self._db.conn.commit()
         return self._row_to_task(rows[0]) if rows else None
 
+    async def block(self, task_id: str, reason: str | None = None) -> Task | None:
+        """Mark a task as blocked."""
+        now = datetime.now(timezone.utc).isoformat()
+        rows = await self._db.conn.execute_fetchall(
+            "UPDATE tasks SET status = 'blocked', updated_at = ? WHERE task_id = ? AND status != 'done' RETURNING *",
+            (now, task_id),
+        )
+        await self._db.conn.commit()
+        return self._row_to_task(rows[0]) if rows else None
+
     async def lock_files(self, task_id: str, paths: list[str], actor: str | None = None) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
         condition = " AND owner = ? AND status != 'done'" if actor else ""

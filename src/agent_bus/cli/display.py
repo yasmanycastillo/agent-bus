@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 
 from rich.console import Console
 from rich.panel import Panel
@@ -8,8 +9,6 @@ from rich.table import Table
 from agent_bus.config import DEFAULT_CONFIG_DIR, get_config_dir
 
 console = Console()
-
-import os
 
 CURRENT_AGENT_FILE = DEFAULT_CONFIG_DIR / "current_agent"
 
@@ -231,3 +230,38 @@ def print_pending_summary(data: dict, agent_id: str) -> None:
     )
     for m in data.get("latest_summary", []):
         console.print(f"  [cyan]{m['from']}[/]: {m['text']}")
+
+
+def print_reviews_table(reviews: list[dict]) -> None:
+    if not reviews:
+        console.print("[dim]No hay revisiones registradas[/dim]")
+        return
+    table = Table(title="Revisiones (Gatekeeper)", show_header=True, header_style="bold")
+    table.add_column("Review ID", style="cyan")
+    table.add_column("Task", style="green")
+    table.add_column("Verdict", style="yellow")
+    table.add_column("Reviewer", style="magenta")
+    table.add_column("SHA", style="dim")
+    table.add_column("Reason", style="white")
+
+    verdict_styles = {
+        "approve": "[bold green]approve[/bold green]",
+        "changes_requested": "[bold yellow]changes_requested[/bold yellow]",
+        "blocked": "[bold red]blocked[/bold red]",
+    }
+
+    for r in reviews:
+        v = r.get("verdict", "")
+        styled_v = verdict_styles.get(v, v)
+        sha = r.get("sha", "")
+        short_sha = sha[:8] if len(sha) >= 8 else sha
+        table.add_row(
+            r.get("review_id", "-"),
+            r.get("task_id", "-"),
+            styled_v,
+            r.get("reviewer_agent_id", "-"),
+            short_sha or "-",
+            r.get("reason", "-")[:80],
+        )
+    console.print(table)
+

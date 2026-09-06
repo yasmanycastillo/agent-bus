@@ -37,7 +37,8 @@ def integrator():
 @click.option("--agent", default="integrator", help="Identidad del integrador.")
 @click.option("--interval", default=5.0, type=float, show_default=True)
 @click.option("--bus-url", default=None)
-def start(agent: str, interval: float, bus_url: str | None):
+@click.option("--require-approval", is_flag=True, default=False, help="Exigir aprobación formal del Gatekeeper para fusionar.")
+def start(agent: str, interval: float, bus_url: str | None, require_approval: bool):
     """Iniciar el polling de tareas `in_review`."""
     pid_file = _pid()
     if pid_file.exists():
@@ -56,13 +57,39 @@ def start(agent: str, interval: float, bus_url: str | None):
         "import asyncio; from pathlib import Path; "
         "from agent_bus.worker.integrator import BranchIntegrator; "
         f"asyncio.run(BranchIntegrator(repo_dir=Path({str(root)!r}), agent_id={agent!r}, "
-        f"bus_url={get_bus_url(bus_url)!r}).run_forever(poll_interval_seconds={interval!r}))"
+        f"bus_url={get_bus_url(bus_url)!r}, require_approval={require_approval!r}).run_forever(poll_interval_seconds={interval!r}))"
     )
     with _log().open("a") as log:
         proc = subprocess.Popen([sys.executable, "-c", code], cwd=str(root), env=env,
                                 stdout=log, stderr=log, start_new_session=True)
     pid_file.write_text(str(proc.pid))
     click.echo(f"Integrator iniciado (PID {proc.pid}); log: {_log()}")
+
+
+@integrator.command("once")
+@click.option("--agent", default="integrator", help="Identidad del integrador.")
+@click.option("--bus-url", default=None)
+@click.option("--require-approval", is_flag=True, default=False, help="Exigir aprobación formal del Gatekeeper para fusionar.")
+def once(agent: str, bus_url: str | None, require_approval: bool):
+    """Ejecutar una pasada de integración y salir."""
+    import asyncio
+    from agent_bus.worker.integrator import BranchIntegrator
+    root = Path.cwd().resolve()
+    integ = BranchIntegrator(
+        repo_dir=root,
+        agent_id=agent,
+        bus_url=get_bus_url(bus_url),
+        require_approval=require_approval,
+    )
+    results = asyncio.run(integ.run_once())
+    if not results:
+        click.echo("No hay tareas pendientes en revisión.")
+    for res in results:
+        status_msg = f"Task: {res.status} (merged={res.merged})"
+        if res.error:
+            status_msg += f" - {res.error}"
+        click.echo(status_msg)
+
 
 
 @integrator.command("status")
