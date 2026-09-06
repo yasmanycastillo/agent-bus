@@ -93,10 +93,12 @@ async def test_mcp_coordination_tools_against_real_hub(live_bus_url):
     assert lock["locked_by"] == "claude"
     status = await call_tool(server, "get_project_status", {})
     assert status["tasks"] == [claimed]
-    assert status["locks"] == [lock]
+    assert len(status["locks"]) == 1
+    assert status["locks"][0]["file_path"] == lock["file_path"]
+    assert "acquisition_id" not in status["locks"][0]
     assert status["server"]["bus_version"]
     assert status["agents"] == []
-    await call_tool(server, "release_lock", {"file_path": "a.py", "agent_id": "claude"})
+    await call_tool(server, "release_lock", {"file_path": "a.py", "agent_id": "claude", "acquisition_id": lock["acquisition_id"]})
     done = await call_tool(server, "complete_task", {"task_id": "T1", "agent_id": "claude"})
     assert done["status"] == "done"
     assert (await call_tool(server, "get_project_status", {}))["locks"] == []

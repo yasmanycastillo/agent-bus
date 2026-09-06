@@ -8,7 +8,8 @@ import os
 import json
 import logging
 import sys
-from typing import Any
+from typing import Any, Literal
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -77,6 +78,25 @@ class ReplyMessageArguments(BaseModel):
     acknowledge: StrictBool = False
 
 
+class AcquireLockArguments(BaseModel):
+    file_path: StrictStr = Field(min_length=1)
+    agent_id: StrictStr
+    scope: Literal["checkout", "project"] = "checkout"
+    ttl_seconds: StrictInt = Field(default=300, ge=1, le=3600)
+    reason: StrictStr | None = None
+
+
+class ReleaseLockArguments(BaseModel):
+    file_path: StrictStr = Field(min_length=1)
+    agent_id: StrictStr
+    scope: Literal["checkout", "project"] = "checkout"
+    acquisition_id: StrictStr = Field(min_length=1, description="Identificador devuelto por acquire_lock; conserva el de esta adquisición")
+
+
+class RenewLockArguments(ReleaseLockArguments):
+    ttl_seconds: StrictInt = Field(default=300, ge=1, le=3600)
+
+
 TOOLS_DEFINITIONS = [
     {
         "name": "wait_for_updates",
@@ -129,28 +149,18 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "acquire_lock",
-        "description": "Bloquear un archivo antes de modificarlo para evitar colisiones.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "Ruta del archivo"},
-                "agent_id": {"type": "string", "description": "ID del agente"},
-                "reason": {"type": "string", "description": "Motivo del bloqueo"},
-            },
-            "required": ["file_path", "agent_id"],
-        },
+        "description": "Adquirir un bloqueo temporal. Conserva acquisition_id para renovar o liberar esta adquisición.",
+        "inputSchema": AcquireLockArguments.model_json_schema(),
     },
     {
         "name": "release_lock",
-        "description": "Liberar el bloqueo de un archivo.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "Ruta del archivo"},
-                "agent_id": {"type": "string", "description": "ID del agente"},
-            },
-            "required": ["file_path", "agent_id"],
-        },
+        "description": "Liberar únicamente la adquisición identificada por acquisition_id.",
+        "inputSchema": ReleaseLockArguments.model_json_schema(),
+    },
+    {
+        "name": "renew_lock",
+        "description": "Renovar una adquisición vigente usando su acquisition_id y el mismo scope y archivo.",
+        "inputSchema": RenewLockArguments.model_json_schema(),
     },
     {
         "name": "get_project_status",
@@ -169,7 +179,10 @@ class McpServer:
     def __init__(self, bus_url: str | None = None, agent_id: str | None = None) -> None:
         from agent_bus.config import get_bus_url, load_config
         self.bus_url = get_bus_url(bus_url)
-        self.project_id = load_config().bus.project_id
+        config = load_config()
+        self.project_id = config.bus.project_id
+        self._lock_cwd = Path.cwd().resolve()
+        self._lock_project_root = config.project_root
         self._event_cursors: dict[str, str] = {}
         self.session = None
         if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
@@ -315,22 +328,25 @@ class McpServer:
                 resp.raise_for_status()
                 return resp.json()
 
-            elif name == "acquire_lock":
+            elif name in ("acquire_lock", "release_lock", "renew_lock"):
+                from agent_bus.core.lock_paths import client_lock_path
+                scope = args.get("scope", "checkout")
+                if scope == "project" and self._lock_project_root is None:
+                    raise ValueError("Project-scoped locks require a project root when the MCP starts")
                 payload = {
-                    "file_path": args["file_path"],
-                    "agent_id": args["agent_id"],
-                    "reason": args.get("reason"),
-                }
-                resp = await client.post("/locks/acquire", json=payload)
-                resp.raise_for_status()
-                return resp.json()
-
-            elif name == "release_lock":
-                payload = {
-                    "file_path": args["file_path"],
+                    "file_path": client_lock_path(args["file_path"], scope,
+                                                  cwd=self._lock_cwd, project_root=self._lock_project_root),
+                    "scope": scope,
                     "agent_id": args["agent_id"],
                 }
-                resp = await client.post("/locks/release", json=payload)
+                if name == "acquire_lock":
+                    payload.update(reason=args.get("reason"), ttl_seconds=args.get("ttl_seconds", 300))
+                else:
+                    payload["acquisition_id"] = args["acquisition_id"]
+                    if name == "renew_lock":
+                        payload["ttl_seconds"] = args.get("ttl_seconds", 300)
+                action = {"acquire_lock": "acquire", "release_lock": "release", "renew_lock": "renew"}[name]
+                resp = await client.post(f"/locks/{action}", json=payload)
                 resp.raise_for_status()
                 return resp.json()
 

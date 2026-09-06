@@ -376,31 +376,48 @@ def work_done(task_id: str):
             click.echo(f"Error: {_explain_error(resp)}")
 
 
+def _lock_request(action: str, file_path: str, scope: str, **fields):
+    from agent_bus.core.lock_paths import client_lock_path
+    payload = {"file_path": client_lock_path(file_path, scope), "scope": scope,
+               "agent_id": _require_agent(), **fields}
+    with _client() as client:
+        resp = client.post(f"/locks/{action}", json=payload)
+        if resp.status_code != 200:
+            raise click.ClickException(_explain_error(resp))
+        data = resp.json()
+    click.echo(f"{action}: {payload['file_path']} (scope={scope})")
+    if action != "release":
+        click.echo(f"acquisition_id: {data['acquisition_id']}")
+        click.echo(f"expires_at: {data['expires_at']}")
+
+
 @work.command("lock")
 @click.argument("file_path")
 @click.option("--reason", default=None, help="Razon del lock")
-def work_lock(file_path: str, reason: str | None):
-    """Bloquear un archivo."""
-    agent = _require_agent()
-    with _client() as client:
-        resp = client.post("/locks/acquire", json={"file_path": file_path, "agent_id": agent, "reason": reason})
-        if resp.status_code == 200:
-            click.echo(f"Lock: {file_path}")
-        else:
-            click.echo(f"Error: {_explain_error(resp)}")
+@click.option("--scope", type=click.Choice(["checkout", "project"]), default="checkout", show_default=True)
+@click.option("--ttl", "ttl_seconds", type=click.IntRange(1, 3600), default=300, show_default=True)
+def work_lock(file_path: str, reason: str | None, scope: str, ttl_seconds: int):
+    """Bloquear un archivo; conserva acquisition_id para renovar o liberar."""
+    _lock_request("acquire", file_path, scope, reason=reason, ttl_seconds=ttl_seconds)
 
 
 @work.command("unlock")
 @click.argument("file_path")
-def work_unlock(file_path: str):
-    """Liberar un archivo."""
-    agent = _require_agent()
-    with _client() as client:
-        resp = client.post("/locks/release", json={"file_path": file_path, "agent_id": agent})
-        if resp.status_code == 200:
-            click.echo(f"Unlock: {file_path}")
-        else:
-            click.echo(f"Error: {_explain_error(resp)}")
+@click.option("--acquisition-id", required=True, help="Identificador devuelto por lock")
+@click.option("--scope", type=click.Choice(["checkout", "project"]), default="checkout", show_default=True)
+def work_unlock(file_path: str, acquisition_id: str, scope: str):
+    """Liberar únicamente la adquisición indicada."""
+    _lock_request("release", file_path, scope, acquisition_id=acquisition_id)
+
+
+@work.command("renew-lock")
+@click.argument("file_path")
+@click.option("--acquisition-id", required=True, help="Identificador devuelto por lock")
+@click.option("--scope", type=click.Choice(["checkout", "project"]), default="checkout", show_default=True)
+@click.option("--ttl", "ttl_seconds", type=click.IntRange(1, 3600), default=300, show_default=True)
+def work_renew_lock(file_path: str, acquisition_id: str, scope: str, ttl_seconds: int):
+    """Renovar un bloqueo vigente usando su adquisición."""
+    _lock_request("renew", file_path, scope, acquisition_id=acquisition_id, ttl_seconds=ttl_seconds)
 
 
 @work.command("check")

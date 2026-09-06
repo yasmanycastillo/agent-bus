@@ -22,7 +22,8 @@ TOOL_ARGUMENTS = {
     "claim_task": {"task_id": "T1"},
     "complete_task": {"task_id": "T1"},
     "acquire_lock": {"file_path": "module.py"},
-    "release_lock": {"file_path": "module.py"},
+    "release_lock": {"file_path": "module.py", "acquisition_id": "token"},
+    "renew_lock": {"file_path": "module.py", "acquisition_id": "token"},
     "get_project_status": {},
     "record_decision": {"title": "Storage", "what": "Use SQLite"},
 }
