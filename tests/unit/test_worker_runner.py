@@ -84,3 +84,23 @@ async def test_agent_runner_missing_binaries(monkeypatch):
     assert res_g.success is False
     assert res_g.exit_code == 127
     assert "not found in PATH" in (res_g.error or "")
+
+
+@pytest.mark.asyncio
+async def test_codex_uses_native_exec_and_resume(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+
+    async def fake_subprocess(cmd, timeout, thread_id=None):
+        calls.append(cmd)
+        return RunnerResult(True, '{"session_id":"sid-1"}', session_id="sid-1")
+
+    runner = AgentRunner("codex", provider="codex", model="gpt-test", session_file=tmp_path / "sessions.json")
+    monkeypatch.setattr(runner, "_run_subprocess", fake_subprocess)
+    await runner.execute_turn("first", thread_id="thread")
+    await runner.execute_turn("second", thread_id="thread")
+    assert calls[0][:4] == ["/usr/bin/codex", "exec", "--json", "--model"]
+    assert calls[1][:4] == ["/usr/bin/codex", "exec", "resume", "--json"]
+    assert "sid-1" in calls[1]
+    restored = AgentRunner("codex", provider="codex", session_file=tmp_path / "sessions.json")
+    assert restored.session_map == {"thread": "sid-1"}

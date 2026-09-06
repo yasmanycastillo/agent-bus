@@ -70,7 +70,7 @@ Recibir un evento y despertar una sesión interactiva son capacidades diferentes
 - `wait_for_updates` funciona mientras el cliente la ejecuta.
 - `watch` lanza un subproceso del CLI; eso no demuestra reactivación de la consola original.
 - El hook de final de turno consulta en ese momento y no escucha mensajes posteriores permanentemente.
-- El proveedor llamado `codex` está encaminado al ejecutor Aider en [runner.py](../src/agent_bus/worker/runner.py).
+- El runner dispone de un adaptador Codex nativo (`codex exec` y `codex exec resume`); Aider conserva su propio adaptador.
 
 Documentar una matriz por cliente con conexión, lectura, envío, espera, continuación de sesión y ejecución headless. Solo declarar probado lo demostrado con una versión concreta del cliente. La autonomía depende de un adaptador verificado para cada entorno.
 

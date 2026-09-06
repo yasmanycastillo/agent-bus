@@ -129,6 +129,22 @@ async def test_worker_committed_reply_lost_response_does_not_repeat_runner():
     assert hub.message["acknowledged"]
 
 
+async def test_worker_blocks_delivery_after_persisted_attempt_limit():
+    hub = DeliveryHub()
+    hub.message["attempts"] = 5
+    calls = []
+    async def execute(*args):
+        calls.append(1)
+        return RunnerResult(True, "should not run")
+    async with hub.client() as client:
+        worker = WorkerDaemon("bob", AgentRunner("bob", custom_executor=execute), max_message_attempts=5)
+        worker._client = client
+        result = await worker._handle_urgent_message(hub.message)
+    assert result.metadata["blocked"] is True
+    assert not calls
+    assert not hub.message["acknowledged"]
+
+
 @pytest.fixture
 def watcher_hub(monkeypatch):
     hub = DeliveryHub()

@@ -32,6 +32,7 @@ class AgentRunner:
             Callable[[str, str | None], Coroutine[Any, Any, RunnerResult]] | None
         ) = None,
         bus_url: str | None = None,
+        session_file: Path | None = None,
     ) -> None:
         self.bus_url = bus_url
         self.agent_id = agent_id
@@ -40,6 +41,26 @@ class AgentRunner:
         self.worktree_dir = worktree_dir or Path.cwd()
         self.custom_executor = custom_executor
         self.session_map: dict[str, str] = {}  # thread_id -> CLI session_id
+        self.session_file = session_file
+        self._load_sessions()
+
+    def _load_sessions(self) -> None:
+        if not self.session_file or not self.session_file.exists():
+            return
+        try:
+            data = json.loads(self.session_file.read_text())
+            if isinstance(data, dict):
+                self.session_map = {str(k): str(v) for k, v in data.items() if v}
+        except (OSError, ValueError, TypeError):
+            self.session_map = {}
+
+    def _save_sessions(self) -> None:
+        if not self.session_file:
+            return
+        self.session_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.session_file.with_suffix(self.session_file.suffix + ".tmp")
+        tmp.write_text(json.dumps(self.session_map, sort_keys=True))
+        tmp.replace(self.session_file)
 
     def assemble_prompt(
         self,
@@ -111,6 +132,7 @@ class AgentRunner:
             result = await self.custom_executor(prompt, session_id)
             if thread_id and result.session_id:
                 self.session_map[thread_id] = result.session_id
+                self._save_sessions()
             return result
 
         if self.provider == "mock":
@@ -126,8 +148,11 @@ class AgentRunner:
         if self.provider in ("agy", "antigravity"):
             return await self._execute_agy_cli(prompt, thread_id, timeout_seconds)
 
-        if self.provider in ("aider", "codex"):
+        if self.provider == "aider":
             return await self._execute_aider_cli(prompt, thread_id, timeout_seconds)
+
+        if self.provider == "codex":
+            return await self._execute_codex_cli(prompt, thread_id, timeout_seconds)
 
         if self.provider in ("grok", "xai", "openai"):
             return await self._execute_generic_cli(prompt, thread_id, timeout_seconds)
@@ -200,7 +225,11 @@ class AgentRunner:
         if self.model:
             cmd.extend(["--model", self.model])
 
-        return await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+        result = await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+        if thread_id and result.session_id:
+            self.session_map[thread_id] = result.session_id
+            self._save_sessions()
+        return result
 
     async def _execute_aider_cli(
         self,
@@ -223,6 +252,34 @@ class AgentRunner:
             cmd.extend(["--model", self.model])
 
         return await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+
+    async def _execute_codex_cli(
+        self,
+        prompt: str,
+        thread_id: str | None,
+        timeout_seconds: float,
+    ) -> RunnerResult:
+        """Invoke the native Codex headless CLI; never silently alias it to Aider."""
+        codex_bin = shutil.which("codex")
+        if not codex_bin:
+            return RunnerResult(False, "", error="Codex CLI binary ('codex') not found in PATH.", exit_code=127)
+
+        session_id = self.session_map.get(thread_id) if thread_id else None
+        cmd = [codex_bin, "exec"]
+        if session_id:
+            cmd.append("resume")
+        cmd.extend(["--json"])
+        if self.model:
+            cmd.extend(["--model", self.model])
+        if session_id:
+            cmd.extend([session_id, prompt])
+        else:
+            cmd.append(prompt)
+        result = await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+        if thread_id and result.session_id:
+            self.session_map[thread_id] = result.session_id
+            self._save_sessions()
+        return result
 
     async def _execute_generic_cli(
         self,
@@ -305,6 +362,7 @@ class AgentRunner:
 
             if thread_id and new_session_id:
                 self.session_map[thread_id] = new_session_id
+                self._save_sessions()
 
             return RunnerResult(
                 success=exit_code == 0,

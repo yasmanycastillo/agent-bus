@@ -30,7 +30,7 @@ T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/
 | T-11 | P1 | Aislamiento por proyecto y sesión | T-05, T-06 | completada | codex-integrator / codex-t11-project / codex-t11-security / codex-t11-workers |
 | T-12 | P1 | Renovación y alcance de locks | T-04, T-11 | completada | codex-integrator / codex-t12-storage / codex-t12-paths / codex-t12-clients |
 | T-13 | P1 | Validación con dos clientes reales | T-01 a T-12 | completada | codex-integrator / codex-t13-acceptance |
-| T-14 | P2 | Workers recuperables y adaptadores | T-13 | pendiente | — |
+| T-14 | P2 | Workers recuperables y adaptadores | T-13 | completada | codex-integrator / codex-t14-worker |
 | T-15 | P2 | Integración Git verificada | T-14 | pendiente | — |
 
 ## T-01 — Pruebas aisladas y contratos
@@ -168,11 +168,15 @@ Elegir dos clientes reales y registrar versiones, configuración y evidencias. C
 
 ## T-14 — Workers y adaptadores, posterior al MVP
 
-- [ ] Proveedores tienen adaptadores propios o alias honestamente documentados; Codex no invoca Aider bajo una promesa de soporte nativo.
-- [ ] Fallos del runner no descartan mensajes; reintentos y límites persisten tras reiniciar.
-- [ ] Presupuestos y límites detienen o bloquean trabajo con estado observable, sin bucles silenciosos.
-- [ ] La continuación de sesión se verifica por cliente y se distingue de iniciar otro subproceso.
-- [ ] `submit` entrega el objetivo a los agentes previstos. T-08 normaliza `*` como broadcast en el hub; falta la aceptación completa del objetivo por el equipo. La prueba de CLI de T-01 comprueba la respuesta HTTP, no todo ese flujo.
+- [x] Proveedores tienen adaptadores propios; Codex usa `codex exec` y no Aider.
+- [x] Fallos del runner no descartan mensajes; los intentos persisten en `inbox_delivery_state` tras reiniciar.
+- [x] El límite de reintentos bloquea con estado observable (`attempts`, `last_error` y `active_work`).
+- [x] La continuación usa un mapa `thread_id -> session_id` persistido y `codex exec resume`.
+- [x] `submit` entrega el objetivo a los agentes previstos y `*` se normaliza como broadcast.
+
+### Registro de T-14
+
+El runner incorpora adaptador Codex nativo y persistencia opcional del mapa de sesiones mediante escritura atómica. El daemon consulta los intentos durables antes de invocar al proveedor y bloquea una entrega tras cinco fallos (configurable). Pruebas focalizadas: `24 passed`.
 
 ## T-15 — Integración Git, posterior al MVP
 

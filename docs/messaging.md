@@ -78,7 +78,7 @@ Antes de ejecutar, consultan el estado de la entrega. Solicitan al runner una re
 
 La cancelación termina y recoge el subproceso directo. Los errores estructurados de Claude con salida cero tampoco se consideran éxito. Una respuesta HTTP perdida después del commit no obliga a repetir el runner en la siguiente consulta: el original ya está confirmado.
 
-T-11 excluye ejecutores automáticos locales del mismo agente mediante un guard compartido por worker/watch. Las conexiones MCP del mismo agente comparten inbox y deben coordinar el procesamiento. No hay recuperación exactamente una vez de efectos externos; leases y reintentos persistentes siguen en T-12/T-14. Ver [proyectos y sesiones](projects.md).
+T-11 excluye ejecutores automáticos locales del mismo agente mediante un guard compartido por worker/watch. Las conexiones MCP del mismo agente comparten inbox y deben coordinar el procesamiento. No hay recuperación exactamente una vez de efectos externos; los intentos persistentes y el bloqueo configurable del worker evitan bucles silenciosos. Ver [proyectos y sesiones](projects.md).
 
 ## Migración y retención
 

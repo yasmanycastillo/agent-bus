@@ -31,6 +31,7 @@ class WorkerDaemon:
         poll_interval_seconds: float = 3.0,
         heartbeat_interval_seconds: float = 15.0,
         max_turns_per_task: int = 10,
+        max_message_attempts: int = 5,
     ) -> None:
         if runner.agent_id != agent_id:
             raise ValueError("Runner identity must match its daemon")
@@ -41,6 +42,7 @@ class WorkerDaemon:
         self.poll_interval_seconds = poll_interval_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.max_turns_per_task = max_turns_per_task
+        self.max_message_attempts = max(1, max_message_attempts)
         self._running = False
         self._task_turn_counts: dict[str, int] = {}
         self._client: httpx.AsyncClient | None = None
@@ -209,6 +211,17 @@ class WorkerDaemon:
             if message.get("acknowledged"):
                 self._message_retry_after.pop(message_id, None)
                 return RunnerResult(success=True, output="", metadata={"already_acknowledged": True})
+            attempts = int(message.get("attempts", 0) or 0)
+            if attempts >= self.max_message_attempts:
+                detail = (
+                    f"Message {message_id} blocked after {attempts} failed attempts "
+                    f"(limit {self.max_message_attempts})"
+                )
+                logger.error(detail)
+                await self._set_agent_status(AgentStatus.AWAY, work={
+                    "type": "blocked_message", "message_id": message_id, "error": detail,
+                })
+                return RunnerResult(False, "", error=detail, metadata={"blocked": True, "attempts": attempts})
             await self._set_agent_status(AgentStatus.BUSY, work={"type": "reply", "message_id": message_id})
             prompt = self.runner.assemble_prompt(
                 message=message,
