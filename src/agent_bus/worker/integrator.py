@@ -24,6 +24,26 @@ from agent_bus.worker.worktrees import WorktreeManager
 
 logger = logging.getLogger("agent_bus.worker.integrator")
 
+# Untracked operational directories created by agent-bus itself on the target
+# checkout. `git update-ref` / `git reset --hard` never touch them, so they are
+# explicitly allowed by the dirty-target safety gate. Any other untracked path
+# or any tracked modification still blocks integration.
+ALLOWED_UNTRACKED_OPERATIONAL_DIRS = frozenset({".agent-bus/", ".worktrees/"})
+
+
+def _blocking_target_status(porcelain_status: str) -> str:
+    """Return the blocking subset of a `git status --porcelain` output.
+
+    Ignores only the known agent-bus operational directory entries; everything
+    else (tracked modifications, other untracked files) is blocking.
+    """
+    lines = [line for line in porcelain_status.splitlines() if line.strip()]
+    blocking = [
+        line for line in lines
+        if not (line.startswith("?? ") and line[3:].strip() in ALLOWED_UNTRACKED_OPERATIONAL_DIRS)
+    ]
+    return "\n".join(blocking)
+
 
 @dataclass
 class IntegratorResult:
@@ -499,7 +519,7 @@ class BranchIntegrator:
 
             # Revalidate immediately before the CAS: dirty tree, in-progress
             # merge/rebase/cherry-pick, or a moved ref all abort publication.
-            status = await self._git_output("status", "--porcelain")
+            status = _blocking_target_status(await self._git_output("status", "--porcelain"))
             if status:
                 return False, f"Target worktree is dirty; refusing to publish:\n{status[:500]}"
             for state_file in ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
@@ -736,7 +756,7 @@ class BranchIntegrator:
         if not await self._git_output("rev-parse", "--verify", f"refs/heads/{target_branch}"):
             return f"Target branch '{target_branch}' does not exist."
         # Target checkout must be clean and idle before we test against it.
-        target_status = await self._git_output("status", "--porcelain")
+        target_status = _blocking_target_status(await self._git_output("status", "--porcelain"))
         if target_status:
             return f"Target worktree is dirty; commit or stash before integrating:\n{target_status[:500]}"
         for state_file in ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"):

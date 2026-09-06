@@ -734,3 +734,84 @@ async def test_target_cas_race_detected_via_update_ref(tmp_path):
     main_after = _run_git("rev-parse", "main", cwd=tmp_path, env=env)
     assert main_after != main_before
     assert res.merged is False
+
+
+# ---------------------------------------------------------------------------
+# Dirty-target gate: operational dirs allowed, arbitrary dirt still blocked
+# ---------------------------------------------------------------------------
+
+
+def test_blocking_target_status_allows_operational_dirs():
+    from agent_bus.worker.integrator import _blocking_target_status
+
+    porcelain = "?? .agent-bus/\n?? .worktrees/\n"
+    assert _blocking_target_status(porcelain) == ""
+
+
+def test_blocking_target_status_blocks_arbitrary_untracked():
+    from agent_bus.worker.integrator import _blocking_target_status
+
+    porcelain = "?? .agent-bus/\n?? scratch-notes.txt\n"
+    assert "?? scratch-notes.txt" in _blocking_target_status(porcelain)
+
+
+def test_blocking_target_status_blocks_tracked_modifications():
+    from agent_bus.worker.integrator import _blocking_target_status
+
+    porcelain = "?? .worktrees/\n M src/agent_bus/worker/integrator.py\n"
+    assert "M src/agent_bus/worker/integrator.py" in _blocking_target_status(porcelain)
+
+
+def test_blocking_target_status_blocks_operational_files_not_dirs():
+    """A file named like the operational dirs (not the dir entry) still blocks."""
+    from agent_bus.worker.integrator import _blocking_target_status
+
+    porcelain = "?? .agent-bus\n"
+    assert ".agent-bus" in _blocking_target_status(porcelain)
+
+
+@pytest.mark.asyncio
+async def test_preflight_allows_operational_dirs_on_target(tmp_path):
+    """Preflight passes when the only dirt is agent-bus operational dirs."""
+    _init_repo(tmp_path)
+    env = _git_env(tmp_path)
+    wt = _author_worktree(tmp_path, env)
+    (tmp_path / ".agent-bus").mkdir()
+    (tmp_path / ".worktrees").mkdir()
+
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+    async def mock_record(decision):
+        return True
+    async def mock_finalize(task_id):
+        return (True, None)
+    integrator._record_review = mock_record  # type: ignore
+    integrator._finalize_merge = mock_finalize  # type: ignore
+
+    res = await integrator.integrate_task(
+        "T918", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+    )
+    assert res.status == "integrated"
+
+
+@pytest.mark.asyncio
+async def test_preflight_still_blocks_arbitrary_untracked(tmp_path):
+    """Any other untracked file on the target still rejects before testing."""
+    _init_repo(tmp_path)
+    env = _git_env(tmp_path)
+    wt = _author_worktree(tmp_path, env)
+    (tmp_path / ".agent-bus").mkdir()
+    (tmp_path / "random.txt").write_text("dirt\n")
+
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+    tested: list = []
+    async def spy_tests(worktree_dir, test_cmd=None):
+        tested.append(worktree_dir)
+        return (True, "ok")
+    integrator.run_tests = spy_tests
+
+    res = await integrator.integrate_task(
+        "T919", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+    )
+    assert res.status == "rejected"
+    assert "random.txt" in (res.error or "")
+    assert tested == []
