@@ -59,6 +59,23 @@ CREATE TABLE IF NOT EXISTS inbox_delivery_state (
 );
 CREATE INDEX IF NOT EXISTS idx_delivery_agent_sequence ON inbox_delivery_state(to_agent, sequence);
 
+CREATE TABLE IF NOT EXISTS event_log (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    envelope_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE(message_id, to_agent)
+);
+CREATE INDEX IF NOT EXISTS idx_events_recipient_id ON event_log(to_agent, event_id);
+CREATE INDEX IF NOT EXISTS idx_events_created ON event_log(created_at);
+
+CREATE TABLE IF NOT EXISTS event_state (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    floor INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO event_state(singleton, floor) VALUES (1, 0);
+
 CREATE TABLE IF NOT EXISTS message_idempotency (
     from_agent TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
@@ -200,6 +217,14 @@ class Database:
                 "INSERT OR IGNORE INTO message_state(name, value) VALUES ('cursor_secret', ?)",
                 (secrets.token_hex(32),),
             )
+            delivery_columns = await self.conn.execute_fetchall("PRAGMA table_info(inbox_delivery_state)")
+            if "event_recorded" not in {row["name"] for row in delivery_columns}:
+                await self.conn.execute(
+                    "ALTER TABLE inbox_delivery_state ADD COLUMN event_recorded INTEGER NOT NULL DEFAULT 0"
+                )
+            # Runs within this schema migration transaction and only once.
+            from agent_bus.core.events import backfill_events
+            await self.conn._execute(backfill_events, self.conn._conn)
             await self.conn.commit()
         except BaseException:
             await self.conn.rollback()

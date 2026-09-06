@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
+from agent_bus.core.events import append_event
 from agent_bus.reputation.database import Database
 from agent_bus.types import Envelope, MessageType
 
@@ -72,7 +73,7 @@ class InboxManager:
 
     @staticmethod
     def _insert_delivery(connection, envelope: Envelope):
-        connection.execute(
+        inserted = connection.execute(
             """INSERT OR IGNORE INTO inbox
             (message_id, from_agent, to_agent, message_type, correlation_id,
              reply_needed, related_task, body, metadata, signature, timestamp, conversation_id)
@@ -83,10 +84,14 @@ class InboxManager:
              _json(envelope.metadata), envelope.signature, envelope.timestamp.isoformat(),
              envelope.conversation_id or envelope.message_id),
         )
-        connection.execute(
+        state_inserted = connection.execute(
             "INSERT OR IGNORE INTO inbox_delivery_state(message_id, to_agent) VALUES (?, ?)",
             (envelope.message_id, envelope.to_agent),
         )
+        if inserted.rowcount == 1:
+            if state_inserted.rowcount != 1:
+                raise IdempotencyConflict("Message delivery has expired and cannot be recreated")
+            append_event(connection, envelope)
 
     @staticmethod
     def _check_key(key):
