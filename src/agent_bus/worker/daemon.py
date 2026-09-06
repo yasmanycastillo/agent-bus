@@ -286,11 +286,22 @@ class WorkerDaemon:
     async def _commit_and_submit_review(self, task_id: str) -> None:
         """Commit the worker checkout and enqueue it for serialized integration."""
         checkout = self.runner.worktree_dir.resolve()
-        # Test/custom runners may execute from the coordinator checkout. Never
-        # stage that shared tree implicitly.
-        if checkout == Path.cwd().resolve() or not (checkout / ".git").exists():
+        if not (checkout / ".git").exists():
             return
         try:
+            # Linked worktrees have their own Git directory, distinct from the
+            # common directory. The process cwd can be either checkout.
+            metadata = await asyncio.create_subprocess_exec(
+                "git", "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
+                cwd=str(checkout),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            out, _ = await metadata.communicate()
+            directories = out.decode().splitlines()
+            if metadata.returncode != 0 or len(directories) != 2:
+                return
+            if Path(directories[0]).resolve() == Path(directories[1]).resolve():
+                return
             status = await asyncio.create_subprocess_exec(
                 "git", "status", "--porcelain", cwd=str(checkout),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
