@@ -148,3 +148,16 @@ def test_session_file_expiry_symlink_and_path_override(credential, tmp_path):
     path.write_text(json.dumps(session))
     with pytest.raises(AuthenticationError, match="expired"):
         load_session("alice")
+
+
+async def test_authenticated_clients_ignore_ambient_proxy(credential, monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    # HTTPX mounts proxy transports before sending requests. No environment
+    # transport may be installed for our authenticated loopback clients.
+    with sync_bus_client("alice") as client:
+        assert not client._mounts
+    async with async_bus_client("alice") as client:
+        assert not client._mounts

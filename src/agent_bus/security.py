@@ -157,6 +157,8 @@ def _client_options(agent_id: str | None, session: dict | None, kwargs: dict, as
     if session is None and not os.environ.get("AGENT_BUS_SESSION_FILE") and os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") == "1":
         return options
     credential = _validate_session(session, resolve_agent_id(agent_id)) if session is not None else load_session(agent_id)
+    # A loopback URL must not send its bearer token through an ambient proxy.
+    options.setdefault("trust_env", False)
     base = httpx.URL(options["base_url"])
     try:
         loopback = base.host == "localhost" or ipaddress.ip_address(base.host).is_loopback
