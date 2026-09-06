@@ -140,7 +140,7 @@ def watcher_hub(monkeypatch):
 @pytest.mark.parametrize("failure", ["exit", "exception", "empty", "cancelled", "reply", "error_result", "malformed", "nontext", "blank_exception"])
 async def test_watcher_failure_never_acknowledges(watcher_hub, monkeypatch, tmp_path, failure):
     hub = watcher_hub
-    async def run(*args):
+    async def run(*args, **kwargs):
         if failure == "exception":
             raise RuntimeError("CLI crashed")
         if failure == "blank_exception":
@@ -169,7 +169,7 @@ async def test_watcher_failure_never_acknowledges(watcher_hub, monkeypatch, tmp_
 async def test_watcher_restart_recovers_without_sse_and_stale_event_is_ignored(watcher_hub, monkeypatch, tmp_path):
     hub = watcher_hub
     calls = []
-    async def run(cmd, agent):
+    async def run(cmd, agent, **kwargs):
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, '{"session_id":"s1","result":"Reviewed"}', '')
     monkeypatch.setattr(watch, "_run_cli", run)

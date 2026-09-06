@@ -166,8 +166,10 @@ TOOLS_DEFINITIONS = [
 
 
 class McpServer:
-    def __init__(self, bus_url: str = "http://127.0.0.1:8420", agent_id: str | None = None) -> None:
-        self.bus_url = bus_url.rstrip("/")
+    def __init__(self, bus_url: str | None = None, agent_id: str | None = None) -> None:
+        from agent_bus.config import get_bus_url, load_config
+        self.bus_url = get_bus_url(bus_url)
+        self.project_id = load_config().bus.project_id
         self._event_cursors: dict[str, str] = {}
         self.session = None
         if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
@@ -242,7 +244,7 @@ class McpServer:
 
     def _client(self, timeout: float | None = 30.0):
         return async_bus_client(
-            self.agent_id, session=self.session, base_url=self.bus_url, timeout=timeout,
+            self.agent_id, session=self.session, project_id=self.project_id, base_url=self.bus_url, timeout=timeout,
         )
 
     def _bind_identity(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -476,7 +478,7 @@ class McpServer:
             return error("protocol_error", str(exc))
 
 
-async def run_mcp_server(bus_url: str = "http://127.0.0.1:8420", agent_id: str | None = None) -> None:
+async def run_mcp_server(bus_url: str | None = None, agent_id: str | None = None) -> None:
     """Run one SDK connection; EOF and cancellation release its in-flight requests."""
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
     server = McpServer(bus_url=bus_url, agent_id=agent_id).sdk_server()

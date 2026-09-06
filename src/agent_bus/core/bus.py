@@ -24,7 +24,7 @@ from agent_bus.core.locks import LockError, LockManager
 from agent_bus.core.registry import AgentRegistry
 from agent_bus.core.skills import SkillRegistry
 from agent_bus.core.tasks import TaskManager
-from agent_bus.reputation.database import Database
+from agent_bus.reputation.database import Database, ProjectMismatchError
 from agent_bus.types import AgentInfo, AutonomyLevel, Envelope, MessageType
 from agent_bus.security import AuthenticationError, Principal, SessionStore
 
@@ -119,7 +119,9 @@ class KickoffStepRequest(BaseModel):
 
 
 class MessageBus:
-    def __init__(self, db: Database, registry: AgentRegistry, inbox: InboxManager, project_id: str | None = None) -> None:
+    def __init__(self, db: Database, registry: AgentRegistry, inbox: InboxManager, project_id: str | None = None, context_path=None) -> None:
+        from pathlib import Path
+        self.context_path = Path(context_path or Path(db.db_path).parent / "context.yaml").resolve()
         self.db = db
         self.project_id = project_id or os.environ.get("AGENT_BUS_PROJECT_ID", "default")
         self.sessions = SessionStore(db, self.project_id)
@@ -155,6 +157,12 @@ class MessageBus:
         async def authenticate_request(request: Request, call_next):
             request.state.principal = None
             request.state.token = None
+            try:
+                await self.db.bind_project(self.project_id)
+            except ProjectMismatchError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
+            if request.headers.get("X-Agent-Bus-Project", self.project_id) != self.project_id:
+                return JSONResponse({"error": "Hub belongs to a different project"}, status_code=403)
             path = request.url.path
             if path in ("/health", "/room"):
                 return await call_next(request)
@@ -206,7 +214,7 @@ class MessageBus:
 
         @self.app.get("/health")
         async def health():
-            return {"status": "ok"}
+            return {"status": "ok", "project_id": self.project_id}
 
         @self.app.get("/auth/me")
         async def auth_me(request: Request):
@@ -247,6 +255,7 @@ class MessageBus:
             agents = await self.registry.list_all()
             return {
                 "bus_version": "0.1.0",
+                "project_id": self.project_id,
                 "agents_online": sum(1 for a in agents if a.status.value == "online"),
                 "agents_total": len(agents),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -346,6 +355,14 @@ class MessageBus:
 
         @self.app.websocket("/ws/{agent_id}")
         async def websocket_endpoint(websocket: WebSocket, agent_id: str):
+            try:
+                await self.db.bind_project(self.project_id)
+                if websocket.headers.get("X-Agent-Bus-Project", self.project_id) != self.project_id:
+                    await websocket.close(code=1008)
+                    return
+            except ProjectMismatchError:
+                await websocket.close(code=1008)
+                return
             try:
                 principal, token = await self._authenticate(websocket.headers.get("authorization"))
             except AuthenticationError:
@@ -561,7 +578,6 @@ class MessageBus:
             message_id = req.get("message_id", "")
             decision = req.get("decision", "")  # approve | reject | respond
             note = req.get("note", "")
-            agent = req.get("agent", "")
 
             msg = await self.inbox.get_message("human", message_id)
             if not msg:
@@ -706,9 +722,8 @@ class MessageBus:
 
         @self.app.get("/project/context")
         async def get_project_context():
-            from pathlib import Path as P
 
-            ctx_path = P.cwd() / ".agent-bus" / "context.yaml"
+            ctx_path = self.context_path
             if not ctx_path.exists():
                 return {}
             import yaml
@@ -717,10 +732,9 @@ class MessageBus:
 
         @self.app.post("/project/context")
         async def update_project_context(req: dict):
-            from pathlib import Path as P
             import yaml
 
-            ctx_path = P.cwd() / ".agent-bus" / "context.yaml"
+            ctx_path = self.context_path
             ctx_path.parent.mkdir(parents=True, exist_ok=True)
 
             existing = {}
@@ -936,19 +950,21 @@ def create_app() -> FastAPI:
     """Factory for uvicorn."""
     from contextlib import asynccontextmanager
 
-    from agent_bus.config import load_config
+    from agent_bus.config import load_config, get_config_dir
 
     config = load_config()
-    db = Database(config.database_path)
+    db = Database(config.database_path, project_id=config.bus.project_id)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await db.initialize()
-        yield
-        await db.close()
+        try:
+            await db.initialize()
+            yield
+        finally:
+            await db.close()
 
     registry = AgentRegistry(heartbeat_miss_threshold=config.bus.heartbeat_miss_threshold)
     inbox = InboxManager(db)
-    bus = MessageBus(db=db, registry=registry, inbox=inbox, project_id=config.bus.project_id)
+    bus = MessageBus(db=db, registry=registry, inbox=inbox, project_id=config.bus.project_id, context_path=get_config_dir() / "context.yaml")
     bus.app.router.lifespan_context = lifespan
     return bus.app

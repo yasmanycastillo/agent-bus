@@ -30,12 +30,13 @@ class BranchIntegrator:
     def __init__(
         self,
         repo_dir: Path | None = None,
-        bus_url: str = "http://localhost:8420",
+        bus_url: str | None = None,
         agent_id: str = "integrator",
         max_retries_per_task: int = 2,
     ) -> None:
         self.repo_dir = repo_dir or Path.cwd()
-        self.bus_url = bus_url.rstrip("/")
+        from agent_bus.config import get_bus_url
+        self.bus_url = get_bus_url(bus_url)
         self.agent_id = agent_id
         self.max_retries_per_task = max_retries_per_task
         self._retry_counts: dict[str, int] = {}  # task_id -> retry count

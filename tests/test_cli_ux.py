@@ -7,7 +7,7 @@ from agent_bus.cli.main import app
 
 
 def test_top_cmd_once(live_bus_url, monkeypatch):
-    monkeypatch.setattr("agent_bus.cli.main.DEFAULT_URL", live_bus_url)
+    monkeypatch.setenv("AGENT_BUS_URL", live_bus_url)
     runner = CliRunner()
     res = runner.invoke(app, ["top", "--once"])
     assert res.exit_code == 0

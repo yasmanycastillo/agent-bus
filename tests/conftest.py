@@ -22,16 +22,24 @@ from agent_bus.reputation.database import Database
 @pytest.fixture(autouse=True)
 def isolated_agent_config(tmp_path, monkeypatch):
     """Never read/write the developer's agent credentials or CLI session state."""
-    from agent_bus import config
-    from agent_bus.cli import display, main, worker_cmds
+    from agent_bus import config, project
+    original_git = project._has_git_boundary
+    monkeypatch.setattr(project, "_has_git_boundary",
+                        lambda path: path.is_relative_to(tmp_path) and original_git(path))
+    original_marker = project._has_project_marker
+    monkeypatch.setattr(project, "_has_project_marker",
+                        lambda path: path.is_relative_to(tmp_path) and original_marker(path))
+    from agent_bus.cli import display, worker_cmds
     from agent_bus.worker import auth
 
     config_dir = tmp_path / "agent-config"
     monkeypatch.setenv("AGENT_BUS_CONFIG_DIR", str(config_dir))
+    monkeypatch.delenv("AGENT_BUS_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("AGENT_BUS_URL", raising=False)
     monkeypatch.delenv("AGENT_BUS_DATABASE_PATH", raising=False)
     monkeypatch.delenv("AGENT_BUS_PROJECT_ID", raising=False)
     monkeypatch.delenv("AGENT_BUS_SESSION_FILE", raising=False)
-    for module in (config, main, auth):
+    for module in (config, auth):
         monkeypatch.setattr(module, "DEFAULT_CONFIG_DIR", config_dir)
     monkeypatch.setattr(display, "CURRENT_AGENT_FILE", config_dir / "current_agent")
     monkeypatch.setattr(worker_cmds, "WORKERS_DIR", config_dir / "workers")

@@ -15,10 +15,8 @@ from agent_bus.cli.display import (
     print_locks_list,
     print_tasks_table,
 )
-from agent_bus.config import DEFAULT_CONFIG_DIR
+from agent_bus.config import get_config_dir, get_bus_url, load_config
 from agent_bus.security import AuthenticationError, load_session, sync_bus_client
-
-DEFAULT_URL = os.environ.get("AGENT_BUS_URL", "http://127.0.0.1:8420")
 
 try:
     import httpx
@@ -38,7 +36,7 @@ def _client():
         click.echo("httpx not installed. Run: uv sync --extra dev")
         raise SystemExit(1)
     try:
-        return sync_bus_client(get_current_agent(), base_url=DEFAULT_URL, timeout=10.0,
+        return sync_bus_client(get_current_agent(), base_url=get_bus_url(), timeout=10.0,
                                event_hooks={"response": [_raise_auth_error]})
     except AuthenticationError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -89,19 +87,15 @@ def _explain_error(resp) -> str:
 
 
 def _ensure_global_config() -> None:
-    config_dir = DEFAULT_CONFIG_DIR
+    config_dir = get_config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "data").mkdir(exist_ok=True)
 
     config_file = config_dir / "config.yaml"
     if not config_file.exists():
-        import shutil
+        import yaml
 
-        default_config = Path(__file__).parent.parent.parent.parent / "config" / "default.yaml"
-        if default_config.exists():
-            shutil.copy2(default_config, config_file)
-        else:
-            config_file.write_text("# agent-bus configuration\nbus:\n  port: 8420\n")
+        config_file.write_text(yaml.safe_dump({"bus": {"project_id": load_config().bus.project_id}}))
 
     from agent_bus.crypto import generate_keypair
 
@@ -118,15 +112,44 @@ def _ensure_global_config() -> None:
 # Root group
 # ═══════════════════════════════════════════
 
-app = click.Group(help="agent-bus: Protocolo de comunicacion y coordinacion entre agentes IA")
+@click.group(help="agent-bus: Protocolo de comunicacion y coordinacion entre agentes IA")
+@click.option("--project", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Raíz del proyecto")
+@click.pass_context
+def app(ctx, project):
+    if project is not None:
+        previous_cwd = Path.cwd()
+        relative_paths = {}
+        for key in ("AGENT_BUS_CONFIG_DIR", "AGENT_BUS_DATABASE_PATH", "AGENT_BUS_SESSION_FILE"):
+            value = os.environ.get(key)
+            if value and not Path(value).expanduser().is_absolute():
+                relative_paths[key] = value
+                os.environ[key] = str(previous_cwd / Path(value).expanduser())
+        previous = os.environ.get("AGENT_BUS_PROJECT_ROOT")
+        os.environ["AGENT_BUS_PROJECT_ROOT"] = str(project.resolve())
+        os.chdir(project.resolve())
+        def restore():
+            os.chdir(previous_cwd)
+            os.environ.update(relative_paths)
+            if previous is None:
+                os.environ.pop("AGENT_BUS_PROJECT_ROOT", None)
+            else:
+                os.environ["AGENT_BUS_PROJECT_ROOT"] = previous
+        ctx.call_on_close(restore)
 
 
 @app.command()
-def init():
+@click.option("--bus-url", default=None, help="URL persistente del hub de este proyecto")
+def init(bus_url):
     """Inicializar .agent-bus/ en el directorio actual (por proyecto)."""
     from agent_bus.project import init_project
 
     project_path = init_project()
+    if bus_url is not None:
+        import yaml
+        config_path = project_path / "config.yaml"
+        settings = yaml.safe_load(config_path.read_text()) or {}
+        settings["bus_url"] = get_bus_url(bus_url)
+        config_path.write_text(yaml.safe_dump(settings, sort_keys=False))
     click.echo(f"Proyecto inicializado: {project_path}")
 
     # Also ensure global config exists
@@ -141,8 +164,8 @@ def init():
 
 
 @app.command()
-@click.option("--host", default="127.0.0.1", help="Bind host")
-@click.option("--port", default=8420, type=int, help="Bind port")
+@click.option("--host", default=None, help="Bind host (configured URL by default)")
+@click.option("--port", default=None, type=click.IntRange(1, 65535), help="Bind port")
 @click.option("--daemon", "run_daemon", is_flag=True, help="Correr como daemon en background")
 @click.option("--stop", "do_stop", is_flag=True, help="Detener el daemon")
 @click.option("--status", "do_status", is_flag=True, help="Verificar estado del daemon")
@@ -154,6 +177,10 @@ def serve(host: str, port: int, run_daemon: bool, do_stop: bool, do_status: bool
     if do_status:
         _check_daemon()
         return
+    from urllib.parse import urlsplit
+    endpoint = urlsplit(get_bus_url())
+    host = host or endpoint.hostname or "127.0.0.1"
+    port = port or endpoint.port or (443 if endpoint.scheme == "https" else 80)
     if run_daemon:
         _start_daemon(host, port)
         return
@@ -165,14 +192,26 @@ def serve(host: str, port: int, run_daemon: bool, do_stop: bool, do_status: bool
     uvicorn.run("agent_bus.core.bus:create_app", host=host, port=port, factory=True, reload=False)
 
 
+def _runtime_environment():
+    config = load_config()
+    environment = os.environ.copy()
+    environment.update(AGENT_BUS_CONFIG_DIR=str(get_config_dir()),
+                       AGENT_BUS_DATABASE_PATH=config.database_path,
+                       AGENT_BUS_PROJECT_ID=config.bus.project_id,
+                       AGENT_BUS_URL=get_bus_url())
+    if config.project_root:
+        environment["AGENT_BUS_PROJECT_ROOT"] = config.project_root
+    return environment
+
+
 def _start_daemon(host: str, port: int) -> None:
     import os
     import subprocess
     import sys
 
     _ensure_global_config()
-    pid_file = DEFAULT_CONFIG_DIR / "bus.pid"
-    log_file = DEFAULT_CONFIG_DIR / "bus.log"
+    pid_file = get_config_dir() / "bus.pid"
+    log_file = get_config_dir() / "bus.log"
 
     if pid_file.exists():
         try:
@@ -194,20 +233,20 @@ def _start_daemon(host: str, port: int) -> None:
         proc = subprocess.Popen(
             cmd,
             stdout=log, stderr=log,
-            start_new_session=True,
+            start_new_session=True, env=_runtime_environment(),
         )
 
     pid_file.write_text(str(proc.pid))
     click.echo(f"Servidor iniciado como daemon (PID {proc.pid})")
     click.echo(f"  Log: {log_file}")
-    click.echo(f"  Detener con: agent-bus serve --stop")
+    click.echo("  Detener con: agent-bus serve --stop")
 
 
 def _stop_daemon() -> None:
     import os
     import signal as sig
 
-    pid_file = DEFAULT_CONFIG_DIR / "bus.pid"
+    pid_file = get_config_dir() / "bus.pid"
     if not pid_file.exists():
         click.echo("No se encontro servidor daemon")
         return
@@ -225,7 +264,7 @@ def _stop_daemon() -> None:
 def _check_daemon() -> None:
     import os
 
-    pid_file = DEFAULT_CONFIG_DIR / "bus.pid"
+    pid_file = get_config_dir() / "bus.pid"
     if not pid_file.exists():
         click.echo("No hay servidor daemon")
         return
@@ -687,12 +726,18 @@ def quickstart(agents: str, mock: bool):
     _ensure_global_config()
     click.echo(f"  📁 Proyecto configurado en: {project_path}")
     first = agent_list[0]
-    with sync_bus_client(first, session=sessions.get(first), base_url=DEFAULT_URL, timeout=10) as client:
+    with sync_bus_client(first, session=sessions.get(first), base_url=get_bus_url(), timeout=10) as client:
         try:
             response = client.get("/status")
             response.raise_for_status()
         except httpx.ConnectError:
-            _start_daemon("127.0.0.1", 8420)
+            from urllib.parse import urlsplit
+            endpoint = urlsplit(get_bus_url())
+            if (endpoint.scheme != "http" or endpoint.hostname not in ("127.0.0.1", "localhost", "::1")
+                    or endpoint.path not in ("", "/") or endpoint.query or endpoint.fragment
+                    or endpoint.username or endpoint.password):
+                raise click.ClickException("No se puede iniciar automáticamente este hub; inicia el servidor configurado explícitamente")
+            _start_daemon(endpoint.hostname, endpoint.port or 80)
             deadline = time.monotonic() + 5
             while True:
                 try:
@@ -704,15 +749,18 @@ def quickstart(agents: str, mock: bool):
                         raise click.ClickException("Servidor no inició; revisa agent-bus serve --status")
                     time.sleep(0.1)
 
+    if response.json().get("project_id") != load_config().bus.project_id:
+        raise click.ClickException("El hub configurado pertenece a otro proyecto")
+
     for agent in agent_list:
-        with sync_bus_client(agent, session=sessions.get(agent), base_url=DEFAULT_URL, timeout=10) as client:
+        with sync_bus_client(agent, session=sessions.get(agent), base_url=get_bus_url(), timeout=10) as client:
             response = client.post("/register", json={"agent_id": agent, "display_name": agent.capitalize()})
             if response.status_code != 409:
                 response.raise_for_status()
     if not get_current_agent() and not os.environ.get("AGENT_BUS_SESSION_FILE"):
         set_current_agent(first)
     click.echo(f"  🤖 Agentes registrados: {', '.join(agent_list)}")
-    click.get_current_context().invoke(run_team, agents=agents, mock=mock, base_ref="main", bus_url=DEFAULT_URL)
+    click.get_current_context().invoke(run_team, agents=agents, mock=mock, base_ref="main", bus_url=get_bus_url())
     click.echo("\nEquipo iniciado. Verifica agent-bus worker status --agent <id>.")
 
 
@@ -803,7 +851,6 @@ def work_handoff(task_id: str, to_agent: str, summary: str, files: str, question
             "open_questions": [q.strip() for q in questions.split(",") if q.strip()],
         })
         if resp.status_code == 200:
-            data = resp.json()
             click.echo(f"Tarea {task_id} transferida a {to_agent}")
             if summary:
                 click.echo(f"  Resumen: {summary}")
@@ -849,16 +896,16 @@ def work_context(update_field: tuple[str, str] | None):
 
 
 @app.command("start", hidden=True)
-@click.option("--host", default="127.0.0.1", help="Bind host")
-@click.option("--port", default=8420, type=int, help="Bind port")
+@click.option("--host", default=None, help="Bind host")
+@click.option("--port", default=None, type=click.IntRange(1, 65535), help="Bind port")
 def start(host: str, port: int):
     """Alias para 'serve' (deprecated, usa 'serve')."""
-    import uvicorn
+    click.get_current_context().invoke(serve, host=host, port=port,
+                                       run_daemon=False, do_stop=False, do_status=False)
 
-    _ensure_global_config()
-    click.echo(f"Iniciando agent-bus en {host}:{port}")
+
 @app.command("mcp-server")
-@click.option("--bus-url", envvar="AGENT_BUS_URL", default="http://127.0.0.1:8420", help="URL del hub agent-bus")
+@click.option("--bus-url", envvar="AGENT_BUS_URL", default=None, help="URL del hub agent-bus")
 @click.option("--agent", "agent_id", default=None, help="Identidad de la sesión MCP")
 def mcp_server_cmd(bus_url: str, agent_id: str | None):
     """Iniciar el servidor MCP de agent-bus sobre stdio (JSON-RPC 2.0)."""
@@ -872,7 +919,7 @@ def mcp_server_cmd(bus_url: str, agent_id: str | None):
 
 
 @app.command("hook-inbox", hidden=True)
-@click.option("--bus-url", default="http://127.0.0.1:8420")
+@click.option("--bus-url", default=None)
 @click.option("--agent", "agent_id", default=None)
 def hook_inbox(bus_url: str, agent_id: str | None):
     """Emit the Stop-hook result from the installed package's interpreter."""

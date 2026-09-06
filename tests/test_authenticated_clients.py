@@ -175,7 +175,7 @@ async def test_watcher_response_and_child_share_session(credentials, monkeypatch
         returncode = 0
         stdout = '{"session_id":"thread-session","result":"Reviewed"}'
         stderr = ''
-    async def run(cmd, agent_id):
+    async def run(cmd, agent_id, **kwargs):
         captured["env"] = watch.worker_environment(agent_id)
         return Result()
     def handle(request):
@@ -307,7 +307,8 @@ def test_hook_uses_installed_entrypoint_without_system_package(credentials, monk
         env["PATH"] = f"{binaries}:/usr/bin:/bin"
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
         env["AGENT_BUS_AGENT_ID"] = "alice"
-        env["AGENT_BUS_URL"] = f"http://127.0.0.1:{server.server_port}"
+        env.pop("AGENT_BUS_URL", None)
+        (tmp_path / "config" / "config.yaml").write_text(f"bus:\n  port: {server.server_port}\n")
         hook = Path(__file__).resolve().parents[1] / "hooks" / "stop-check-inbox.sh"
         result = subprocess.run(["/bin/bash", str(hook)], env=env, capture_output=True, text=True, timeout=8)
         assert result.returncode == 0
@@ -317,3 +318,42 @@ def test_hook_uses_installed_entrypoint_without_system_package(credentials, monk
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.mark.parametrize('url,starts', [('http://127.0.0.1:19420', True), ('https://example.com', False)])
+def test_quickstart_autostart_follows_project_url(tmp_path, monkeypatch, url, starts):
+    from click.testing import CliRunner
+    from agent_bus.cli import main
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_BUS_URL', url)
+    monkeypatch.setenv('AGENT_BUS_ALLOW_UNSIGNED', '1')
+    calls = []
+    attempts = []
+    def handle(request):
+        if request.url.path == '/status' and not attempts:
+            attempts.append(True)
+            raise httpx.ConnectError('offline', request=request)
+        return httpx.Response(200, json={'project_id': 'default'})
+    monkeypatch.setattr(main, 'sync_bus_client', lambda *a, **kw: httpx.Client(
+        base_url=kw['base_url'], transport=httpx.MockTransport(handle)))
+    monkeypatch.setattr(main, '_start_daemon', lambda host, port: calls.append((host, port)))
+    monkeypatch.setattr(main.run_team, 'callback', lambda **kw: None)
+    result = CliRunner().invoke(main.app, ['quickstart', '--agents', 'alice', '--mock'])
+    assert result.exit_code == (0 if starts else 1), result.output
+    assert calls == ([('127.0.0.1', 19420)] if starts else [])
+
+
+def test_quickstart_rejects_other_project_even_unsigned(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from agent_bus.cli import main
+    monkeypatch.chdir(tmp_path)
+    requests = []
+    def handle(request):
+        requests.append(request.url.path)
+        return httpx.Response(200, json={'project_id': 'other-project'})
+    monkeypatch.setattr(main, 'sync_bus_client', lambda *a, **kw: httpx.Client(
+        base_url='http://test', transport=httpx.MockTransport(handle)))
+    result = CliRunner().invoke(main.app, ['quickstart', '--agents', 'alice', '--mock'])
+    assert result.exit_code == 1
+    assert 'otro proyecto' in result.output
+    assert requests == ['/status']

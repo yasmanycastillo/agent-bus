@@ -20,6 +20,10 @@ def get_current_agent() -> str | None:
     if env_agent and env_agent.strip():
         return env_agent.strip()
 
+    if os.environ.get("AGENT_BUS_SESSION_FILE"):
+        from agent_bus.security import load_session
+        return load_session()["agent_id"]
+
     # 2. Resolve project/session configuration at use time.
     current_agent_file = get_config_dir() / "current_agent"
     if current_agent_file.exists():

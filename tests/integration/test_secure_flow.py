@@ -87,7 +87,7 @@ async def test_secure_credentials_persist_and_revoke(secure_bus):
 
 def test_secure_cli_uses_bound_identity(secure_bus, monkeypatch):
     monkeypatch.setenv("AGENT_BUS_AGENT_ID", "alice")
-    monkeypatch.setattr("agent_bus.cli.main.DEFAULT_URL", secure_bus.url)
+    monkeypatch.setenv("AGENT_BUS_URL", secure_bus.url)
     result = CliRunner().invoke(app, ["work", "msg", "bob", "CLI message"])
     assert result.exit_code == 0, result.output
     with httpx.Client(base_url=secure_bus.url, headers={

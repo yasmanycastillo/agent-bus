@@ -25,9 +25,9 @@ def _read_readme(base: Path) -> str:
 
 
 def _create_global_profile(agent_id: str) -> Path:
-    from agent_bus.config import DEFAULT_CONFIG_DIR
+    from agent_bus.config import get_config_dir
 
-    profiles_dir = DEFAULT_CONFIG_DIR / "profiles"
+    profiles_dir = get_config_dir() / "profiles"
     profiles_dir.mkdir(parents=True, exist_ok=True)
     path = profiles_dir / f"{agent_id}.yaml"
     if path.exists():
