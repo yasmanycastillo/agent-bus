@@ -7,11 +7,6 @@ from pathlib import Path
 
 
 INBOX_SCHEMA = """
-CREATE TABLE IF NOT EXISTS project_metadata (
-    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-    project_id TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS inbox (
     message_id TEXT NOT NULL,
     from_agent TEXT NOT NULL,
@@ -32,6 +27,11 @@ CREATE TABLE IF NOT EXISTS inbox (
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS project_metadata (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    project_id TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS reputation (
     agent_id TEXT PRIMARY KEY,
     score REAL DEFAULT 0.5,
