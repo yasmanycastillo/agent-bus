@@ -79,12 +79,14 @@ def _run(coro):
 def _run_in_dir(worktree: Path, daemon: WorkerDaemon, task_id: str):
     """Run _commit_and_submit_review with the process cwd inside worktree."""
 
+    original_cwd = os.getcwd()
+
     async def scenario():
         os.chdir(worktree)
         try:
             await daemon._commit_and_submit_review(task_id)
         finally:
-            os.chdir(worktree.parent)
+            os.chdir(original_cwd)
 
     asyncio.run(scenario())
 
@@ -94,13 +96,21 @@ def test_linked_worktree_cwd_commits_and_submits(primary, linked):
     client = _RecordingClient()
     daemon = _daemon(linked, client)
     (linked / "change.txt").write_text("worker output")
+    head_before = _git(linked, "rev-parse", "HEAD")
+    status_before = _git(linked, "status", "--porcelain")
+    assert "?? change.txt" in status_before
 
     _run_in_dir(linked, daemon, "T1")
 
     assert client.posts == ["/tasks/T1/review"]
     log = _git(linked, "log", "-1", "--format=%s")
     assert log == "feat(agent): complete T1"
+    assert _git(linked, "rev-parse", "HEAD") != head_before
     assert not _git(linked, "status", "--porcelain")
+    # The change is committed, not left staged.
+    assert _git(linked, "diff", "--cached", "--name-only") == ""
+    assert _git(linked, "diff", "HEAD", "--name-only") == ""
+    assert (linked / "change.txt").read_text() == "worker output"
 
 
 def test_primary_checkout_rejected_even_with_different_cwd(primary, linked):
