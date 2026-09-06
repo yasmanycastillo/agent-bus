@@ -222,4 +222,13 @@ Completada e integrada en `main`. Suite completa: **639 pruebas aprobadas** en *
   - `orchestrate`: flujo end-to-end con emisión de broadcast a la red de agentes en el bus.
 - Comandos CLI (`src/agent_bus/cli/orchestrator_cmds.py`, expuestos en `agent-bus breakdown` y `agent-bus orchestrate`): permiten desglosar y publicar o inspeccionar con `--dry-run` y `--json-output`.
 
-Las siguientes tareas operativas (Gatekeeper T-19, cuotas/presupuesto T-20 y consola local React T-21) continúan según el backlog de [TASK.md](TASK.md).
+## T-19: Gatekeeper de revisión y autorización de merge
+
+Completada e integrada en `main`. Suite completa: **653 pruebas aprobadas** en **164,56 s**, dos avisos de deprecación WebSocket (`uv run pytest -q`).
+
+- Módulo Gatekeeper (`CodeReviewGatekeeper` en `src/agent_bus/worker/gatekeeper.py`): desacopla la evaluación de cambios (`git diff`, pruebas y criterios de aceptación) de la decisión de integración. Emite veredictos estructurados `approve`, `changes_requested` y `blocked` con evidencia detallada, escaneo de secretos y comprobación de integridad.
+- Control de políticas en `BranchIntegrator`: parámetro `--require-approval` que impide la fusión a `main` si la revisión solicita cambios o está bloqueada, reasignando la tarea al autor con feedback accionable.
+- Trazabilidad y persistencia: tabla `reviews` y registro transaccional en `audit_log` con agente revisor, sesión, commit SHA y resultados completos de tests.
+- Endpoints en bus (`POST /reviews`, `GET /reviews`, `GET /tasks/{task_id}/reviews`) y CLI `agent-bus show reviews`.
+
+Las siguientes tareas operativas (cuotas/presupuesto T-20 y consola local React T-21) continúan según el backlog de [TASK.md](TASK.md).

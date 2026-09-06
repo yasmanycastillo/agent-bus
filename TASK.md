@@ -35,7 +35,7 @@ T-01 habilita validaciones reproducibles. T-01 a T-15 estabilizan el core; T-16 
 | T-16 | P1 | Piloto real de operación end-to-end | T-15 | completada | codex-integrator |
 | T-17 | P1 | Contrato de tareas, dependencias y DAG | T-16 | completada | codex-t17-dag |
 | T-18 | P1 | HermesOrchestrator y salidas estructuradas | T-17 | completada | codex-t18-hermes |
-| T-19 | P1 | Gatekeeper de revisión y autorización de merge | T-17 | pendiente | — |
+| T-19 | P1 | Gatekeeper de revisión y autorización de merge | T-17 | completada | codex-t19-gatekeeper |
 | T-20 | P1 | Cuotas, presupuesto y métricas de consumo | T-16 | pendiente | — |
 | T-21 | P1 | Consola local React integrada | T-16 | pendiente | — |
 | T-22 | P2 | Integraciones SDLC y capacidades enterprise | T-17, T-20, T-21 | pendiente | — |
@@ -270,9 +270,31 @@ Validación: **639 passed**, 2 warnings en 152,02 s con `uv run pytest -q`.
 
 Separar la evaluación del diff y las pruebas de la decisión de integración.
 
-- [ ] El gatekeeper devuelve `approve`, `changes_requested` o `blocked` con razón y evidencia.
-- [ ] `BranchIntegrator` no fusiona si falta aprobación cuando la política del proyecto la exige.
-- [ ] La decisión queda auditada con agente, sesión, SHA y resultados de pruebas.
+- [x] El gatekeeper devuelve `approve`, `changes_requested` o `blocked` con razón y evidencia.
+- [x] `BranchIntegrator` no fusiona si falta aprobación cuando la política del proyecto la exige.
+- [x] La decisión queda auditada con agente, sesión, SHA y resultados de pruebas.
+
+### Registro de T-19
+
+Se implementó el sistema de revisión de código `Gatekeeper` y autorización desacoplada de merge:
+1. Módulo Gatekeeper (`src/agent_bus/worker/gatekeeper.py`):
+   - Jerarquía de veredictos: `approve`, `changes_requested`, `blocked`.
+   - Evaluación aislada del diff (`git diff target...candidate`): detección de diff vacío, límites de tamaño, archivos críticos eliminados y escaneo de secretos/credenciales expuestas en las adiciones.
+   - Evaluación de resultados de pruebas unitarias y validación de criterios de aceptación de la tarea.
+   - Emisión de `ReviewDecision` enriquecido con `reason`, `evidence` (estadísticas de diff, checklist, hallazgos de seguridad), `test_results`, `sha`, agente revisor y sesión.
+2. Integración con `BranchIntegrator` (`src/agent_bus/worker/integrator.py`):
+   - Política `require_approval: bool = False` (configurable en CLI con `--require-approval`).
+   - Cuando se exige aprobación, solo el veredicto `approve` autoriza el merge a `main`; `changes_requested` devuelve la tarea al autor con feedback detallado; `blocked` bloquea la tarea en el bus y emite alerta.
+   - Si no se exige aprobación previa, la decisión de revisión se audita de forma no bloqueante a menos que se detecte una violación de seguridad (`blocked`).
+3. Persistencia y Auditoría (`reviews` y `audit_log`):
+   - Tabla `reviews` en SQLite con migración `_migrate_reviews()` y clase `ReviewLog` (`src/agent_bus/core/reviews.py`).
+   - Auditoría transaccional de cada revisión vinculada a `audit_log` (`action="gatekeeper_review"`, `actor_agent_id`, `actor_session_id`, `sha`, `test_results`).
+   - Endpoints REST en el bus: `POST /reviews`, `GET /reviews`, `GET /tasks/{task_id}/reviews`, `POST /tasks/{task_id}/block`.
+4. CLI y Observabilidad:
+   - Comando `agent-bus show reviews [--task <task_id>]` para consultar el historial de revisiones con tabla Rich.
+   - Soporte para `--require-approval` en `agent-bus integrator start` y `agent-bus integrator once`.
+
+Validación: **653 passed**, 2 warnings en 164,56 s con `uv run pytest -q`.
 
 ## T-20 — Cuotas, presupuesto y métricas de consumo
 
