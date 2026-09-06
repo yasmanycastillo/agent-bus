@@ -858,14 +858,17 @@ def start(host: str, port: int):
     _ensure_global_config()
     click.echo(f"Iniciando agent-bus en {host}:{port}")
 @app.command("mcp-server")
-@click.option("--bus-url", default="http://localhost:8420", help="URL del hub agent-bus")
+@click.option("--bus-url", envvar="AGENT_BUS_URL", default="http://127.0.0.1:8420", help="URL del hub agent-bus")
 @click.option("--agent", "agent_id", default=None, help="Identidad de la sesión MCP")
 def mcp_server_cmd(bus_url: str, agent_id: str | None):
     """Iniciar el servidor MCP de agent-bus sobre stdio (JSON-RPC 2.0)."""
     import asyncio
     from agent_bus.mcp.server import run_mcp_server
 
-    asyncio.run(run_mcp_server(bus_url=bus_url, agent_id=agent_id))
+    try:
+        asyncio.run(run_mcp_server(bus_url=bus_url, agent_id=agent_id))
+    except AuthenticationError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @app.command("hook-inbox", hidden=True)

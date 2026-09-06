@@ -1,9 +1,4 @@
-"""Servidor MCP nativo de agent-bus sobre stdio JSON-RPC 2.0.
-
-Permite a cualquier cliente MCP (Claude Code, Claude Desktop, Antigravity, Cursor, Zed)
-interactuar directamente con el bus y usar la herramienta bloqueante `wait_for_updates`
-para recibir eventos SSE en su misma sesión de forma nativa y sin intermediarios.
-"""
+"""MCP tools backed by the hub, served through the official SDK over stdio."""
 
 from __future__ import annotations
 
@@ -17,14 +12,21 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+from jsonschema import Draft202012Validator, ValidationError as SchemaValidationError
+from mcp.server import Server, ServerRequestContext
+from mcp.shared.exceptions import MCPError
+from mcp.types import (
+    INVALID_PARAMS, CallToolRequestParams, CallToolResult, ListToolsResult,
+    PaginatedRequestParams, TextContent, Tool,
+)
 from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr
 
 from agent_bus.security import AuthenticationError, async_bus_client, load_session
 from agent_bus.core.sse import iter_sse_frames
+from agent_bus.mcp.transport import cancellable_stdio
 
 logger = logging.getLogger("agent_bus.mcp")
 
-PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "agent-bus"
 SERVER_VERSION = "0.1.0"
 
@@ -180,6 +182,64 @@ class McpServer:
                     if field in schema.get("required", []):
                         schema["required"].remove(field)
 
+        self._validators = {}
+        for tool in self.tools:
+            schema = tool["inputSchema"]
+            schema["additionalProperties"] = False
+            Draft202012Validator.check_schema(schema)
+            self._validators[tool["name"]] = Draft202012Validator(schema)
+
+    def sdk_server(self) -> Server:
+        """Keep application contracts while the SDK owns RPC, negotiation and cancellation."""
+        return Server(
+            SERVER_NAME, version=SERVER_VERSION,
+            on_list_tools=self._list_tools, on_call_tool=self._call_tool,
+        )
+
+    async def _list_tools(
+        self, context: ServerRequestContext, params: PaginatedRequestParams | None,
+    ) -> ListToolsResult:
+        return ListToolsResult(tools=[Tool.model_validate(tool) for tool in self.tools])
+
+    @staticmethod
+    def _tool_result(value: dict[str, Any], *, error: bool = False) -> CallToolResult:
+        return CallToolResult(
+            content=[TextContent(type="text", text=json.dumps(value, ensure_ascii=False))],
+            structured_content=value, is_error=error,
+        )
+
+    async def _call_tool(
+        self, context: ServerRequestContext, params: CallToolRequestParams,
+    ) -> CallToolResult:
+        validator = self._validators.get(params.name)
+        if validator is None:
+            raise MCPError(INVALID_PARAMS, f"Unknown tool: {params.name}")
+        arguments = params.arguments if params.arguments is not None else {}
+        try:
+            # The low-level SDK preserves schemas but deliberately leaves tool
+            # validation to the application. Validate BEFORE binding identity.
+            validator.validate(arguments)
+            result = await self.execute_tool(params.name, arguments)
+            return self._tool_result(result, error=result.get("status") == "error")
+        except SchemaValidationError as exc:
+            failure = {"code": "invalid_arguments", "error": exc.message}
+        except AuthenticationError as exc:
+            failure = {"code": "unauthenticated", "error": str(exc)}
+        except ValueError as exc:
+            failure = {"code": "invalid_arguments", "error": str(exc)}
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            failure = {"code": "hub_error", "http_status": status,
+                       "error": f"Hub rejected the operation (HTTP {status})"}
+        except httpx.TransportError:
+            failure = {"code": "bus_unavailable", "error": "Cannot complete the hub request"}
+        except Exception:
+            # Never put credentials, backend bodies or tracebacks on the wire.
+            failure = {"code": "internal_error", "error": "Internal tool error"}
+        # Cancellation is a BaseException and deliberately propagates to the SDK.
+        logger.warning("Tool %s failed: %s", params.name, failure["code"])
+        return self._tool_result({"status": "error", **failure}, error=True)
+
     def _client(self, timeout: float | None = 30.0):
         return async_bus_client(
             self.agent_id, session=self.session, base_url=self.bus_url, timeout=timeout,
@@ -194,61 +254,6 @@ class McpServer:
                 raise ValueError(f"{field} must match the authenticated MCP session")
             bound[field] = self.agent_id
         return bound
-
-    async def handle_request(self, req: dict[str, Any]) -> dict[str, Any] | None:
-        req_id = req.get("id")
-        method = req.get("method")
-        params = req.get("params", {})
-
-        if method == "initialize":
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                },
-            }
-
-        elif method == "notifications/initialized":
-            return None
-
-        elif method == "tools/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {"tools": self.tools},
-            }
-
-        elif method == "tools/call":
-            tool_name = params.get("name")
-            tool_args = params.get("arguments", {})
-            try:
-                res = await self.execute_tool(tool_name, tool_args)
-                return {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "result": {
-                        "content": [{"type": "text", "text": json.dumps(res, ensure_ascii=False, indent=2)}]
-                    },
-                }
-            except Exception as exc:
-                logger.error("Error executing tool %s: %s", tool_name, exc)
-                return {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {"code": -32000, "message": str(exc)},
-                }
-
-        elif method == "ping":
-            return {"jsonrpc": "2.0", "id": req_id, "result": {}}
-
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "error": {"code": -32601, "message": f"Method not found: {method}"},
-        }
 
     async def execute_tool(self, name: str, args: dict[str, Any]) -> Any:
         args = self._bind_identity(args)
@@ -472,31 +477,14 @@ class McpServer:
 
 
 async def run_mcp_server(bus_url: str = "http://127.0.0.1:8420", agent_id: str | None = None) -> None:
-    """Corre el servidor MCP escuchando en stdin/stdout en formato JSON-RPC 2.0."""
-    server = McpServer(bus_url=bus_url, agent_id=agent_id)
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    loop = asyncio.get_running_loop()
-    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-
-    while True:
-        line = await reader.readline()
-        if not line:
-            break
-        text = line.decode().strip()
-        if not text:
-            continue
-        try:
-            req = json.loads(text)
-            resp = await server.handle_request(req)
-            if resp is not None:
-                out = json.dumps(resp, ensure_ascii=False) + "\n"
-                sys.stdout.write(out)
-                sys.stdout.flush()
-        except json.JSONDecodeError:
-            pass
-        except Exception as exc:
-            logger.error("Error processing line: %s", exc)
+    """Run one SDK connection; EOF and cancellation release its in-flight requests."""
+    logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
+    server = McpServer(bus_url=bus_url, agent_id=agent_id).sdk_server()
+    try:
+        async with cancellable_stdio() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    except* (BrokenPipeError, ConnectionResetError):
+        logger.warning("MCP stdio output closed")
 
 
 if __name__ == "__main__":
