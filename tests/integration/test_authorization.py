@@ -425,3 +425,77 @@ async def test_assignment_states_remain_executable(secured):
     assert (await bus.tasks.get("T1")).owner == "bob"
     assert (await bus.tasks.get("T1")).status.value == "in_progress"
     assert await bus.inbox.get_inbox("free") == []
+
+
+@pytest.mark.parametrize("path", ["/tasks/T1/block", "/reviews"])
+async def test_sensitive_posts_require_principal_in_unsigned_mode(secured, monkeypatch, path):
+    bus, client, sessions = secured
+    monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "1")
+    original = await bus.tasks.create("T1", "Task", owner="bob")
+    body = {"task_id": "T1", "sha": "abc", "verdict": "approve", "reason": "Forged",
+            "reviewer_agent_id": "integrator", "reviewer_session_id": sessions["lead"]["session_id"]}
+    response = await client.post(path, json=body)
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert await bus.tasks.get("T1") == original
+    assert await bus.reviews.list_all() == []
+    assert await bus.db.conn.execute_fetchall("SELECT * FROM audit_log") == []
+    # Compatibility mode still enforces the authenticated actor's permissions.
+    response = await client.post(path, json=body, headers=bearer(sessions))
+    assert response.status_code == 403
+    assert await bus.tasks.get("T1") == original
+    assert await bus.reviews.list_all() == []
+
+
+@pytest.mark.parametrize("unsigned", ["0", "1"])
+async def test_serialized_review_ids_are_replaced_on_every_post(secured, monkeypatch, unsigned):
+    from uuid import UUID
+
+    from agent_bus.worker.gatekeeper import ReviewDecision, Verdict
+
+    bus, client, sessions = secured
+    monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", unsigned)
+    legacy = ReviewDecision(
+        review_id="rev-client-chosen", task_id="T1", sha="abc", verdict=Verdict.APPROVE,
+        reason="Reviewed", reviewer_agent_id="alice",
+        created_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+    )
+    ids = []
+    for supplied_id in (legacy.review_id, legacy.review_id, None):
+        body = legacy.model_dump(mode="json")
+        if supplied_id is None:
+            body.pop("review_id")
+        else:
+            body["review_id"] = supplied_id
+        before = datetime.now(timezone.utc)
+        response = await client.post("/reviews", json=body, headers=bearer(sessions))
+        assert response.status_code == 200
+        data = response.json()
+        review_id = data["review_id"]
+        assert review_id != legacy.review_id
+        assert len(review_id) == 36  # rev- plus all 32 UUID hex digits
+        assert UUID(review_id.removeprefix("rev-")).version == 4
+        assert data["reviewer_agent_id"] == "alice"
+        assert data["reviewer_session_id"] == sessions["alice"]["session_id"]
+        assert datetime.fromisoformat(data["created_at"]) >= before
+        assert (await bus.reviews.get(review_id)).model_dump(mode="json") == data
+        ids.append(review_id)
+    assert len(set(ids)) == 3
+    assert await bus.reviews.get(legacy.review_id) is None
+    assert len(await bus.db.conn.execute_fetchall("SELECT * FROM audit_log")) == 3
+
+
+async def test_internal_review_id_collision_returns_clean_conflict(secured, monkeypatch):
+    import uuid
+
+    bus, client, sessions = secured
+    fixed = uuid.uuid4()
+    monkeypatch.setattr(uuid, "uuid4", lambda: fixed)
+    body = {"task_id": "T1", "sha": "abc", "verdict": "approve", "reason": "Reviewed"}
+    first = await client.post("/reviews", json=body, headers=bearer(sessions))
+    assert first.status_code == 200
+    second = await client.post("/reviews", json=body, headers=bearer(sessions))
+    assert second.status_code == 409
+    assert len(await bus.reviews.list_all()) == 1
+    assert len(await bus.db.conn.execute_fetchall("SELECT * FROM audit_log")) == 1
+    assert (await bus.reviews.get(first.json()["review_id"])).model_dump(mode="json") == first.json()

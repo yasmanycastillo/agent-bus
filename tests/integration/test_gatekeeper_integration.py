@@ -1,12 +1,30 @@
 from __future__ import annotations
 
+import json
+from uuid import UUID
+
 import pytest
 import aiosqlite
 from click.testing import CliRunner
 
 from agent_bus.cli.main import app
-from agent_bus.security import async_bus_client
+from agent_bus.security import async_bus_client, sync_bus_client
 from agent_bus.worker.integrator import BranchIntegrator
+
+
+@pytest.fixture(autouse=True)
+def authenticated_gatekeeper_sessions(tmp_path, monkeypatch):
+    from agent_bus.config import get_config_dir
+
+    monkeypatch.setenv("AGENT_BUS_DATABASE_PATH", str(tmp_path / "live-bus.db"))
+    monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "0")
+    monkeypatch.setenv("AGENT_BUS_AGENT_ID", "integrator")
+    sessions = {}
+    for agent, role in (("integrator", "admin"), ("gatekeeper-tester", "agent"), ("bob", "agent"), ("charlie", "agent")):
+        result = CliRunner().invoke(app, ["auth", "create", "--agent", agent, "--role", role])
+        assert result.exit_code == 0, result.output
+        sessions[agent] = json.loads((get_config_dir() / "credentials" / f"{agent}.json").read_text())
+    return sessions
 
 
 SAMPLE_CLEAN_DIFF = """diff --git a/src/feature.py b/src/feature.py
@@ -26,8 +44,9 @@ SAMPLE_SECRET_DIFF = """diff --git a/secrets.py b/secrets.py
 
 
 @pytest.mark.asyncio
-async def test_reviews_endpoints_and_audit(live_bus_url, tmp_path):
-    async with async_bus_client("test-agent", base_url=live_bus_url) as client:
+async def test_reviews_endpoints_and_audit(live_bus_url, tmp_path, authenticated_gatekeeper_sessions):
+    session_id = authenticated_gatekeeper_sessions["gatekeeper-tester"]["session_id"]
+    async with async_bus_client("gatekeeper-tester", base_url=live_bus_url) as client:
         # Create a task first
         t_resp = await client.post("/tasks", json={"task_id": "T-REV-1", "title": "Review test task"})
         assert t_resp.status_code == 200
@@ -41,7 +60,7 @@ async def test_reviews_endpoints_and_audit(live_bus_url, tmp_path):
             "evidence": {"diff_stats": {"files_changed": 1, "insertions": 2, "total_lines": 2}},
             "test_results": {"passed": True, "output": "3 passed"},
             "reviewer_agent_id": "gatekeeper-tester",
-            "reviewer_session_id": "sess-test-123",
+            "reviewer_session_id": session_id,
         }
         r_resp = await client.post("/reviews", json=rev_payload)
         assert r_resp.status_code == 200
@@ -49,7 +68,7 @@ async def test_reviews_endpoints_and_audit(live_bus_url, tmp_path):
         assert review_data["verdict"] == "approve"
         assert review_data["sha"] == "1234567890abcdef"
         assert review_data["reviewer_agent_id"] == "gatekeeper-tester"
-        assert review_data["reviewer_session_id"] == "sess-test-123"
+        assert review_data["reviewer_session_id"] == session_id
 
         # List all reviews
         list_resp = await client.get("/reviews")
@@ -78,7 +97,7 @@ async def test_reviews_endpoints_and_audit(live_bus_url, tmp_path):
         assert len(rev_rows) == 1
         assert rev_rows[0]["verdict"] == "approve"
         assert rev_rows[0]["reviewer_agent_id"] == "gatekeeper-tester"
-        assert rev_rows[0]["reviewer_session_id"] == "sess-test-123"
+        assert rev_rows[0]["reviewer_session_id"] == session_id
 
         # Check audit_log table
         audit_rows = await db.execute_fetchall(
@@ -87,7 +106,7 @@ async def test_reviews_endpoints_and_audit(live_bus_url, tmp_path):
         )
         assert len(audit_rows) == 1
         assert audit_rows[0]["actor_agent_id"] == "gatekeeper-tester"
-        assert audit_rows[0]["actor_session_id"] == "sess-test-123"
+        assert audit_rows[0]["actor_session_id"] == session_id
 
 
 @pytest.mark.asyncio
@@ -148,6 +167,10 @@ async def test_branch_integrator_require_approval_approve(live_bus_url, tmp_path
         assert len(revs) == 1
         assert revs[0]["verdict"] == "approve"
         assert revs[0]["sha"] == "fedcba9876543210"
+        assert revs[0]["review_id"] != res.metadata["review"]["review_id"]
+        assert UUID(revs[0]["review_id"].removeprefix("rev-")).version == 4
+        assert revs[0]["reviewer_agent_id"] == "integrator"
+        assert revs[0]["reviewer_session_id"]
 
 
 @pytest.mark.asyncio
@@ -272,7 +295,9 @@ async def test_branch_integrator_require_approval_blocked(live_bus_url, tmp_path
         assert t_resp.json()["status"] == "blocked"
 
         # Blocker message sent
-        inbox_resp = await client.get("/inbox/charlie")
+        async with async_bus_client("charlie", base_url=live_bus_url) as author_client:
+            inbox_resp = await author_client.get("/inbox/charlie")
+        assert inbox_resp.status_code == 200
         messages = inbox_resp.json()
         assert any(m.get("message_type") == "blocker" for m in messages)
 
@@ -337,17 +362,18 @@ def test_cli_show_reviews_command(live_bus_url, monkeypatch):
     runner = CliRunner()
 
     # Pre-populate review via API
-    import httpx
-    httpx.post(
-        f"{live_bus_url}/reviews",
-        json={
-            "task_id": "T-CLI-1",
-            "sha": "9876543210abcdef",
-            "verdict": "approve",
-            "reason": "All checks passed in CLI test",
-            "reviewer_agent_id": "integrator",
-        },
-    )
+    with sync_bus_client("integrator", base_url=live_bus_url) as client:
+        response = client.post(
+            "/reviews",
+            json={
+                "task_id": "T-CLI-1",
+                "sha": "9876543210abcdef",
+                "verdict": "approve",
+                "reason": "All checks passed in CLI test",
+                "reviewer_agent_id": "integrator",
+            },
+        )
+        assert response.status_code == 200
 
     result = runner.invoke(app, ["show", "reviews", "--task", "T-CLI-1"])
     assert result.exit_code == 0
