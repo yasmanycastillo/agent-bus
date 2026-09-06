@@ -3,25 +3,32 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+import time
 from contextlib import closing
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from agent_bus.core.inbox import InboxManager
 from agent_bus.core.reviews import ReviewLog
 from agent_bus.core.tasks import TaskManager
+import agent_bus.reputation.database as database_module
 from agent_bus.reputation.database import Database
 from agent_bus.types import Envelope, MessageType
 from agent_bus.worker.gatekeeper import ReviewDecision, Verdict
 
 
-@pytest.fixture(params=['file', 'memory', 'temporary', 'uri', 'anonymous_uri', 'named_uri', 'encoded_uri'])
+@pytest.fixture(params=['file', 'memory', 'temporary', 'uri', 'anonymous_uri', 'named_uri', 'encoded_uri',
+                        'shared_anonymous_uri', 'encoded_anonymous_uri', 'fragment_uri'])
 async def db(request, tmp_path):
     paths = {'file': str(tmp_path / 'transactions.db'), 'memory': ':memory:',
              'temporary': '', 'uri': f'file:{tmp_path}/named?mode=memory&cache=shared',
              'anonymous_uri': 'file::memory:', 'named_uri': f'file:{tmp_path}/named?mode=memory',
-             'encoded_uri': f'file:{tmp_path}/encoded?mode=mem%6fry'}
+             'encoded_uri': f'file:{tmp_path}/encoded?mode=mem%6fry',
+             'shared_anonymous_uri': 'file::memory:?cache=shared',
+             'encoded_anonymous_uri': 'file:%3Amemory%3A',
+             'fragment_uri': f'file:{tmp_path}/fragment?mode=memory#fragment'}
     database = Database(paths[request.param])
     await database.initialize()
     try:
@@ -379,25 +386,47 @@ async def test_read_transaction_rejects_writes(db):
 @pytest.mark.parametrize('code', [None, 'invalid', sqlite3.SQLITE_ERROR,
                                        sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
                                        sqlite3.SQLITE_LOCKED | (1 << 8)])
-async def test_begin_error_codes(db, monkeypatch, code):
+@pytest.mark.parametrize('stage', ['begin', 'callback', 'commit'])
+async def test_transaction_error_codes(db, monkeypatch, code, stage):
     error = sqlite3.OperationalError('injected')
     if code is not None:
         error.sqlite_errorcode = code
     connect = sqlite3.connect
     attempts = []
 
-    class FailingBegin(sqlite3.Connection):
+    closed = []
+
+    def inject():
+        attempts.append(stage)
+        if len(attempts) == 1:
+            raise error
+
+    class FailingAttempt(sqlite3.Connection):
         def execute(self, sql, *args):
-            if sql == 'BEGIN IMMEDIATE':
-                attempts.append(sql)
-                if len(attempts) == 1:
-                    raise error
+            if (stage == 'begin' and sql == 'BEGIN IMMEDIATE'
+                    or stage == 'callback' and sql == 'SELECT 42'):
+                inject()
             return super().execute(sql, *args)
 
-    monkeypatch.setattr(sqlite3, 'connect', lambda *a, **kw: connect(*a, **kw, factory=FailingBegin))
+        def commit(self):
+            if stage == 'commit':
+                inject()
+            return super().commit()
+
+        def close(self):
+            assert not self.in_transaction
+            super().close()
+            closed.append(True)
+
+    monkeypatch.setattr(sqlite3, 'connect', lambda *a, **kw: connect(*a, **kw, factory=FailingAttempt))
+
     def operation(conn):
+        # A replay must not retain the previous attempt's primary-key insert.
+        conn.execute("INSERT INTO reputation(agent_id) VALUES ('retry')")
         return conn.execute('SELECT 42').fetchone()[0]
-    if isinstance(code, int) and (code & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+
+    retryable = isinstance(code, int) and (code & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    if retryable:
         assert await db.transaction(operation) == 42
         assert len(attempts) == 2
     else:
@@ -405,3 +434,127 @@ async def test_begin_error_codes(db, monkeypatch, code):
             await db.transaction(operation)
         assert caught.value is error
         assert len(attempts) == 1
+    assert len(closed) == len(attempts)
+    rows = await db.conn.execute_fetchall('SELECT agent_id FROM reputation')
+    assert [tuple(row) for row in rows] == ([('retry',)] if retryable else [])
+
+
+@pytest.mark.parametrize('direction', ['reader_writer', 'writer_reader'])
+@pytest.mark.parametrize('outcome', ['success', 'exhausted', 'cancelled'])
+async def test_entire_attempt_retries_real_contention(db, monkeypatch, direction, outcome):
+    """Hold a real table/file lock until the failed attempt has been closed."""
+    anchor = db.conn
+    await anchor.execute('CREATE TABLE retry_partial (value INTEGER)')
+    await anchor.commit()
+    write = direction == 'reader_writer'
+    memory = not (await anchor.execute_fetchall('PRAGMA database_list'))[0][2]
+    if write:
+        await anchor.execute('BEGIN')
+        await anchor.execute_fetchall('SELECT * FROM reputation')
+    else:
+        # Memory table locks suffice; EXCLUSIVE would lock its schema too,
+        # preventing the reader from reaching its callback.
+        await anchor.execute('BEGIN IMMEDIATE' if memory else 'BEGIN EXCLUSIVE')
+        await anchor.execute("INSERT INTO reputation(agent_id) VALUES ('uncommitted')")
+
+    loop = asyncio.get_running_loop()
+    retry_waiting, release_retry = asyncio.Event(), threading.Event()
+    connections, closed, failures = [], [], []
+    callbacks = []
+    clock_offset = 0
+    connect = sqlite3.connect
+
+    class ObservedConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            try:
+                return super().execute(sql, *args)
+            except sqlite3.OperationalError as exc:
+                stage = sql if sql.startswith(('BEGIN', 'PRAGMA')) else 'callback'
+                failures.append((stage, exc.sqlite_errorcode & 0xff))
+                raise
+
+        def commit(self):
+            try:
+                return super().commit()
+            except sqlite3.OperationalError as exc:
+                failures.append(('commit', exc.sqlite_errorcode & 0xff))
+                raise
+
+        def close(self):
+            assert not self.in_transaction
+            super().close()
+            with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+                self.execute('SELECT 1')
+            closed.append(self)
+
+    def observed_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs, factory=ObservedConnection)
+        connections.append(connection)
+        return connection
+
+    def retry_sleep(delay):
+        nonlocal clock_offset
+        assert 0 < delay <= 0.01
+        assert closed == connections  # Cleanup precedes every retry wait.
+        loop.call_soon_threadsafe(retry_waiting.set)
+        assert release_retry.wait(5)
+        if outcome == 'exhausted':
+            clock_offset = 6  # Advance only the retry clock, not asyncio timers.
+
+    monkeypatch.setattr(sqlite3, 'connect', observed_connect)
+    monkeypatch.setattr(database_module, 'time', SimpleNamespace(
+        monotonic=lambda: time.monotonic() + clock_offset, sleep=retry_sleep,
+    ))
+
+    def operation(connection):
+        callbacks.append(connection)
+        if write:
+            assert connection.execute('SELECT COUNT(*) FROM retry_partial').fetchone()[0] == 0
+            connection.execute('INSERT INTO retry_partial VALUES (1)')
+            connection.execute("INSERT INTO reputation(agent_id) VALUES ('committed')")
+            return 42
+        return connection.execute('SELECT COUNT(*) FROM reputation').fetchone()[0]
+
+    pending = asyncio.create_task(db.transaction(operation, write=write))
+    closer = None
+    try:
+        await asyncio.wait_for(retry_waiting.wait(), 3)
+        assert not pending.done()
+        assert len(callbacks) == 1  # BEGIN succeeded; the failure happened later.
+        assert len(failures) == 1
+        assert failures[0][0] == ('commit' if write and not memory else 'callback')
+        assert failures[0][1] in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+        if outcome != 'exhausted':
+            if outcome == 'cancelled':
+                pending.cancel()
+            closer = asyncio.create_task(db.close())
+            await asyncio.sleep(0)
+            assert not pending.done()
+            assert not closer.done()
+            assert db._workers
+            await anchor.rollback()
+        release_retry.set()
+        if outcome == 'exhausted':
+            with pytest.raises(sqlite3.OperationalError, match='locked'):
+                await asyncio.wait_for(pending, 3)
+            assert len(connections) == 1  # No fresh attempt after the deadline.
+            await anchor.rollback()
+            assert not await anchor.execute_fetchall('SELECT * FROM retry_partial')
+            assert not await anchor.execute_fetchall('SELECT * FROM reputation')
+        elif outcome == 'cancelled':
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(pending, 3)
+        else:
+            assert await asyncio.wait_for(pending, 3) == (42 if write else 0)
+    finally:
+        release_retry.set()
+        if db._connection is not None and closer is None:
+            await anchor.rollback()
+        await asyncio.gather(pending, return_exceptions=True)
+        await (closer if closer is not None else db.close())
+    assert not db._workers
+    assert db._connection is None
+    assert closed == connections
+    assert len(callbacks) == (1 if outcome == 'exhausted' else 2)
+    with pytest.raises(ValueError, match='no active connection'):
+        await anchor.execute('SELECT 1')

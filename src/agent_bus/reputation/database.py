@@ -425,39 +425,46 @@ class Database:
         in one worker job. No pending work on ``conn`` can absorb this commit.
         Cancellation waits for commit/rollback and connection closure before
         propagating. Read callbacks use a deferred, query-only snapshot.
+        Callbacks must be DB-only: contention may replay the entire callback
+        on a fresh connection after rollback, within a five-second retry budget.
         """
         if self._closing:
             raise RuntimeError("Database is closing or closed")
         self.conn  # Require an initialized database (including its memory anchor).
 
         def runner():
-            connection = sqlite3.connect(self.db_path, uri=True)
-            connection.row_factory = sqlite3.Row
-            try:
-                if not write:
-                    connection.execute("PRAGMA query_only = ON")
-                deadline = time.monotonic() + 5
-                while True:
-                    try:
-                        connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-                        break
-                    except sqlite3.OperationalError as exc:
-                        # Shared-cache memory databases return SQLITE_LOCKED
-                        # immediately instead of honoring SQLite's busy timeout.
-                        code = getattr(exc, "sqlite_errorcode", None)
-                        if (not isinstance(code, int)
-                                or (code & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-                                or time.monotonic() >= deadline):
-                            raise
-                        time.sleep(0.01)
-                result = operation(connection)
-                connection.commit()
-                return result
-            except BaseException:
-                connection.rollback()
-                raise
-            finally:
-                connection.close()
+            deadline = time.monotonic() + 5
+            while True:
+                # Own the busy wait here: SQLite's per-statement timeout would
+                # otherwise add another five seconds at each attempt/stage.
+                connection = sqlite3.connect(self.db_path, uri=True, timeout=0)
+                connection.row_factory = sqlite3.Row
+                try:
+                    if not write:
+                        connection.execute("PRAGMA query_only = ON")
+                    connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+                    result = operation(connection)
+                    connection.commit()
+                    return result
+                except BaseException as exc:
+                    connection.rollback()
+                    # Shared-cache memory tables can return SQLITE_LOCKED from
+                    # the callback after BEGIN succeeds; file DBs can be busy
+                    # at COMMIT. Replay only after discarding all partial work.
+                    code = getattr(exc, "sqlite_errorcode", None)
+                    if (not isinstance(exc, sqlite3.OperationalError)
+                            or not isinstance(code, int)
+                            or (code & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)):
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    contention = exc
+                finally:
+                    connection.close()
+                time.sleep(min(0.01, remaining))
+                if time.monotonic() >= deadline:
+                    raise contention
 
         worker = asyncio.create_task(asyncio.to_thread(runner))
         self._workers.add(worker)
