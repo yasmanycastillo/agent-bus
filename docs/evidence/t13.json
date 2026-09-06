@@ -1,0 +1,134 @@
+{
+  "checks": {
+    "both_clients_completed": true,
+    "challenge_delivered_once": true,
+    "reply_delivered_once": true,
+    "four_unique_operations": true,
+    "codex_resumed_same_session": true,
+    "claude_resumed_same_session": true,
+    "codex_recalled_unrepeated_marker": true,
+    "claude_recalled_unrepeated_marker": true,
+    "reply_persisted_before_codex_resume": true,
+    "new_message_persisted_while_claude_offline": true,
+    "one_task_owner": true,
+    "one_lock_owner": true,
+    "task_completed": true,
+    "lock_released": true,
+    "sse_subscription_before_message_post": true,
+    "both_clients_attempted_task_and_lock": true,
+    "sender_retried": true,
+    "receiver_retried_reply": true,
+    "three_processed_deliveries_acknowledged": true,
+    "both_agents_acknowledged": true,
+    "four_persisted_idempotency_keys": true,
+    "http_contention_has_one_winner": true,
+    "no_shell_or_file_actions": true
+  },
+  "versions": {
+    "claude": "2.1.185 (Claude Code)",
+    "codex": "codex-cli 0.153.4"
+  },
+  "turns": [
+    {
+      "actor": "codex",
+      "phase": "exchange",
+      "exit_code": 0,
+      "timed_out": false,
+      "seconds": 21.08,
+      "session_id": "01a0753c-b7fd-7c63-ada5-e0ef497988ee",
+      "model": "gpt-6-astra",
+      "client_error": false,
+      "tools": [
+        "claim_task",
+        "acquire_lock",
+        "post_message",
+        "post_message"
+      ]
+    },
+    {
+      "actor": "claude",
+      "phase": "exchange",
+      "exit_code": 0,
+      "timed_out": false,
+      "seconds": 57.15,
+      "session_id": "4e6b4350-7013-4688-ab36-84081f368967",
+      "model": "glm-5.1",
+      "client_error": false,
+      "tools": [
+        "mcp__agent_bus__claim_task",
+        "mcp__agent_bus__acquire_lock",
+        "mcp__agent_bus__wait_for_updates",
+        "mcp__agent_bus__read_messages",
+        "mcp__agent_bus__reply_message",
+        "mcp__agent_bus__reply_message"
+      ]
+    },
+    {
+      "actor": "codex",
+      "phase": "resume",
+      "exit_code": 0,
+      "timed_out": false,
+      "seconds": 15.96,
+      "session_id": "01a0753c-b7fd-7c63-ada5-e0ef497988ee",
+      "model": "gpt-6-astra",
+      "client_error": false,
+      "tools": [
+        "read_messages",
+        "ack_messages",
+        "post_message"
+      ]
+    },
+    {
+      "actor": "claude",
+      "phase": "resume",
+      "exit_code": 0,
+      "timed_out": false,
+      "seconds": 25.01,
+      "session_id": "4e6b4350-7013-4688-ab36-84081f368967",
+      "model": "glm-5.1",
+      "client_error": false,
+      "tools": [
+        "mcp__agent_bus__read_messages",
+        "mcp__agent_bus__reply_message",
+        "mcp__agent_bus__release_lock",
+        "mcp__agent_bus__complete_task"
+      ]
+    }
+  ],
+  "task_owner": "claude",
+  "lock_owner": "claude",
+  "delivery_count": 4,
+  "tool_counts": {
+    "codex": {
+      "claim_task": 1,
+      "acquire_lock": 1,
+      "post_message": 3,
+      "read_messages": 1,
+      "ack_messages": 1
+    },
+    "claude": {
+      "claim_task": 1,
+      "acquire_lock": 1,
+      "wait_for_updates": 1,
+      "read_messages": 2,
+      "reply_message": 3,
+      "release_lock": 1,
+      "complete_task": 1
+    }
+  },
+  "acknowledged_deliveries": 3,
+  "final_pending_delivery": "Final reply from claude to codex; scenario ends after sending it.",
+  "verified_at_utc": "2026-09-06T05:49:08.180450+00:00",
+  "trace_sha256": {
+    "exchange-claude.jsonl": "9c93b81c5f107ca0eb1b3c6770721a98283000558e1656d3b3e7de36963cd1cb",
+    "exchange-codex.jsonl": "7327413280753e72d4e77bde949fd54b9f0467136a4a9065ed03d2d1a31cb105",
+    "resume-claude.jsonl": "e14e4393d3b91d57405090d03106e256bd25e3b26920a7911f2e85500769c2bd",
+    "resume-codex.jsonl": "1982a14c08f73e94e814f4fbe210c2114471f1144359dc1733389ede4cbd0f84"
+  },
+  "limitations": [
+    "Claude Code uses the configured GLM-5.1 model, not an Anthropic model in this run.",
+    "Headless clients invoked and resumed by this harness; no spontaneous TUI activation tested.",
+    "SSE waiting exercised in Claude Code; Codex receives pending messages after explicit resume.",
+    "Stop hooks and native AgentRunner adapters are outside this acceptance run."
+  ]
+}
