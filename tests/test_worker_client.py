@@ -15,6 +15,7 @@ def _sse_lines(*payloads: dict) -> list[str]:
     for p in payloads:
         lines.append("event: message")
         lines.append(f"data: {json.dumps(p)}")
+        lines.append("")
     return lines
 
 
@@ -48,6 +49,8 @@ async def test_consume_sse_dispatches_events(monkeypatch):
     )
 
     class FakeStream:
+        status_code = 200
+
         def raise_for_status(self):
             pass
 
@@ -72,7 +75,7 @@ async def test_consume_sse_dispatches_events(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        def stream(self, method: str, url: str):
+        def stream(self, method: str, url: str, **kwargs):
             return FakeResp()
 
     import agent_bus.worker.client as client_mod

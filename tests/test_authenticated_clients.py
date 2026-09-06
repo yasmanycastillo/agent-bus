@@ -99,7 +99,7 @@ async def test_sse_client_sends_bound_session(credentials, monkeypatch):
     client._running = True
     await client._consume_sse()
     assert events[0]["from_agent"] == "bob"
-    assert requests[0].url.path == "/events/alice"
+    assert requests[0].url.path == "/inbox/alice/events"
     assert requests[0].headers["Authorization"] == f"Bearer {credentials['alice'][0]['token']}"
 
 

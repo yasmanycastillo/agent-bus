@@ -71,7 +71,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let token = '', principal = null, streamController = null, refreshTimer = null;
+let token = '', principal = null, streamController = null, refreshTimer = null, eventCursor = null;
 const COLS = ['pending','in_progress','in_review','blocked','done'];
 
 function report(error) {
@@ -93,7 +93,7 @@ async function api(path, options = {}) {
   return data;
 }
 function signOut() {
-  token = ''; principal = null;
+  token = ''; principal = null; eventCursor = null;
   if (streamController) streamController.abort();
   streamController = null;
   clearInterval(refreshTimer); refreshTimer = null;
@@ -174,41 +174,90 @@ async function sendMessage() {
 }
 function renderEvent(data) {
   let event;
-  try { event = JSON.parse(data); } catch { return; }
+  event = JSON.parse(data);
   const div = document.createElement('div'); div.className = 'evt';
   div.textContent = `${new Date().toLocaleTimeString()} ${event.from_agent||'?'} → ${event.to_agent||'*'}: ${JSON.stringify(event.body ?? {}).slice(0,140)}`;
   $('feed').prepend(div);
   while ($('feed').children.length > 200) $('feed').lastChild.remove();
 }
+async function recoverEvents(control, signal) {
+  if (control.error !== 'cursor_expired' || typeof control.cursor !== 'string' || !control.cursor)
+    throw new Error('Control de recuperación inválido');
+  await refresh();
+  if (!signal.aborted) eventCursor = control.cursor;
+}
+async function dispatchFrame(frame, signal) {
+  if (signal.aborted) return false;
+  if (frame.event === 'reset') {
+    await recoverEvents(JSON.parse(frame.data), signal);
+    return false;
+  }
+  if (frame.event === 'checkpoint') {
+    const checkpoint = JSON.parse(frame.data);
+    const cursor = frame.id || checkpoint.cursor;
+    if (typeof cursor !== 'string' || !cursor) throw new Error('Checkpoint inválido');
+    eventCursor = cursor;
+    return true;
+  }
+  renderEvent(frame.data);
+  if (frame.id !== null) eventCursor = frame.id;
+  return true;
+}
 async function streamEvents(signal) {
   while (!signal.aborted && token) {
     try {
-      const response = await fetch('/events/all', {headers:{Authorization:`Bearer ${token}`}, signal});
-      if (!response.ok) {
-        if (response.status === 401 || response.status === 403) signOut();
-        throw new Error(`Eventos rechazados (${response.status})`);
-      }
-      if (signal.aborted) return;
-      $('status').textContent = `SSE conectado — ${principal.agent_id}`;
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '', data = [];
-      try {
-        while (!signal.aborted) {
-          const chunk = await reader.read(); if (chunk.done) break;
-          buffer += decoder.decode(chunk.value, {stream:true});
-          let end;
-          while ((end = buffer.indexOf('\n')) >= 0) {
-            const line = buffer.slice(0,end).replace(/\r$/, ''); buffer = buffer.slice(end+1);
-            if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
-            else if (!line && data.length) { renderEvent(data.join('\n')); data = []; }
+      const headers = {Authorization:`Bearer ${token}`};
+      if (eventCursor !== null) headers['Last-Event-ID'] = eventCursor;
+      const response = await fetch('/events/all', {headers, signal});
+      if (response.status === 410) {
+        await recoverEvents(await response.json(), signal);
+      } else {
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 403) signOut();
+          if (response.status === 422) {
+            report(new Error('Cursor de eventos inválido. Cierra y vuelve a conectar la sesión.'));
+            return;
           }
+          throw new Error(`Eventos rechazados (${response.status})`);
         }
-      } finally { await reader.cancel(); reader.releaseLock(); }
+        if (signal.aborted) return;
+        $('status').textContent = `SSE conectado — ${principal.agent_id}`;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '', data = [], event = 'message', id = null, size = 0, continuing = true;
+        try {
+          while (!signal.aborted && continuing) {
+            const chunk = await reader.read(); if (chunk.done) break;
+            buffer += decoder.decode(chunk.value, {stream:true});
+            let end;
+            while ((end = buffer.indexOf('\n')) >= 0) {
+              const line = buffer.slice(0,end).replace(/\r$/, ''); buffer = buffer.slice(end+1);
+              size += line.length + 1;
+              if (size > 262144) throw new Error('Frame SSE demasiado grande');
+              if (!line) {
+                if (data.length) continuing = await dispatchFrame({event, id, data:data.join('\n')}, signal);
+                data = []; event = 'message'; id = null; size = 0;
+                if (!continuing) break;
+              } else if (!line.startsWith(':')) {
+                const colon = line.indexOf(':');
+                const field = colon < 0 ? line : line.slice(0,colon);
+                let value = colon < 0 ? '' : line.slice(colon+1);
+                if (value.startsWith(' ')) value = value.slice(1);
+                if (field === 'data') data.push(value);
+                else if (field === 'event') event = value || 'message';
+                else if (field === 'id' && !value.includes('\0')) id = value;
+              }
+            }
+            if (buffer.length + size > 262144) throw new Error('Frame SSE demasiado grande');
+          }
+          // A final partial frame is discarded; its cursor is replayed after reconnect.
+        } finally { await reader.cancel(); reader.releaseLock(); }
+      }
     } catch (error) {
       if (signal.aborted) return;
       report(error);
     }
+    // Back off after errors AND clean EOF; stop wakes this delay immediately.
     if (!signal.aborted && token) await new Promise(resolve => {
       const timer = setTimeout(done, 1000);
       function done() { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); }
