@@ -151,19 +151,25 @@ class BranchIntegrator:
     ) -> IntegratorResult:
         """Verifies candidate worktree, runs tests, and merges if green, or rejects with feedback."""
         # The tested integration commit is kept reachable under a private ref
-        # until publish or abort; this wrapper guarantees cleanup on every path.
-        self._active_integration_ref = ""
+        # until publish or abort. Ownership is LOCAL to this call (never a
+        # shared instance attribute) so concurrent integrate_task invocations
+        # cannot clobber each other's cleanup. The finally runs shielded so the
+        # ref is deleted even on exceptions or task cancellation.
+        ref_box: dict[str, str] = {}
         try:
             return await self._integrate_task_impl(
                 task_id, author_agent, worktree_dir, candidate_branch,
                 target_branch=target_branch, test_cmd=test_cmd,
                 acceptance_criteria=acceptance_criteria,
-                require_approval=require_approval,
+                require_approval=require_approval, ref_box=ref_box,
             )
         finally:
-            if getattr(self, "_active_integration_ref", ""):
-                await self._delete_ref(self._active_integration_ref)
-                self._active_integration_ref = ""
+            pending_ref = ref_box.get("ref", "")
+            if pending_ref:
+                try:
+                    await asyncio.shield(self._delete_ref(pending_ref))
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001 - cleanup best effort
+                    logger.warning("Failed to delete pending integration ref %s", pending_ref)
 
     async def _integrate_task_impl(
         self,
@@ -175,6 +181,7 @@ class BranchIntegrator:
         test_cmd: list[str] | None = None,
         acceptance_criteria: list[str] | None = None,
         require_approval: bool | None = None,
+        ref_box: dict[str, str] | None = None,
     ) -> IntegratorResult:
         preflight_error = await self._preflight(worktree_dir, candidate_branch, target_branch)
         if preflight_error:
@@ -204,9 +211,8 @@ class BranchIntegrator:
             # actually be integrated. The combined commit is pinned under a
             # private ref so it cannot be garbage-collected before publication.
             integration_sha, integration_ref, tests_passed, test_output, diff = await self._test_candidate(
-                candidate_sha, target_sha, worktree_dir, test_cmd
+                candidate_sha, target_sha, worktree_dir, test_cmd, ref_box=ref_box
             )
-            self._active_integration_ref = integration_ref
         else:
             tests_passed, test_output = await self.run_tests(worktree_dir, test_cmd)
             # Legacy non-git path (also exercised by tests that stub _git_output):
@@ -218,9 +224,20 @@ class BranchIntegrator:
             if not diff and worktree_dir.exists():
                 diff = await self._git_output("diff", f"{target_branch}...HEAD", cwd=worktree_dir)
 
-        # Retrieve acceptance criteria if not provided
+        # Retrieve acceptance criteria if not provided. A fetch failure (None)
+        # is distinct from an empty list: fail closed rather than review with
+        # unknown criteria.
         if acceptance_criteria is None:
             acceptance_criteria = await self._fetch_acceptance_criteria(task_id)
+            if acceptance_criteria is None:
+                return IntegratorResult(
+                    success=False,
+                    merged=False,
+                    status="error",
+                    output=test_output,
+                    error=f"Failed to fetch acceptance criteria for task {task_id}; refusing to review blind.",
+                    metadata={"candidate_sha": candidate_sha, "integration_sha": integration_sha or None},
+                )
 
         # Invoke Gatekeeper to evaluate diff and test results. The review stays
         # tied to the author's candidate SHA; the tested combined SHA travels in
@@ -256,8 +273,8 @@ class BranchIntegrator:
 
         # If verdict is BLOCKED, DO NOT MERGE under any policy
         if decision.verdict == Verdict.BLOCKED:
-            await self._mark_task_blocked(task_id, f"Gatekeeper review blocked: {decision.reason}")
-            await self._notify_bus_blocked(
+            blocked = await self._mark_task_blocked(task_id, f"Gatekeeper review blocked: {decision.reason}")
+            notified = await self._notify_bus_blocked(
                 task_id, author_agent, f"Task {task_id} blocked by gatekeeper: {decision.reason}"
             )
             return IntegratorResult(
@@ -266,7 +283,11 @@ class BranchIntegrator:
                 status="blocked",
                 output=test_output,
                 error=f"Task {task_id} blocked by gatekeeper: {decision.reason}",
-                metadata={"review": decision.model_dump(mode="json")},
+                metadata={
+                    "review": decision.model_dump(mode="json"),
+                    "task_blocked": blocked,
+                    "author_notified": notified,
+                },
             )
 
         if effective_require_approval:
@@ -279,7 +300,7 @@ class BranchIntegrator:
                     await self._mark_task_blocked(
                         task_id, f"Exceeded max retries ({self.max_retries_per_task}). Gatekeeper: {decision.reason}"
                     )
-                    await self._notify_bus_blocked(task_id, author_agent, test_output)
+                    notified = await self._notify_bus_blocked(task_id, author_agent, test_output)
                     return IntegratorResult(
                         success=False,
                         merged=False,
@@ -287,19 +308,23 @@ class BranchIntegrator:
                         output=test_output,
                         error=f"Task {task_id} failed integration after {retries} retries. Gatekeeper: {decision.reason}",
                         retry_count=retries,
-                        metadata={"review": decision.model_dump(mode="json")},
+                        metadata={"review": decision.model_dump(mode="json"), "author_notified": notified},
                     )
 
                 # Send feedback to author with reason and evidence, and reassign task to author
-                await self._notify_author_review_feedback(task_id, author_agent, decision, retries)
+                feedback_sent = await self._notify_author_review_feedback(task_id, author_agent, decision, retries)
                 return IntegratorResult(
                     success=False,
                     merged=False,
                     status="retry_requested",
                     output=test_output,
-                    error=f"Gatekeeper requested changes: {decision.reason}",
+                    error=(
+                        f"Gatekeeper requested changes: {decision.reason}"
+                        if feedback_sent
+                        else f"Gatekeeper requested changes: {decision.reason}; FAILED to deliver feedback to author — manual follow-up required"
+                    ),
                     retry_count=retries,
-                    metadata={"review": decision.model_dump(mode="json")},
+                    metadata={"review": decision.model_dump(mode="json"), "feedback_sent": feedback_sent},
                 )
 
             # Verdict is APPROVE: integrate the exact tested state.
@@ -312,15 +337,19 @@ class BranchIntegrator:
             if not merge_ok:
                 retries = self._retry_counts.get(task_id, 0) + 1
                 self._retry_counts[task_id] = retries
-                await self._notify_author_failure(task_id, author_agent, f"Merge conflict:\n{merge_output}", retries)
+                feedback_sent = await self._notify_author_failure(task_id, author_agent, f"Merge conflict:\n{merge_output}", retries)
                 return IntegratorResult(
                     success=False,
                     merged=False,
                     status="conflict",
                     output=merge_output,
-                    error="Merge conflict detected. Sent feedback to author to rebase.",
+                    error=(
+                        "Merge conflict detected. Sent feedback to author to rebase."
+                        if feedback_sent
+                        else "Merge conflict detected; FAILED to deliver feedback to author — manual follow-up required"
+                    ),
                     retry_count=retries,
-                    metadata={"review": decision.model_dump(mode="json")},
+                    metadata={"review": decision.model_dump(mode="json"), "feedback_sent": feedback_sent},
                 )
 
             self._retry_counts.pop(task_id, None)
@@ -351,7 +380,7 @@ class BranchIntegrator:
                     await self._mark_task_blocked(
                         task_id, f"Exceeded max integration retries ({self.max_retries_per_task})."
                     )
-                    await self._notify_bus_blocked(task_id, author_agent, test_output)
+                    notified = await self._notify_bus_blocked(task_id, author_agent, test_output)
                     return IntegratorResult(
                         success=False,
                         merged=False,
@@ -359,19 +388,23 @@ class BranchIntegrator:
                         output=test_output,
                         error=f"Task {task_id} failed integration after {retries} retries. Marked as blocked.",
                         retry_count=retries,
-                        metadata={"review": decision.model_dump(mode="json")},
+                        metadata={"review": decision.model_dump(mode="json"), "author_notified": notified},
                     )
 
                 # Send feedback message to author requiring reply
-                await self._notify_author_failure(task_id, author_agent, test_output, retries)
+                feedback_sent = await self._notify_author_failure(task_id, author_agent, test_output, retries)
                 return IntegratorResult(
                     success=False,
                     merged=False,
                     status="retry_requested",
                     output=test_output,
-                    error="Tests failed in candidate branch. Feedback sent to author.",
+                    error=(
+                        "Tests failed in candidate branch. Feedback sent to author."
+                        if feedback_sent
+                        else "Tests failed in candidate branch; FAILED to deliver feedback to author — manual follow-up required"
+                    ),
                     retry_count=retries,
-                    metadata={"review": decision.model_dump(mode="json")},
+                    metadata={"review": decision.model_dump(mode="json"), "feedback_sent": feedback_sent},
                 )
 
             if integration_sha:
@@ -383,15 +416,19 @@ class BranchIntegrator:
             if not merge_ok:
                 retries = self._retry_counts.get(task_id, 0) + 1
                 self._retry_counts[task_id] = retries
-                await self._notify_author_failure(task_id, author_agent, f"Merge conflict:\n{merge_output}", retries)
+                feedback_sent = await self._notify_author_failure(task_id, author_agent, f"Merge conflict:\n{merge_output}", retries)
                 return IntegratorResult(
                     success=False,
                     merged=False,
                     status="conflict",
                     output=merge_output,
-                    error="Merge conflict detected. Sent feedback to author to rebase.",
+                    error=(
+                        "Merge conflict detected. Sent feedback to author to rebase."
+                        if feedback_sent
+                        else "Merge conflict detected; FAILED to deliver feedback to author — manual follow-up required"
+                    ),
                     retry_count=retries,
-                    metadata={"review": decision.model_dump(mode="json")},
+                    metadata={"review": decision.model_dump(mode="json"), "feedback_sent": feedback_sent},
                 )
 
             self._retry_counts.pop(task_id, None)
@@ -417,6 +454,7 @@ class BranchIntegrator:
         target_sha: str,
         worktree_dir: Path,
         test_cmd: list[str] | None,
+        ref_box: dict[str, str] | None = None,
     ) -> tuple[str, str, bool, str, str]:
         """Build and test the exact candidate SHA combined with the captured target SHA.
 
@@ -453,8 +491,12 @@ class BranchIntegrator:
 
             # Pin the combined commit under the private ref before anything else,
             # so it cannot be garbage-collected between test and publish.
+            # Register ownership in ref_box IMMEDIATELY so a cancellation at
+            # any later await still triggers the wrapper's shielded cleanup.
             if not await self._update_ref(integration_ref, integration_sha, expected_old=""):
                 return sha, "", False, f"Failed to pin integration commit under {integration_ref}.", ""
+            if ref_box is not None:
+                ref_box["ref"] = integration_ref
 
             diff = await self._git_output(
                 "diff", f"{target_sha}...HEAD", cwd=candidate_path
@@ -504,13 +546,19 @@ class BranchIntegrator:
     async def _integrate(
         self, integration_sha: str, target_branch: str, target_sha: str
     ) -> tuple[bool, str]:
-        """Publish the tested combined commit via atomic compare-and-swap.
+        """Publish the tested combined commit safely, never erasing concurrent advances.
 
-        Revalidates target state immediately before the CAS, then moves
-        ``refs/heads/<target>`` from ``target_sha`` to ``integration_sha`` in a
-        single ``git update-ref`` (atomic; fails if the ref moved meanwhile).
-        Afterwards the checked-out worktree/index is synchronized and the ref,
-        HEAD and tree are verified to equal the tested state exactly.
+        Publication is an atomic compare-and-swap on the branch ref
+        (``git update-ref refs/heads/<target> <integration_sha> <target_sha>``):
+        it only succeeds if the target still points at the captured
+        ``target_sha``, so a concurrent advance is never overwritten. The
+        checked-out worktree/index is then synchronized with
+        ``git read-tree -u --reset`` (which touches only index and worktree,
+        never the ref). Finally the ref, HEAD and tree are verified to equal
+        the tested state exactly; any mismatch (e.g. someone advanced the
+        target between CAS and sync) is reported as conflict/reconciliation
+        without further mutation — a destructive ``reset --hard`` after the
+        CAS is never used.
         """
         try:
             current = await self._git_output("symbolic-ref", "--short", "HEAD")
@@ -531,9 +579,16 @@ class BranchIntegrator:
                     f"Target '{target_branch}' moved from {target_sha} to {head} during integration; "
                     "please retry to recombine with the updated target."
                 )
+            ref_now = await self._git_output("rev-parse", f"refs/heads/{target_branch}")
+            if target_sha and ref_now != target_sha:
+                return False, (
+                    f"Target ref '{target_branch}' moved from {target_sha} to {ref_now}; "
+                    "please retry to recombine with the updated target."
+                )
 
             # Atomic compare-and-swap of the branch ref. update-ref fails if
-            # refs/heads/<target> does not still point at target_sha.
+            # refs/heads/<target> does not still point at target_sha, so a
+            # concurrent advance can never be erased here.
             cas = await asyncio.create_subprocess_exec(
                 "git", "update-ref", f"refs/heads/{target_branch}", integration_sha, target_sha,
                 cwd=str(self.repo_dir),
@@ -544,51 +599,36 @@ class BranchIntegrator:
                 out = (cas_out + cas_err).decode("utf-8", errors="replace")
                 return False, f"Atomic ref update lost or failed: {out}"
 
-            # Synchronize the checked-out worktree and index to the new ref.
-            reset = await asyncio.create_subprocess_exec(
-                "git", "reset", "--hard", integration_sha,
+            # Synchronize index and worktree only (the ref is already
+            # published). read-tree never touches the ref, so a concurrent
+            # advance that lands between the CAS and this step survives.
+            read_tree = await asyncio.create_subprocess_exec(
+                "git", "read-tree", "-u", "--reset", integration_sha,
                 cwd=str(self.repo_dir),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            reset_out, reset_err = await reset.communicate()
-            if reset.returncode != 0:
-                out = (reset_out + reset_err).decode("utf-8", errors="replace")
-                return False, f"Ref published but worktree sync failed: {out}"
-
-            # Verify ref, HEAD and tree are exactly the tested state.
-            ref_now = await self._git_output("rev-parse", f"refs/heads/{target_branch}")
-            head_now = await self._git_output("rev-parse", "HEAD")
-            tree_ref = await self._git_output("rev-parse", f"{integration_sha}^{{tree}}")
-            tree_head = await self._git_output("rev-parse", "HEAD^{tree}")
-            if ref_now != integration_sha or head_now != integration_sha or tree_ref != tree_head:
+            rt_out, rt_err = await read_tree.communicate()
+            if read_tree.returncode != 0:
+                out = (rt_out + rt_err).decode("utf-8", errors="replace")
                 return False, (
-                    f"Post-publish verification failed: ref={ref_now} head={head_now} "
-                    f"expected={integration_sha} tree_ref={tree_ref} tree_head={tree_head}"
+                    f"Ref published at {integration_sha} but worktree sync failed: {out}\n"
+                    "Manual reconciliation of the target checkout is required."
+                )
+
+            # Exact postcondition: the final ref must be exactly the tested
+            # integration SHA (a concurrent advance makes this fail and is
+            # reported, never erased).
+            ref_after = await self._git_output("rev-parse", f"refs/heads/{target_branch}")
+            head_after = await self._git_output("rev-parse", "HEAD")
+            tree_head = await self._git_output("rev-parse", "HEAD^{tree}")
+            tree_expected = await self._git_output("rev-parse", f"{integration_sha}^{{tree}}")
+            if ref_after != integration_sha or head_after != integration_sha or tree_head != tree_expected:
+                return False, (
+                    f"Post-publish verification failed: ref={ref_after} head={head_after} "
+                    f"expected={integration_sha} tree={tree_head} expected_tree={tree_expected}; "
+                    "concurrent target activity detected — reconciliation required, nothing erased."
                 )
             return (True, f"Published tested commit {integration_sha} onto '{target_branch}'.")
-        except Exception as exc:
-            return (False, str(exc))
-
-    async def _rollback_target(
-        self, target_branch: str, integration_sha: str, previous_sha: str
-    ) -> tuple[bool, str]:
-        """Conditionally roll the target back; lose gracefully if we lost the ref."""
-        try:
-            cas = await asyncio.create_subprocess_exec(
-                "git", "update-ref", f"refs/heads/{target_branch}", previous_sha, integration_sha,
-                cwd=str(self.repo_dir),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            _, err = await cas.communicate()
-            if cas.returncode != 0:
-                return (False, err.decode("utf-8", errors="replace"))
-            sync = await asyncio.create_subprocess_exec(
-                "git", "reset", "--hard", previous_sha,
-                cwd=str(self.repo_dir),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            await sync.communicate()
-            return (True, "")
         except Exception as exc:
             return (False, str(exc))
 
@@ -604,40 +644,13 @@ class BranchIntegrator:
         decision: ReviewDecision,
         completion_error: str | None,
     ) -> IntegratorResult:
-        """POST /done failed after publication: try conditional rollback, else reconcile.
+        """POST /done failed after publication: leave the tested commit published.
 
-        Rollback happens only via compare-and-swap from integration_sha back to
-        target_sha; if another writer already advanced the target, the CAS loses
-        and we surface an explicit reconciliation-needed error instead of
-        silently reporting success or clobbering the newer state.
+        No checkout reset or ref rewind is attempted: rewinding the target
+        after publication races with concurrent writers and could erase their
+        advances. Instead the verified tested commit stays published and the
+        result demands explicit reconciliation with the exact SHAs.
         """
-        rolled_back, rollback_error = (False, "")
-        if integration_sha and target_sha:
-            rolled_back, rollback_error = await self._rollback_target(
-                target_branch, integration_sha, target_sha
-            )
-        base_meta = {
-            "review": decision.model_dump(mode="json"),
-            "candidate_sha": candidate_sha,
-            "integration_sha": integration_sha or None,
-        }
-        if rolled_back:
-            await self._notify_author_failure(
-                task_id, author_agent,
-                f"Integration rolled back because task completion failed: {completion_error}",
-                self._retry_counts.get(task_id, 0) + 1,
-            )
-            return IntegratorResult(
-                success=False,
-                merged=False,
-                status="error",
-                output=merge_output,
-                error=(
-                    f"Published {integration_sha} onto '{target_branch}' but POST /tasks/{task_id}/done "
-                    f"failed ({completion_error}); target rolled back to {target_sha}."
-                ),
-                metadata={**base_meta, "rolled_back": True},
-            )
         await self._notify_bus_blocked(
             task_id, author_agent,
             f"Task {task_id} integrated as {integration_sha} but bus completion failed; "
@@ -650,10 +663,15 @@ class BranchIntegrator:
             output=merge_output,
             error=(
                 f"Published {integration_sha} onto '{target_branch}' and POST /tasks/{task_id}/done failed "
-                f"({completion_error}); rollback lost the race ({rollback_error}). Target left at "
-                f"{integration_sha} — manual reconciliation of the bus task state is required."
+                f"({completion_error}). Target left at the verified tested commit; manual reconciliation "
+                "of the bus task state is required."
             ),
-            metadata={**base_meta, "rolled_back": False, "reconciliation_required": True},
+            metadata={
+                "review": decision.model_dump(mode="json"),
+                "candidate_sha": candidate_sha,
+                "integration_sha": integration_sha or None,
+                "reconciliation_required": True,
+            },
         )
 
     def _git_dir(self) -> Path:
@@ -764,19 +782,20 @@ class BranchIntegrator:
                 return f"Git operation in progress on target ({state_file}); refusing to integrate."
         return None
 
-    async def _notify_author_failure(self, task_id: str, author_agent: str, details: str, retry: int) -> None:
-        """Sends a high priority feedback message to author on the bus."""
-        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
-            try:
+    async def _notify_author_failure(self, task_id: str, author_agent: str, details: str, retry: int) -> bool:
+        """Send a high-priority feedback message to the author; False if it failed."""
+        try:
+            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
                 # Ensure task stays in_progress for author
-                await client.post(f"/tasks/{task_id}/reassign", json={"new_owner": author_agent})
+                reassigned = await client.post(f"/tasks/{task_id}/reassign", json={"new_owner": author_agent})
+                reassigned.raise_for_status()
 
                 msg_text = (
                     f"Integration test/merge failed for task {task_id} (Attempt {retry}/{self.max_retries_per_task}).\n"
                     f"Output:\n{details[:500]}\n"
                     "Please fix the failing tests in your branch and update task."
                 )
-                await client.post(
+                sent = await client.post(
                     "/messages",
                     json={
                         "from_agent": self.agent_id,
@@ -787,14 +806,17 @@ class BranchIntegrator:
                         "related_task": task_id,
                     },
                 )
-            except Exception as exc:
-                logger.error(f"Failed to notify author {author_agent}: {exc}")
+                sent.raise_for_status()
+            return True
+        except Exception as exc:
+            logger.error(f"Failed to notify author {author_agent}: {exc}")
+            return False
 
-    async def _notify_bus_blocked(self, task_id: str, author_agent: str, details: str) -> None:
-        """Alerts that a task exceeded max integration retries and is blocked."""
-        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
-            try:
-                await client.post(
+    async def _notify_bus_blocked(self, task_id: str, author_agent: str, details: str) -> bool:
+        """Alert that a task was blocked; False if the bus rejected the post."""
+        try:
+            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+                resp = await client.post(
                     "/messages",
                     json={
                         "from_agent": self.agent_id,
@@ -808,22 +830,31 @@ class BranchIntegrator:
                         "related_task": task_id,
                     },
                 )
-            except Exception as exc:
-                logger.error(f"Failed to post blocker for {task_id}: {exc}")
+                resp.raise_for_status()
+            return True
+        except Exception as exc:
+            logger.error(f"Failed to post blocker for {task_id}: {exc}")
+            return False
 
     async def _mark_task_completed(self, task_id: str) -> None:
         """Deprecated: superseded by _finalize_merge, kept for callers/tests."""
         await self._finalize_merge(task_id)
 
-    async def _fetch_acceptance_criteria(self, task_id: str) -> list[str]:
+    async def _fetch_acceptance_criteria(self, task_id: str) -> list[str] | None:
+        """Fetch acceptance criteria; None signals fetch failure (4xx/5xx/network).
+
+        An actual empty list is a valid answer and is returned as ``[]``;
+        ``None`` means the criteria could not be read, letting the caller
+        decide instead of silently treating an error as "no criteria".
+        """
         try:
             async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
                 resp = await client.get(f"/tasks/{task_id}")
-                if resp.status_code == 200:
-                    return resp.json().get("acceptance_criteria", []) or []
+                resp.raise_for_status()
+                return list(resp.json().get("acceptance_criteria", []) or [])
         except Exception as exc:
-            logger.debug(f"Could not fetch task {task_id} details: {exc}")
-        return []
+            logger.error(f"Failed to fetch acceptance criteria for task {task_id}: {exc}")
+            return None
 
     async def _record_review(self, decision: ReviewDecision) -> bool:
         """Persist the review decision; returns False if the audit trail was not written."""
@@ -836,21 +867,26 @@ class BranchIntegrator:
             logger.error(f"Failed to record review for task {decision.task_id}: {exc}")
             return False
 
-    async def _mark_task_blocked(self, task_id: str, reason: str = "") -> None:
+    async def _mark_task_blocked(self, task_id: str, reason: str = "") -> bool:
+        """Mark the task blocked; False if the bus rejected the request."""
         try:
             async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
-                await client.post(f"/tasks/{task_id}/block", json={"reason": reason})
+                resp = await client.post(f"/tasks/{task_id}/block", json={"reason": reason})
+                resp.raise_for_status()
+            return True
         except Exception as exc:
             logger.error(f"Failed to mark task {task_id} blocked: {exc}")
+            return False
 
     async def _notify_author_review_feedback(
         self, task_id: str, author_agent: str, decision: ReviewDecision, retry: int
-    ) -> None:
-        """Sends a high-priority feedback message to author on the bus with Gatekeeper evidence."""
+    ) -> bool:
+        """Send review feedback to the author; False if any post was rejected."""
         try:
             async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
                 # Ensure task stays in_progress and assigned to author
-                await client.post(f"/tasks/{task_id}/reassign", json={"new_owner": author_agent})
+                reassigned = await client.post(f"/tasks/{task_id}/reassign", json={"new_owner": author_agent})
+                reassigned.raise_for_status()
 
                 msg_text = (
                     f"Gatekeeper review: changes requested for task {task_id} (Attempt {retry}/{self.max_retries_per_task}).\n"
@@ -858,7 +894,7 @@ class BranchIntegrator:
                     f"Evidence: {json.dumps(decision.evidence, indent=2)}\n"
                     "Please address the review comments and update your branch."
                 )
-                await client.post(
+                sent = await client.post(
                     "/messages",
                     json={
                         "from_agent": self.agent_id,
@@ -874,6 +910,9 @@ class BranchIntegrator:
                         "related_task": task_id,
                     },
                 )
+                sent.raise_for_status()
+            return True
         except Exception as exc:
             logger.error(f"Failed to notify author {author_agent} of review feedback: {exc}")
+            return False
 

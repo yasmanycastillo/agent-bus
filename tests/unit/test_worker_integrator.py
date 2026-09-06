@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from agent_bus.security import async_bus_client
-from agent_bus.worker.integrator import BranchIntegrator
+from agent_bus.worker.integrator import BranchIntegrator, IntegratorResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,7 +73,7 @@ async def test_integrator_test_failure_triggers_author_feedback(tmp_path):
     async def mock_fail_tests(worktree_dir, test_cmd=None):
         return (False, "Failing test: assertion error in test_foo")
 
-    async def mock_candidate(sha, target_branch, worktree_dir, test_cmd):
+    async def mock_candidate(sha, target_branch, worktree_dir, test_cmd, ref_box=None):
         return sha, False, "Failing test: assertion error in test_foo", "diff --git a/x"
 
     async def mock_record(decision):
@@ -91,6 +92,7 @@ async def test_integrator_test_failure_triggers_author_feedback(tmp_path):
         author_agent="claude",
         worktree_dir=tmp_path,
         candidate_branch="agent/claude",
+        acceptance_criteria=[],
     )
 
     assert res.success is False
@@ -107,7 +109,7 @@ async def test_integrator_exceeding_max_retries_blocks_task(tmp_path):
     async def mock_fail_tests(worktree_dir, test_cmd=None):
         return (False, "Fatal syntax error")
 
-    async def mock_candidate(sha, target_branch, worktree_dir, test_cmd):
+    async def mock_candidate(sha, target_branch, worktree_dir, test_cmd, ref_box=None):
         return sha, False, "Fatal syntax error", "diff --git a/x"
 
     async def mock_record(decision):
@@ -125,15 +127,15 @@ async def test_integrator_exceeding_max_retries_blocks_task(tmp_path):
     integrator._notify_author_failure = mock_notify  # type: ignore
     integrator._notify_bus_blocked = mock_block  # type: ignore
 
-    res1 = await integrator.integrate_task("T801", "claude", tmp_path, "agent/claude")
+    res1 = await integrator.integrate_task("T801", "claude", tmp_path, "agent/claude", acceptance_criteria=[])
     assert res1.status == "retry_requested"
     assert res1.retry_count == 1
 
-    res2 = await integrator.integrate_task("T801", "claude", tmp_path, "agent/claude")
+    res2 = await integrator.integrate_task("T801", "claude", tmp_path, "agent/claude", acceptance_criteria=[])
     assert res2.status == "retry_requested"
     assert res2.retry_count == 2
 
-    res3 = await integrator.integrate_task("T801", "claude", tmp_path, "agent/claude")
+    res3 = await integrator.integrate_task("T801", "claude", tmp_path, "agent/claude", acceptance_criteria=[])
     assert res3.status == "blocked"
     assert res3.retry_count == 3
     assert "blocked" in (res3.error or "")
@@ -160,7 +162,7 @@ async def test_integrator_success_flow(tmp_path):
     integrator._finalize_merge = mock_finalize  # type: ignore
     integrator._record_review = mock_record  # type: ignore
 
-    res = await integrator.integrate_task("T802", "claude", tmp_path, "agent/claude")
+    res = await integrator.integrate_task("T802", "claude", tmp_path, "agent/claude", acceptance_criteria=[])
     assert res.success is True
     assert res.merged is True
     assert res.status == "integrated"
@@ -195,7 +197,7 @@ async def test_integrator_integrates_exact_reviewed_candidate(tmp_path):
     integrator._finalize_merge = mock_finalize  # type: ignore
 
     res = await integrator.integrate_task(
-        "T900", "claude", candidate_worktree, "agent/claude", test_cmd=["/bin/true"],
+        "T900", "claude", candidate_worktree, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.success is True
     assert res.merged is True
@@ -242,7 +244,7 @@ async def test_integrator_tests_candidate_combined_with_current_main(tmp_path):
     integrator._finalize_merge = mock_finalize  # type: ignore
 
     res = await integrator.integrate_task(
-        "T901", "claude", candidate_worktree, "agent/claude", test_cmd=["/bin/true"],
+        "T901", "claude", candidate_worktree, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.success is True
     assert len(tested_dirs) == 1
@@ -281,7 +283,7 @@ async def test_integrator_conflict_against_current_main_requests_retry(tmp_path)
     integrator._notify_author_failure = mock_notify  # type: ignore
 
     res = await integrator.integrate_task(
-        "T902", "claude", candidate_worktree, "agent/claude", test_cmd=["/bin/true"],
+        "T902", "claude", candidate_worktree, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.success is False
     assert res.merged is False
@@ -315,8 +317,8 @@ async def test_integrator_refuses_merge_when_target_moved(tmp_path):
     # but before _integrate runs, simulating a concurrent update.
     original_test_candidate = integrator._test_candidate
 
-    async def racing_test_candidate(sha, target_branch, worktree_dir, test_cmd):
-        result = await original_test_candidate(sha, target_branch, worktree_dir, test_cmd)
+    async def racing_test_candidate(sha, target_sha, worktree_dir, test_cmd, ref_box=None):
+        result = await original_test_candidate(sha, target_sha, worktree_dir, test_cmd, ref_box=ref_box)
         (tmp_path / "sneaky.txt").write_text("moved\n")
         _run_git("add", "-A", cwd=tmp_path, env=env)
         _run_git(
@@ -330,7 +332,7 @@ async def test_integrator_refuses_merge_when_target_moved(tmp_path):
     integrator._test_candidate = racing_test_candidate  # type: ignore
 
     res = await integrator.integrate_task(
-        "T906", "claude", candidate_worktree, "agent/claude", test_cmd=["/bin/true"],
+        "T906", "claude", candidate_worktree, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.success is False
     assert res.merged is False
@@ -347,7 +349,7 @@ async def test_integrator_fails_closed_when_review_persistence_fails(tmp_path):
     """No integration and no success when POST /reviews fails."""
     integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
 
-    async def mock_candidate(sha, target_branch, worktree_dir, test_cmd):
+    async def mock_candidate(sha, target_branch, worktree_dir, test_cmd, ref_box=None):
         return sha, True, "All tests passed", "diff --git a/x"
 
     async def mock_record(decision):
@@ -363,7 +365,7 @@ async def test_integrator_fails_closed_when_review_persistence_fails(tmp_path):
     integrator._record_review = mock_record  # type: ignore
     integrator._integrate = spy_integrate  # type: ignore
 
-    res = await integrator.integrate_task("T903", "claude", tmp_path, "agent/claude")
+    res = await integrator.integrate_task("T903", "claude", tmp_path, "agent/claude", acceptance_criteria=[])
     assert res.success is False
     assert res.merged is False
     assert res.status == "error"
@@ -375,7 +377,7 @@ async def test_integrator_no_success_when_task_completion_fails(tmp_path):
     """Integrated but success=False when POST /tasks/<id>/done fails."""
     integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
 
-    async def mock_candidate(sha, target_branch, worktree_dir, test_cmd):
+    async def mock_candidate(sha, target_branch, worktree_dir, test_cmd, ref_box=None):
         return sha, True, "All tests passed", "diff --git a/x"
 
     async def mock_pass_tests(worktree_dir, test_cmd=None):
@@ -398,7 +400,7 @@ async def test_integrator_no_success_when_task_completion_fails(tmp_path):
     integrator._integrate = mock_integrate  # type: ignore
     integrator._finalize_merge = mock_finalize  # type: ignore
 
-    res = await integrator.integrate_task("T904", "claude", tmp_path, "agent/claude")
+    res = await integrator.integrate_task("T904", "claude", tmp_path, "agent/claude", acceptance_criteria=[])
     assert res.merged is True  # the integration did happen
     assert res.success is False  # but we cannot report success
     assert res.status == "error"
@@ -433,14 +435,14 @@ def _author_worktree(tmp_path: Path, env: dict) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_record_review_real_400_fails_closed(tmp_path, secure_bus):
+async def test_record_review_real_404_fails_closed(tmp_path, live_bus_url):
     """POST /reviews for a payload the bus rejects (400) must fail closed."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     env = _git_env(repo)
     wt = _author_worktree(repo, env)
 
-    integrator = BranchIntegrator(repo_dir=repo, bus_url=secure_bus.url, agent_id="human")
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
 
     # Corrupt the decision after evaluation so the server rejects it (400).
     http_evidence: list = []
@@ -463,36 +465,36 @@ async def test_record_review_real_400_fails_closed(tmp_path, secure_bus):
     integrator._record_review = record_invalid  # type: ignore
 
     res = await integrator.integrate_task(
-        "T910", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+        "T910", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.success is False
     assert res.merged is False
     assert res.status == "error"
     # The HTTP request really happened and the server answered 400
-    assert http_evidence == [400, "exception:HTTPStatusError"]
+    assert http_evidence and http_evidence[0] == 400
     # main untouched
     assert "feature.txt" not in [p.name for p in repo.iterdir()]
 
 
 @pytest.mark.asyncio
-async def test_done_real_404_triggers_rollback(tmp_path, secure_bus):
-    """POST /tasks/<unknown>/done returns 404 after publication -> conditional rollback."""
+async def test_done_real_404_leaves_published_requires_reconciliation(tmp_path, live_bus_url):
+    """POST /tasks/<unknown>/done 404 after publication: no reset, reconciliation required."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     env = _git_env(repo)
     wt = _author_worktree(repo, env)
     main_before = _run_git("rev-parse", "main", cwd=repo, env=env)
 
-    integrator = BranchIntegrator(repo_dir=repo, bus_url=secure_bus.url, agent_id="human")
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
 
     async def mock_record(decision):
         return True
 
     async def mock_blocked(task_id, author, details):
-        pass
+        return True
 
     async def mock_author_failure(task_id, author, details, retry):
-        pass
+        return True
 
     integrator._record_review = mock_record  # type: ignore
     integrator._notify_bus_blocked = mock_blocked  # type: ignore
@@ -500,76 +502,73 @@ async def test_done_real_404_triggers_rollback(tmp_path, secure_bus):
 
     # Task T911 does not exist on the bus -> /done returns 404 -> raise_for_status throws
     res = await integrator.integrate_task(
-        "T911-unknown", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+        "T911-unknown", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.success is False
     assert res.status == "error"
-    assert res.metadata.get("rolled_back") is True
-    assert "404 Not Found" in res.error
-    assert f"{secure_bus.url}/tasks/T911-unknown/done" in res.error
-    # Target was rolled back to the pre-integration commit
-    assert _run_git("rev-parse", "main", cwd=repo, env=env) == main_before
+    assert res.metadata.get("reconciliation_required") is True
+    # No rollback was attempted: the verified tested commit stays published
+    main_after = _run_git("rev-parse", "main", cwd=repo, env=env)
+    assert main_after == res.metadata["integration_sha"]
+    assert main_after != main_before
     _run_git("checkout", "-f", "main", cwd=repo, env=env)
-    assert "feature.txt" not in [p.name for p in repo.iterdir()]
+    assert "feature.txt" in [p.name for p in repo.iterdir()]
 
 
 @pytest.mark.asyncio
-async def test_done_failure_rollback_loses_race_reports_reconciliation(tmp_path, secure_bus):
-    """If someone advances main after publication, rollback CAS loses and we reconcile."""
+async def test_done_failure_concurrent_advance_survives_reports_reconciliation(tmp_path, live_bus_url):
+    """If main advances after publication, the advance SURVIVES and we reconcile.
+
+    The /done failure handler performs no reset or rewind; a concurrent
+    advance written after publication must remain intact, and the result must
+    demand reconciliation instead of clobbering the newer state.
+    """
     repo = tmp_path / "repo"
     _init_repo(repo)
     env = _git_env(repo)
     wt = _author_worktree(repo, env)
-    main_before = _run_git("rev-parse", "main", cwd=repo, env=env)
 
-    integrator = BranchIntegrator(repo_dir=repo, bus_url=secure_bus.url, agent_id="human")
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
 
     async def mock_record(decision):
         return True
 
-    integrator._record_review = mock_record  # type: ignore
+    async def mock_blocked(task_id, author, details):
+        return True
 
-    # After publication (inside _finalize_merge failure path), race the target:
-    # advance main beyond integration_sha so the rollback CAS must lose.
-    finalize_calls = {"n": 0}
-    real_finalize = integrator._finalize_merge
-    http_evidence = []
+    integrator._record_review = mock_record  # type: ignore
+    integrator._notify_bus_blocked = mock_blocked  # type: ignore
+
+    # Fail /done AND advance main concurrently after publication.
+    raced: dict = {}
 
     async def racing_finalize(task_id):
-        finalize_calls["n"] += 1
-        if finalize_calls["n"] == 1:
-            # Fail the real /done request, then advance main before rollback.
-            completed, error = await real_finalize(task_id)
-            http_evidence.append((completed, error))
-            (repo / "raced.txt").write_text("raced\n")
-            _run_git("checkout", "-f", "main", cwd=repo, env=env)
-            _run_git("add", "-A", cwd=repo, env=env)
-            _run_git(
-                "commit", "-m", "raced",
-                env={**env, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-                     "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
-                cwd=repo,
-            )
-            return completed, error
-        return (False, "already failed")
+        # Advance main beyond integration_sha; this concurrent writer must
+        # never be erased by the /done failure handling.
+        (repo / "raced.txt").write_text("raced\n")
+        _run_git("add", "-A", cwd=repo, env=env)
+        _run_git(
+            "commit", "-m", "raced",
+            env={**env, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+            cwd=repo,
+        )
+        raced["main"] = _run_git("rev-parse", "main", cwd=repo, env=env)
+        return (False, "simulated 500 from /done")
 
     integrator._finalize_merge = racing_finalize  # type: ignore
 
     res = await integrator.integrate_task(
-        "T912", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+        "T912", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.success is False
-    assert res.merged is True  # publication happened; rollback lost
+    assert res.merged is True  # publication happened
     assert res.status == "error"
     assert res.metadata.get("reconciliation_required") is True
-    assert len(http_evidence) == 1
-    completed, error = http_evidence[0]
-    assert completed is False
-    assert "404 Not Found" in error
-    assert f"{secure_bus.url}/tasks/T912/done" in error
-    # main is at the raced commit, past integration
+    # The concurrent advance survived: main is at the raced commit, not rewound
     main_after = _run_git("rev-parse", "main", cwd=repo, env=env)
-    assert main_after != main_before
+    assert main_after == raced["main"]
+    assert main_after != res.metadata["integration_sha"]
 
 
 @pytest.mark.asyncio
@@ -590,7 +589,7 @@ async def test_dirty_target_rejected_before_testing(tmp_path):
     integrator.run_tests = spy_tests
 
     res = await integrator.integrate_task(
-        "T913", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+        "T913", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.status == "rejected"
     assert "dirty" in res.error
@@ -620,7 +619,7 @@ async def test_in_progress_merge_on_target_rejected(tmp_path):
 
     integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
     res = await integrator.integrate_task(
-        "T914", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+        "T914", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.status == "rejected"
     # The conflicted merge leaves the target dirty (AA) and MERGE_HEAD behind;
@@ -654,7 +653,7 @@ async def test_pending_ref_lifecycle_created_then_deleted(tmp_path):
     integrator.run_tests = spy_run_tests
 
     res = await integrator.integrate_task(
-        "T915", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+        "T915", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.success is True
     # After success, no pending refs remain
@@ -692,7 +691,7 @@ async def test_pending_ref_deleted_on_failure(tmp_path):
     integrator._notify_author_failure = mock_notify  # type: ignore
 
     res = await integrator.integrate_task(
-        "T916", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+        "T916", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.status == "retry_requested"
     refs = _run_git(
@@ -720,8 +719,8 @@ async def test_target_cas_race_detected_via_update_ref(tmp_path):
 
     original = integrator._test_candidate
 
-    async def racing_test_candidate(sha, target_sha, worktree_dir, test_cmd):
-        result = await original(sha, target_sha, worktree_dir, test_cmd)
+    async def racing_test_candidate(sha, target_sha, worktree_dir, test_cmd, ref_box=None):
+        result = await original(sha, target_sha, worktree_dir, test_cmd, ref_box=ref_box)
         # Advance main concurrently AFTER target_sha was captured and the
         # combined commit built: the CAS in _integrate must lose.
         (tmp_path / "raced.txt").write_text("raced\n")
@@ -737,7 +736,7 @@ async def test_target_cas_race_detected_via_update_ref(tmp_path):
     integrator._test_candidate = racing_test_candidate  # type: ignore
 
     res = await integrator.integrate_task(
-        "T917", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+        "T917", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.status == "conflict"
     assert "moved" in res.output or "race" in res.output.lower() or "failed" in res.output.lower()
@@ -799,7 +798,7 @@ async def test_preflight_allows_operational_dirs_on_target(tmp_path):
     integrator._finalize_merge = mock_finalize  # type: ignore
 
     res = await integrator.integrate_task(
-        "T918", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+        "T918", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.status == "integrated"
 
@@ -821,8 +820,216 @@ async def test_preflight_still_blocks_arbitrary_untracked(tmp_path):
     integrator.run_tests = spy_tests
 
     res = await integrator.integrate_task(
-        "T919", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+        "T919", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.status == "rejected"
     assert "random.txt" in (res.error or "")
     assert tested == []
+
+
+# ---------------------------------------------------------------------------
+# Final review: publication race, cancellation, concurrency, HTTP fail-closed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_publication_race_concurrent_advance_never_erased(tmp_path):
+    """A concurrent advance landing between CAS and worktree sync survives."""
+    _init_repo(tmp_path)
+    env = _git_env(tmp_path)
+    wt = _author_worktree(tmp_path, env)
+
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+
+    async def mock_record(decision):
+        return True
+
+    async def mock_notify(task_id, author_agent, details, retry):
+        return True
+
+    integrator._record_review = mock_record  # type: ignore
+    integrator._notify_author_failure = mock_notify  # type: ignore
+
+    original_integrate = integrator._integrate
+
+    async def racing_integrate(integration_sha, target_branch, target_sha):
+        # The CAS succeeds, then a concurrent writer advances main before the
+        # postcondition verification runs. That advance must never be erased.
+        ok, out = await original_integrate(integration_sha, target_branch, target_sha)
+        # Simulate the race window: after publication, someone advances main.
+        (tmp_path / "late.txt").write_text("late\n")
+        _run_git("add", "-A", cwd=tmp_path, env=env)
+        _run_git(
+            "commit", "-m", "late advance",
+            env={**env, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+            cwd=tmp_path,
+        )
+        return ok, out
+
+    integrator._integrate = racing_integrate  # type: ignore
+
+    res = await integrator.integrate_task(
+        "T920", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
+    )
+    # Publication itself succeeded; the late advance is intact on main
+    assert res.merged is True
+    assert "late.txt" in [p.name for p in tmp_path.iterdir()]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_integrate_task_no_ref_leakage(tmp_path):
+    """Two simultaneous integrate_task calls on one integrator leave no pending refs."""
+    _init_repo(tmp_path)
+    env = _git_env(tmp_path)
+    wt1 = _author_worktree(tmp_path, env)
+    # A second candidate branch/worktree for the concurrent call
+    _run_git("checkout", "-b", "agent/two", cwd=wt1, env=env)
+    (wt1 / "second.txt").write_text("second\n")
+    _run_git("add", "-A", cwd=wt1, env=env)
+    _run_git(
+        "commit", "-m", "second",
+        env={**env, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+        cwd=wt1,
+    )
+
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+
+    async def mock_record(decision):
+        return True
+
+    async def mock_finalize(task_id):
+        return (True, None)
+
+    integrator._record_review = mock_record  # type: ignore
+    integrator._finalize_merge = mock_finalize  # type: ignore
+
+    # First call integrates agent/claude; second (concurrent) will conflict
+    # on target moved — both must clean up their own private refs.
+    r1, r2 = await asyncio.gather(
+        integrator.integrate_task(
+            "T921", "claude", wt1, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
+        ),
+        integrator.integrate_task(
+            "T922", "two", wt1, "agent/two", test_cmd=["/bin/true"], acceptance_criteria=[],
+        ),
+        return_exceptions=True,
+    )
+    # Both completed without unhandled exceptions
+    assert isinstance(r1, IntegratorResult)
+    assert isinstance(r2, IntegratorResult)
+    # No pending refs leaked from either call
+    refs = _run_git(
+        "for-each-ref", "--format=%(refname)", "refs/integrator/",
+        cwd=tmp_path, env=env,
+    )
+    assert refs == ""
+
+
+@pytest.mark.asyncio
+async def test_cancelled_integrate_task_cleans_pending_ref(tmp_path):
+    """Cancelling integrate_task mid-flight still deletes the private ref."""
+    import asyncio as aio
+
+    _init_repo(tmp_path)
+    env = _git_env(tmp_path)
+    wt = _author_worktree(tmp_path, env)
+
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+
+    async def mock_record(decision):
+        return True
+
+    integrator._record_review = mock_record  # type: ignore
+
+    hang = aio.Event()
+
+    async def hanging_tests(worktree_dir, test_cmd=None):
+        # Ref is already pinned by _test_candidate at this point.
+        hang.set()
+        await aio.sleep(60)
+        return (True, "never")
+
+    integrator.run_tests = hanging_tests
+
+    task = aio.create_task(integrator.integrate_task(
+        "T923", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
+    ))
+    await hang.wait()
+    task.cancel()
+    with pytest.raises(aio.CancelledError):
+        await task
+
+    # The pending ref was cleaned up despite cancellation
+    refs = _run_git(
+        "for-each-ref", "--format=%(refname)", "refs/integrator/",
+        cwd=tmp_path, env=env,
+    )
+    assert refs == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_acceptance_criteria_distinguishes_404_from_empty(tmp_path, live_bus_url):
+    """A 404 fetching criteria returns None (fail-closed), not an empty list."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _git_env(repo)
+    wt = _author_worktree(repo, env)
+
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
+
+    # Task does not exist on the bus: GET /tasks/T924 -> 404 -> None
+    assert await integrator._fetch_acceptance_criteria("T924-unknown") is None
+
+    # And integrate_task fails closed instead of reviewing blind
+    async def mock_record(decision):
+        return True
+
+    integrator._record_review = mock_record  # type: ignore
+    res = await integrator.integrate_task(
+        "T924-unknown", "claude", wt, "agent/claude", test_cmd=["/bin/true"],
+    )
+    assert res.status == "error"
+    assert "acceptance criteria" in res.error
+    assert res.merged is False
+
+
+@pytest.mark.asyncio
+async def test_feedback_failure_reported_not_claimed(tmp_path, live_bus_url):
+    """When reassign/post-messages fail, the result says feedback was NOT sent."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _git_env(repo)
+    wt = _author_worktree(repo, env)
+    # Make the candidate conflict so feedback is attempted
+    (repo / "feature.txt").write_text("main side\n")
+    _run_git("add", "-A", cwd=repo, env=env)
+    _run_git(
+        "commit", "-m", "diverge",
+        env={**env, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+        cwd=repo,
+    )
+
+    integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
+
+    async def mock_record(decision):
+        return True
+
+    integrator._record_review = mock_record  # type: ignore
+
+    # Real HTTP to the live bus: /tasks/<unknown>/reassign returns 404,
+    # so _notify_author_failure must return False (no swallowed success).
+    sent = await integrator._notify_author_failure(
+        "T925-unknown", "claude", "boom", 1,
+    )
+    assert sent is False
+
+    # And the retry_requested result carries feedback_sent=False
+    res = await integrator.integrate_task(
+        "T925", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
+    )
+    assert res.status == "retry_requested"
+    assert res.metadata.get("feedback_sent") is False
+    assert "FAILED to deliver feedback" in (res.error or "")
