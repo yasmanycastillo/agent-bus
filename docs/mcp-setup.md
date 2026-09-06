@@ -99,7 +99,7 @@ como ese subproceso y procesar lo que devuelva.
 
 ## Alcance verificado
 
-Las pruebas de autenticación ejercitan clientes MCP en proceso contra un hub HTTP real y efímero, además de CLI, HTTP, SSE y WebSocket. La negociación stdio con dos clientes MCP externos, la espera cancelable y la recuperación de eventos siguen en T-09/T-10/T-13. Los mecanismos descritos de activación deben validarse en cada cliente; no equivalen a una prueba de interoperabilidad universal.
+Las pruebas de autenticación ejercitan clientes MCP en proceso contra un hub HTTP real y efímero, además de CLI, HTTP, SSE y WebSocket. T-09 implementa [eventos recuperables y espera con plazo total](events.md). La negociación stdio, la cancelación concurrente por JSON-RPC y la aceptación con dos clientes MCP externos siguen en T-10/T-13. Los mecanismos descritos de activación deben validarse en cada cliente; no equivalen a una prueba de interoperabilidad universal.
 
 ## Decisiones relacionadas
 

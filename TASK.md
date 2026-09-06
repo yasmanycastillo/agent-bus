@@ -25,7 +25,7 @@ T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/
 | T-06 | P0 | Autorización de operaciones | T-03, T-05 | completada | codex-policy |
 | T-07 | P1 | Contrato de decisiones | T-01; cierre de identidad: T-05/T-06 | completada | codex-integrator |
 | T-08 | P1 | Confirmación, respuestas e idempotencia | T-02, T-05, T-06 | completada | codex-integrator / codex-t08-storage / codex-t08-clients / codex-t08-workers |
-| T-09 | P1 | Eventos recuperables y espera acotada | T-08 | pendiente | — |
+| T-09 | P1 | Eventos recuperables y espera acotada | T-08 | completada | codex-integrator / codex-t09-storage / codex-t09-server / codex-t09-clients |
 | T-10 | P1 | SDK MCP y pruebas stdio | T-05, T-07, T-08, T-09 | pendiente | — |
 | T-11 | P1 | Aislamiento por proyecto y sesión | T-05, T-06 | pendiente | — |
 | T-12 | P1 | Renovación y alcance de locks | T-04, T-11 | pendiente | — |
@@ -117,11 +117,11 @@ Agregar operaciones equivalentes a `read_messages(cursor, limit)`, `ack_messages
 
 Persistir secuencia/cursor de eventos y usar SSE como señal. Cerrar la ventana entre consulta y suscripción. Definir retención y recuperación de un cursor vencido.
 
-- [ ] Un evento que llega entre lectura y suscripción se recupera.
-- [ ] Desconexión y reinicio no pierden entregas pendientes.
-- [ ] `wait_for_updates` termina en su plazo total incluso recibiendo keepalives.
-- [ ] Un cliente lento no produce crecimiento ilimitado de colas.
-- [ ] Cursor inválido/vencido, stream cerrado y bus caído tienen respuestas documentadas.
+- [x] Un evento que llega entre lectura y suscripción se recupera.
+- [x] Desconexión y reinicio no pierden entregas pendientes.
+- [x] `wait_for_updates` termina en su plazo total incluso recibiendo keepalives.
+- [x] Un cliente lento no produce crecimiento ilimitado de colas.
+- [x] Cursor inválido/vencido, stream cerrado y bus caído tienen respuestas documentadas.
 
 ## T-10 — SDK MCP y transporte stdio
 
@@ -217,4 +217,21 @@ Validación final: **374 passed**, dos avisos de deprecación WebSocket, en **65
 
 Garantías delimitadas: conservar la clave al reintentar; HTTP sin clave sigue como compatibilidad; la retención de un padre limita respuestas posteriores; múltiples procesos de una misma identidad todavía requieren T-11. La idempotencia del envío no hace exactamente una vez los efectos externos del runner. Los tests no sustituyen T-13 con dos clientes MCP externos.
 
-**Siguiente tarea: T-09**, eventos recuperables y espera con plazo total acotado. El hub de coordinación previo conserva su proceso anterior; no se detuvieron listeners ni se migró ese servicio durante esta implementación.
+**Al cerrar T-08, siguiente tarea: T-09**, completada en el registro siguiente. El hub de coordinación previo conserva su proceso anterior; no se detuvieron listeners ni se migró ese servicio durante esta implementación.
+
+
+## Registro de T-09
+
+Completada el 2026-09-06 con subagentes y worktrees separados; integración manual a `main` tras verificar el código combinado. Antes de comenzar, T-08 se publicó en `origin/main` hasta `063ce22`.
+
+- `ea80a5c` (origen `2923754`): parser SSE compartido, cursores y reconexión autenticada de worker/panel; pruebas de JavaScript ejecutadas con Node.
+- `e986f3e` (origen `157afd5`): SSE durable personal/global, checkpoints, respuestas 422/410, recuperación por reset y señales coalescidas.
+- `817e2dc` (origen `cc58511`): evento atómico con entrega, cursores firmados, retención, migración única de pendientes y protección contra recrear una entrega purgada.
+- `0ebefd8` (origen `e247b14`): no registrar un suscriptor antes de iniciar el generador; evita fugas si el transporte aborta al enviar encabezados.
+- `85773c1`: MCP captura cursor antes de consultar, aplica plazo total, distingue errores y descarta eventos históricos como trabajo nuevo; reset despierta el polling del daemon.
+
+Validación final: **446 passed**, dos avisos de deprecación WebSocket, en **96,03 s** sobre `85773c1`. Comando: `UV_PROJECT_ENVIRONMENT=/home/Yasmany/src/agent-bus/.venv PYTHONPATH=$PWD/src uv run --no-sync pytest -q`. `git diff --check` limpio. Las pruebas incluyen reinicio de SQLite/hub, entrega entre lectura y suscripción contra HTTP real, falta de aviso tras commit, clientes lentos, revocación, expiración de cursor, rollback e idempotencia, deadline con keepalives y cancelación de coroutine.
+
+La revisión cruzada corrigió el evento confirmado que acompañaba a pendientes distintos, la recreación legacy de una entrega purgada y el registro prematuro del suscriptor. Contrato y límites de retención, errores y recuperación en [events.md](docs/events.md).
+
+**Siguiente tarea: T-10**, SDK MCP y transporte stdio; la cancelación concurrente por JSON-RPC y aceptación con clientes externos siguen pendientes. El hub de coordinación previo no se reinició; los listeners permanecen activos y las pruebas usaron servicios efímeros.

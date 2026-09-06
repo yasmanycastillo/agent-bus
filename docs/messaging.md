@@ -12,7 +12,7 @@ El ciclo de mensajes usa sesiones autenticadas y una base SQLite por proyecto, s
 
 El servidor guarda el resultado y todas las entregas de un envío en una transacción. Un reintento con la misma clave devuelve el ID original y `replayed: true`. En broadcasts conserva también los destinatarios originales: no incorpora agentes registrados después ni vuelve a abrir entregas ya confirmadas. Las claves persisten entre conexiones y reinicios; renovar una sesión del mismo agente no cambia su alcance.
 
-Los avisos SSE/WebSocket se emiten después del commit, únicamente para el primer envío con clave. Si se pierde el aviso, el mensaje sigue en el inbox. El registro recuperable de eventos corresponde a T-09; no se afirma entrega exactamente una vez de eventos ni de efectos producidos por el runner.
+Los avisos SSE/WebSocket se emiten después del commit, únicamente para el primer envío con clave. Si se pierde el aviso, el mensaje sigue en el inbox. T-09 guarda el evento con la entrega y permite [reanudar SSE](events.md); no se afirma entrega exactamente una vez de eventos ni de efectos producidos por el runner.
 
 ## API HTTP
 
@@ -41,7 +41,7 @@ El estado incluye `acknowledged`, `acknowledged_at`, `attempts`, `last_error`, `
 
 El cursor está firmado, vinculado al agente y al filtro. Incluye la última secuencia leída y un límite superior fijado al comenzar el recorrido. Los mensajes nuevos quedan para un recorrido posterior; confirmar mensajes entre páginas no desplaza posiciones como ocurriría con offsets. Una entrega confirmada entretanto puede desaparecer del recorrido: el cursor no congela su estado de confirmación.
 
-Reutilizar un cursor de otro inbox, alterar su contenido o cambiar el filtro produce `422`. Al recibir `next_cursor: null`, terminar ese recorrido. Para buscar llegadas posteriores, comenzar sin cursor. Los límites temporales y cursores de eventos SSE son otro contrato, pendiente de T-09.
+Reutilizar un cursor de otro inbox, alterar su contenido o cambiar el filtro produce `422`. Al recibir `next_cursor: null`, terminar ese recorrido. Para buscar llegadas posteriores, comenzar sin cursor. Los límites temporales y cursores de eventos SSE tienen [un contrato separado](events.md).
 
 ## MCP
 
@@ -56,7 +56,7 @@ ack_messages(message_ids=["OTRO_ID_RECIBIDO"])
 
 Guardar la clave de la operación antes de llamar a `post_message` o `reply_message` y conservarla si se pierde la respuesta. Generar otra clave en cada reintento crea otra operación.
 
-**Cambio de contrato:** `read_messages` devuelve un objeto con `messages` y `next_cursor`, en lugar de una lista. Las claves son obligatorias en las herramientas MCP de envío/respuesta. `wait_for_updates` devuelve como máximo cinco mensajes pendientes y el cursor correspondiente; los confirmados dejan de aparecer como pendientes. La espera total cancelable y la migración al SDK siguen en T-09/T-10.
+**Cambio de contrato:** `read_messages` devuelve un objeto con `messages` y `next_cursor`, en lugar de una lista. Las claves son obligatorias en las herramientas MCP de envío/respuesta. `wait_for_updates` devuelve como máximo cinco mensajes pendientes y el cursor correspondiente; los confirmados dejan de aparecer como pendientes. La espera tiene un plazo total de 1 a 120 segundos y un event_cursor separado; la migración al SDK y cancelación por stdio siguen en T-10.
 
 ## CLI
 
@@ -84,6 +84,6 @@ Esto no proporciona exclusión entre varios procesos del mismo agente ni recuper
 
 La migración conserva las columnas históricas, el archivo y los índices del inbox; añade conversación, secuencias por entrega, estados de fallo y registros de idempotencia. Las secuencias no se reciclan. La ruta antigua `GET /inbox/{agent}` se mantiene como lista completa por compatibilidad; los clientes actualizados usan páginas. Los envíos HTTP sin clave siguen admitidos por compatibilidad y no tienen garantía de idempotencia de request.
 
-Los registros de idempotencia y de secuencias sobreviven a la limpieza de entregas confirmadas, para no volver a entregar un envío antiguo. Esa conservación incluye el resultado del envío; no constituye una política de eliminación completa de datos. Si la limpieza ya eliminó el mensaje padre de una respuesta, `/reply` devuelve `404`, incluso al intentar repetir esa respuesta. La retención integral debe concretarse con T-09/T-11.
+Los registros de idempotencia y de secuencias sobreviven a la limpieza de entregas confirmadas, para no volver a entregar un envío antiguo. Esa conservación incluye el resultado del envío; no constituye una política de eliminación completa de datos. Si la limpieza ya eliminó el mensaje padre de una respuesta, `/reply` devuelve `404`, incluso al intentar repetir esa respuesta. La retención de eventos está definida en [events.md](events.md); la política integral de datos sigue pendiente.
 
 Las pruebas usan bases y hubs efímeros, sesiones provisionadas, clientes MCP en proceso y runners controlados. No equivalen todavía a la aceptación de dos clientes MCP externos por stdio (T-13).

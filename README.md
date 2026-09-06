@@ -84,7 +84,7 @@ flowchart TD
 
 | Herramienta | Descripción |
 | :--- | :--- |
-| `wait_for_updates(timeout)` | **Long-poll reactivo**: bloquea la sesión en espera de eventos SSE del bus sin gastar tokens hasta que otro agente envíe un mensaje |
+| `wait_for_updates(timeout, event_cursor?)` | Devuelve pendientes o espera eventos recuperables con plazo total de 1–120 s; [cursores y recuperación](docs/events.md) |
 | `post_message(to_agent, text, idempotency_key, ...)` | Envía mensajes directos o respuestas a otros agentes |
 | `read_messages(cursor, limit)` | Consulta una página pendiente sin confirmar su lectura |
 | `ack_messages(message_ids)` | Confirma explícitamente entregas procesadas |

@@ -1,6 +1,6 @@
 # Contexto del proyecto agent-bus
 
-Actualizado: 2026-09-05, America/Santo_Domingo.
+Actualizado: 2026-09-06, America/Santo_Domingo.
 
 ## Objetivo
 
@@ -62,7 +62,7 @@ Worktrees de la tanda: `codex-security`, `codex-policy`, `codex-clients` e integ
 
 ## T-08 implementada: ciclo completo de mensajes
 
-Validación actual: **374 pruebas aprobadas** en 65,92 s sobre `a774a8c`, con dos avisos de deprecación WebSocket. Contratos, ejemplos y migración en [messaging.md](docs/messaging.md). Siguiente tarea: **T-09**.
+Validación de T-08: **374 pruebas aprobadas** en 65,92 s sobre `a774a8c`, con dos avisos de deprecación WebSocket. Contratos, ejemplos y migración en [messaging.md](docs/messaging.md). T-09 se describe a continuación.
 
 - Un mensaje lógico tiene ID, conversación y correlación con el mensaje al que responde. Cada destinatario tiene una entrega independiente, con secuencia durable, confirmación e historial de fallos.
 - Envíos con clave se deduplican por remitente y contenido en SQLite. Broadcast congela destinatarios; reintentar no abre una entrega confirmada. La clave debe conservarse en el cliente.
@@ -71,9 +71,24 @@ Validación actual: **374 pruebas aprobadas** en 65,92 s sobre `a774a8c`, con do
 - Worker/watcher usan almacenamiento como fuente de pendientes y SSE como aviso. Un fallo conserva la entrega y registra error; un éxito guarda respuesta+ack. Claude `is_error` con exit0 no es éxito; cancelar recoge el subproceso directo.
 - Retención: se conservan secuencias y registros de idempotencia aunque se limpien entregas confirmadas; responder requiere que el padre siga disponible. HTTP sin clave es compatibilidad, sin garantía de idempotencia de request.
 
-No hay ejecución exactamente una vez de efectos externos ni exclusión entre procesos del mismo agente (T-11/T-14). La espera MCP sigue pendiente del plazo total/cancelación y recuperación de eventos de T-09/T-10. La aceptación con clientes MCP externos por stdio sigue en T-13.
+No hay ejecución exactamente una vez de efectos externos ni exclusión entre procesos del mismo agente (T-11/T-14). T-09 incorpora plazo total y recuperación; la cancelación concurrente por JSON-RPC/stdio sigue en T-10. La aceptación con clientes MCP externos por stdio sigue en T-13.
 
 Worktrees: `codex-t08-storage`, `codex-t08-clients`, `codex-t08-workers` e integrador. Se integran commits revisados manualmente a `main`; los listeners permanecen activos y el hub de coordinación previo no se reinició.
+
+## T-09: eventos recuperables y espera acotada
+
+Validación combinada: **446 pruebas aprobadas** en **96,03 s** sobre `85773c1`, con dos avisos de deprecación WebSocket. T-08 se publicó en `origin/main` hasta `063ce22` antes de iniciar esta tanda. Contrato de T-09 en [events.md](docs/events.md). Próxima tarea: **T-10**, SDK MCP y transporte stdio.
+
+- Cada entrega y su evento se guardan atómicamente. Hay secuencia global durable, cursores firmados por ámbito y migración de pendientes una sola vez. Un mensaje eliminado conserva su marca de entrega y no se puede recrear mediante un envío legacy con el mismo ID.
+- Retención global de eventos: siete días o 10 000 registros; no elimina pendientes. Un cursor vencido devuelve un cursor nuevo y exige recorrer el inbox. El tráfico de otros agentes también puede hacer vencer un cursor personal.
+- Rutas personales canónicas: `/inbox/{agent}/events/cursor` y `/inbox/{agent}/events`. Feed global administrativo: `/events/all`. Cursor de eventos e inbox son contratos diferentes.
+- SSE reproduce desde SQLite en lotes de 50 con una señal coalescida por conexión y polling cada segundo. Se revalida la sesión y se limita a diez segundos la escritura bloqueada. La consulta serializa con el escritor SQLite; medir contención antes de escalar conexiones.
+- MCP captura cursor antes de consultar pendientes, cierra la ventana de suscripción y usa un plazo total de 1–120 segundos. Devuelve códigos explícitos para cursor, conexión, autenticación y protocolo. Un evento histórico confirmado no se presenta como trabajo nuevo.
+- Worker y panel guardan el cursor en memoria al reconectar, procesan checkpoints/reset y recuperan pendientes. El parser SSE compartido tiene framing multilínea, límite de frame y cesión al event loop para mantener cancelación/plazos.
+
+La cancelación de la coroutine está comprobada; el transporte stdio actual aún procesa secuencialmente y requiere T-10. La aceptación con clientes MCP externos y navegador completo sigue en T-13. Los listeners se mantienen activos y el hub de coordinación previo conserva su proceso anterior: integrar código no migra ese servicio.
+
+Worktrees: `codex-t09-storage`, `codex-t09-server`, `codex-t09-clients` e integrador. Ver el registro de TASK.md para commits y validación combinada final.
 
 ## Orientación acordada para el trabajo
 
@@ -95,6 +110,7 @@ El esquema definitivo de entregas, las versiones del SDK y los dos clientes inic
 | --- | --- |
 | Servidor MCP y contratos de herramientas | `src/agent_bus/mcp/server.py` |
 | HTTP, SSE, WebSocket y panel | `src/agent_bus/core/bus.py` |
+| Historial de eventos y parser SSE | `src/agent_bus/core/{events,sse}.py` |
 | Inbox, tareas y locks | `src/agent_bus/core/{inbox,tasks,locks}.py` |
 | Esquema y conexión SQLite | `src/agent_bus/reputation/database.py` |
 | Sesiones y provisión local | `src/agent_bus/security.py`, `src/agent_bus/cli/auth_cmds.py` |
