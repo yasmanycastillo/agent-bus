@@ -1,14 +1,7 @@
-"""Comando `agent-bus watch` — despierta una sesión interactiva del agente.
+"""Receive requests and execute headless reply turns; does not inject a TUI turn.
 
-Caso de uso original del proyecto: una sesión de Claude Code (u otra CLI)
-viva recibe mensajes de otros agentes por el bus y los responde sin que el
-humano retransmita nada terminal por terminal.
-
-Mecanismo (doc, sección 4.3): los mensajes con ``reply_needed`` llevan un
-``thread_id``; el watcher mantiene el mapping ``thread_id → session_id``
-del CLI y ejecuta ``claude --resume <session_id> -p "<prompt>"`` para
-continuar el hilo conversacional. Sesiones nuevas arrancan con ``-p`` fresco
-y su session_id se registra para los siguientes turnos del hilo.
+Codex uses its native JSONL adapter and persists conversation -> CLI session.
+The watcher owns transport and acknowledgement; the model returns reply text.
 """
 
 from __future__ import annotations
@@ -24,7 +17,6 @@ from pathlib import Path
 from contextlib import nullcontext
 
 import click
-import httpx
 
 from agent_bus.security import async_bus_client
 
@@ -58,7 +50,9 @@ def load_session_map(path: Path | None = None) -> dict[str, str]:
 def save_session_map(mapping: dict[str, str], path: Path | None = None) -> None:
     path = path or _session_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(mapping, indent=1))
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(mapping, indent=1))
+    temporary.replace(path)
 
 
 def extract_session_id(output: str) -> str | None:
@@ -95,6 +89,8 @@ def build_prompt(message: dict) -> str:
         f"El agente '{sender}' te escribió por agent-bus{task_note}: \"{text}\"\n"
         "Devuelve tu respuesta como texto final. El watcher la enviará y confirmará el mensaje. "
         "No envíes ni confirmes el mensaje por CLI o MCP.\n"
+        "El listener de esta identidad ya está activo en el proceso padre; no arranques otro. "
+        "Este turno es de consulta: lee el proyecto si hace falta y responde sin modificar archivos.\n"
     )
 
 
@@ -155,16 +151,33 @@ async def run_turn(
             message = response.json()
             if message.get("acknowledged"):
                 return None
+            if message.get("attempts", 0) >= 5:
+                # Durable count survives watcher restarts. Leave the delivery
+                # visible instead of invoking a broken provider indefinitely.
+                return None
             thread_id = (message.get("conversation_id") or (message.get("metadata") or {}).get("thread_id")
                          or message_id)
             session_id = session_map.get(thread_id)
-            binary = shutil.which(cli)
-            if not binary:
-                raise RuntimeError(f"CLI '{cli}' not found in PATH")
-            cmd = [binary, "-p", build_prompt(message), "--output-format", "json"]
-            if session_id:
-                cmd.extend(["--resume", session_id])
-            result = await _run_cli(cmd, agent_id, bus_url=bus_url)
+            if cli == "codex":
+                from agent_bus.worker.runner import AgentRunner
+                runner = AgentRunner(agent_id, provider="codex", bus_url=bus_url,
+                                     sandbox_mode="read-only")
+                runner.session_map = dict(session_map)
+                turn = await runner.execute_turn(build_prompt(message), thread_id=thread_id,
+                                                 timeout_seconds=300)
+                if not turn.success:
+                    raise RuntimeError(turn.error or "Codex turn failed")
+                result = subprocess.CompletedProcess([], 0, json.dumps({
+                    "result": turn.output, "session_id": turn.session_id,
+                }), "")
+            else:
+                binary = shutil.which(cli)
+                if not binary:
+                    raise RuntimeError(f"CLI '{cli}' not found in PATH")
+                cmd = [binary, "-p", build_prompt(message), "--output-format", "json"]
+                if session_id:
+                    cmd.extend(["--resume", session_id])
+                result = await _run_cli(cmd, agent_id, bus_url=bus_url)
             if result.returncode != 0:
                 raise RuntimeError(f"CLI turn failed ({result.returncode}): {result.stderr[:200]}")
             try:
@@ -196,6 +209,7 @@ async def run_turn(
             )
             response.raise_for_status()
             logger.info("Reply delivered and message acknowledged: %s", message_id)
+            click.echo(f"Reply delivered and acknowledged: {message_id}")
             return new_session or session_id
         except asyncio.CancelledError:
             await asyncio.shield(_record_failure(client, agent_id, message_id, "CLI turn cancelled"))
@@ -279,7 +293,7 @@ class PendingMessageWatcher:
 @click.option("--dry-run", is_flag=True, help="Solo mostrar qué se ejecutaría")
 @click.option("--once", is_flag=True, help="Procesar un solo mensaje pendiente y salir")
 def watch(agent_id: str | None, cli: str, bus_url: str | None, dry_run: bool, once: bool):
-    """Escuchar el bus y despertar la sesión interactiva ante mensajes que requieren respuesta."""
+    """Escuchar solicitudes y responder con turnos headless; no inyecta en una TUI."""
     from agent_bus.cli.display import get_current_agent
 
     if agent_id is None:

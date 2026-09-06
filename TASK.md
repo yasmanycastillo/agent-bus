@@ -34,7 +34,7 @@ T-01 habilita validaciones reproducibles. T-01 a T-15 estabilizan el core; T-16 
 | T-15 | P2 | Integración Git verificada | T-14 | completada | codex-integrator / codex-t15-integrator |
 | T-16 | P1 | Piloto real de operación end-to-end | T-15 | completada | codex-integrator |
 | T-17 | P1 | Contrato de tareas, dependencias y DAG | T-16 | completada | codex-t17-dag |
-| T-18 | P1 | HermesOrchestrator y salidas estructuradas | T-17 | completada | codex-t18-hermes |
+| T-18 | P1 | HermesOrchestrator HTTP y conexión de Hermes Agent | T-17 | completada (publicación mediante puente validado) | codex |
 | T-19 | P1 | Gatekeeper de revisión y autorización de merge | T-17 | completada | codex-t19-gatekeeper |
 | T-20 | P1 | Cuotas, presupuesto y métricas de consumo | T-16 | pendiente | — |
 | T-21 | P1 | Consola local React integrada | T-16 | pendiente | — |
@@ -241,13 +241,60 @@ Se implementó el contrato enriquecido de tareas, soporte para grafos acíclicos
 
 Validación: **613 passed**, 2 warnings en 153,15 s con `uv run pytest -q`.
 
-## T-18 — HermesOrchestrator y salidas estructuradas
+## T-18 — HermesOrchestrator HTTP y conexión de Hermes Agent
 
-Crear un adaptador configurable para endpoints OpenAI-compatible, vLLM, Ollama y OpenRouter. Hermes debe ser reemplazable y no una dependencia del bus.
+El adaptador `HermesOrchestrator` implementado consume endpoints de inferencia OpenAI-compatible, vLLM, Ollama y OpenRouter. Su nombre no implica integración con la aplicación Hermes Agent ni invocación del CLI `hermes`. El modelo y el cliente deben ser reemplazables, sin convertirse en dependencias del núcleo.
+
+Corrección de alcance (2026-09-06): Hermes Agent v0.21.0 está instalado localmente, pero su conexión al bus y su aceptación real siguen pendientes. Se conserva la evidencia del adaptador HTTP; se reabre T-18 para incluir la aplicación que se utilizará localmente.
 
 - [x] La configuración no contiene secretos en Git.
 - [x] El desglose exige JSON Schema validado antes de publicar tareas.
 - [x] Un fallo de inferencia deja el objetivo pendiente o bloqueado con motivo observable.
+- [x] Configurar Hermes Agent como cliente MCP del bus con identidad y credencial propias del proyecto.
+- [x] Validar con Hermes Agent real descubrimiento, envío, lectura, respuesta y ACK, sin retransmisión humana; registrar versión y evidencia sin secretos.
+- [x] Validar un desglose con dependencias publicado de forma idempotente y documentar el mecanismo de ejecución/continuación usado por Hermes Agent.
+
+La evidencia siguiente usa inferencia HTTP simulada; no acredita estos criterios de aceptación con Hermes Agent.
+
+### Aceptación Hermes Agent — 2026-09-06
+
+Completada con Hermes Agent v0.21.0 / gpt-5.6-sol: conexión MCP local guardada,
+identidad propia `hermes` con rol agente, 12 herramientas descubiertas y mensaje
+real recibido y confirmado por Codex. La corrida aislada verificó dos turnos con
+el mismo ID, recuperación de contexto tras desconexión, cuatro entregas con ACK,
+repetición idéntica de respuesta y dos tareas con dependencia sin duplicación al
+publicar dos veces. La publicación usa el puente Python validado hacia
+`/tasks/batch`; el MCP no expone creación de desgloses. No incluye worker Hermes
+ni ejecución/merge de las tareas.
+
+Guía y límites: [hermes-agent.md](docs/hermes-agent.md). Harness optativo:
+`scripts/acceptance_hermes.py`; auditoría offline aprobada sobre los artefactos
+reales, tras corregir la consulta final `archived` del resumen. Evidencia:
+[t18-hermes.json](docs/evidence/t18-hermes.json). No se volvió a ejecutar la
+suite completa ni se presenta la cifra histórica de 639 como validación nueva.
+
+Validación dirigida: **26 passed en 1,25 s** con `uv run pytest -q
+tests/unit/test_orchestrator.py tests/integration/test_orchestrator_integration.py`.
+Ruff (`F,E9`) del harness y `git diff --check` limpios.
+
+### Cierre operativo: respuesta automática Hermes → Codex
+
+La aceptación anterior no cubría activación por mensaje entrante. Corregido el
+watcher: Codex usa su adaptador nativo y se interpreta JSONL para extraer respuesta
+y sesión; se rechazan fallos o turnos incompletos antes de responder/confirmar.
+Persistencia atómica de sesiones, consulta de intentos durables con límite de
+cinco y ejecución de consultas Codex en sandbox `read-only`.
+
+Prueba real sin revisión manual del inbox: Hermes publica una solicitud,
+`watch --agent codex --cli codex` ejecuta el turno, envía respuesta con ACK y
+Hermes la recibe y confirma mediante MCP. Dos entregas archivadas, cero fallos.
+El receptor queda activo; es una sesión headless, no una inyección en la TUI.
+[Guía](docs/hermes-agent.md) y [evidencia](docs/evidence/t18-auto-reply.json).
+
+Validación: **23 pruebas dirigidas** y **660 passed**, dos warnings de WebSocket,
+en **151,02 s** con `uv run pytest -q`. Incluye regresiones de JSONL inválido,
+fallo con exit code cero, respuesta incompleta, reanudación desde archivo,
+mensaje ya confirmado y límite durable de reintentos.
 
 ### Registro de T-18
 

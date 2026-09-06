@@ -209,9 +209,24 @@ Completada e integrada en `main`. Suite completa: **613 pruebas aprobadas** en *
 - `WorkerDaemon` consulta exclusivamente tareas desbloqueadas (`ready_only=true`). Intentos de reclamo sobre tareas bloqueadas son rechazados con 409 Conflict.
 - Dashboard (`generate_dashboard_renderable`, `print_tasks_table`, CLI `agent-bus top`, `agent-bus show tasks`) muestra columnas `Depends On` e indicador visual `[blocked]`.
 
-## T-18: HermesOrchestrator y salidas estructuradas
+## T-18: adaptador HTTP y Hermes Agent conectados
 
-Completada e integrada en `main`. Suite completa: **639 pruebas aprobadas** en **152,02 s**, dos avisos de deprecación WebSocket (`uv run pytest -q`).
+El adaptador HTTP está integrado en `main`. Evidencia histórica: **639 pruebas aprobadas** en **152,02 s**, dos avisos de deprecación WebSocket (`uv run pytest -q`). Esto no acredita una ejecución con Hermes Agent real.
+
+Corrección de alcance del 2026-09-06: la instalación local es **Hermes Agent v0.21.0**, una aplicación con CLI `hermes`. `HermesOrchestrator` consume inferencia HTTP y no invoca esa aplicación. T-18 queda pendiente de conectar Hermes Agent por MCP con credencial propia y verificar comunicación y desglose idempotente reales; los criterios están en TASK.md.
+
+Actualización posterior del mismo día: conexión MCP guardada y aceptación real
+completada con gpt-5.6-sol, dos turnos y reanudación con contexto, cuatro entregas
+confirmadas y plan de dos tareas publicado dos veces sin duplicación. Publicación
+mediante puente Python validado hacia `/tasks/batch`, no herramienta MCP de
+creación ni worker Hermes. [Guía y evidencia](docs/hermes-agent.md).
+
+Activación por mensaje verificada posteriormente: `watch --agent codex --cli codex`
+responde automáticamente solicitudes `reply_needed` usando el adaptador nativo
+Codex con JSONL validado y sandbox de lectura. Hermes recibió y confirmó la
+respuesta sin pedir al humano que revisara el inbox. El receptor headless tiene
+su propia sesión persistida; no inyecta turnos en una TUI abierta. La suite pasó
+**660 pruebas** en 151,02 s. Estado operativo y límites en la guía anterior.
 
 - Configuración desacoplada y libre de secretos en Git (`OrchestratorConfig` en `src/agent_bus/orchestrator/config.py`): soporte multi-proveedor para OpenAI, vLLM, Ollama, OpenRouter y endpoints personalizados. Extracción dinámica de claves API desde variables de entorno y rechazo estricto de secretos en archivos versionados (`is_tracked_by_git`). Reglas `.gitignore` reforzadas (`.env`, `*.env`, `.env.*`, `*secret*`, `*.secret`).
 - Cliente de inferencia asíncrono (`InferenceClient` en `src/agent_bus/orchestrator/client.py`) con soporte para llamadas de chat completions con modo JSON y structured outputs vía `httpx.AsyncClient`.

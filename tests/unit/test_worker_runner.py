@@ -93,7 +93,11 @@ async def test_codex_uses_native_exec_and_resume(monkeypatch, tmp_path):
 
     async def fake_subprocess(cmd, timeout, thread_id=None):
         calls.append(cmd)
-        return RunnerResult(True, '{"session_id":"sid-1"}', session_id="sid-1")
+        return RunnerResult(True, '\n'.join([
+            '{"type":"thread.started","thread_id":"sid-1"}',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"Answer"}}',
+            '{"type":"turn.completed"}',
+        ]))
 
     runner = AgentRunner("codex", provider="codex", model="gpt-test", session_file=tmp_path / "sessions.json")
     monkeypatch.setattr(runner, "_run_subprocess", fake_subprocess)

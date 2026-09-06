@@ -1,0 +1,30 @@
+{
+  "client": "Hermes Agent v0.21.0 (2026.8.31) \u00b7 upstream 14ca27fa",
+  "model": "gpt-5.6-sol",
+  "turns": [
+    {
+      "session_id": "20260906_124258_146eb9",
+      "sha256": "6dea001f9058471d55b5c7a29603ecea04e3954bcf67856d7701903798a29bbf"
+    },
+    {
+      "session_id": "20260906_124258_146eb9",
+      "sha256": "74a6cd110363f644f8e8f0af9b9096a43bf7f2be2321b8f049ce45821b549c83"
+    }
+  ],
+  "deliveries": 4,
+  "pending": 0,
+  "tasks": 2,
+  "statuses": [
+    "blocked",
+    "pending"
+  ],
+  "identical_reply_replay": true,
+  "batch_requests": 2,
+  "resume_same_session": true,
+  "remembered_marker": true,
+  "tool_names": [
+    "mcp__agent_bus__read_messages",
+    "mcp__agent_bus__reply_message"
+  ],
+  "publication": "validated Python bridge to POST /tasks/batch"
+}

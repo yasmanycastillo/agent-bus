@@ -1,0 +1,40 @@
+{
+  "date": "2026-09-06",
+  "flow": "Hermes MCP request -> automatic Codex watcher -> reply+ACK -> Hermes MCP ACK",
+  "watcher_command": "agent-bus watch --agent codex --cli codex",
+  "codex_sandbox": "read-only",
+  "codex_session_id": "01a077ae-81d8-7af0-b544-6b0715f4b588",
+  "hermes_session_id": "20260906_130508_dbf895",
+  "deliveries": [
+    {
+      "message_id": "46953181-b4cb-4bb7-91f8-3206f9ba55f9",
+      "from_agent": "hermes",
+      "to_agent": "codex",
+      "timestamp": "2026-09-06T17:05:20.073689+00:00",
+      "acknowledged_at": "2026-09-06T17:05:53.966523+00:00",
+      "failed_attempts": 0,
+      "body_sha256": "02046c6472922e22be9088883ce261708ec7d84a6d632e2825121b339eaa3579"
+    },
+    {
+      "message_id": "84625968-c283-48ff-9ba7-48bdacb337f2",
+      "from_agent": "codex",
+      "to_agent": "hermes",
+      "timestamp": "2026-09-06T17:05:53.966223+00:00",
+      "acknowledged_at": "2026-09-06T17:06:01.778956+00:00",
+      "failed_attempts": 0,
+      "body_sha256": "db7f78aacd9e49506c30a74501ccf8a3dc1bd4c050a01c90ff0cf6617f393ab1"
+    }
+  ],
+  "validated_response_topics": [
+    "project purpose",
+    "completed work",
+    "T-20, T-21, T-22"
+  ],
+  "manual_inbox_processing": false,
+  "injects_open_tui": false,
+  "tests": {
+    "passed": 660,
+    "warnings": 2,
+    "seconds": 151.02
+  }
+}

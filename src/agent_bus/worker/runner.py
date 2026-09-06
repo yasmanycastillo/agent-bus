@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +32,7 @@ class AgentRunner:
         ) = None,
         bus_url: str | None = None,
         session_file: Path | None = None,
+        sandbox_mode: str | None = None,
     ) -> None:
         self.bus_url = bus_url
         self.agent_id = agent_id
@@ -42,6 +42,7 @@ class AgentRunner:
         self.custom_executor = custom_executor
         self.session_map: dict[str, str] = {}  # thread_id -> CLI session_id
         self.session_file = session_file
+        self.sandbox_mode = sandbox_mode
         self._load_sessions()
 
     def _load_sessions(self) -> None:
@@ -306,6 +307,8 @@ class AgentRunner:
         if session_id:
             cmd.append("resume")
         cmd.extend(["--json"])
+        if self.sandbox_mode:
+            cmd.extend(["-c", f'sandbox_mode="{self.sandbox_mode}"'])
         if self.model:
             cmd.extend(["--model", self.model])
         if session_id:
@@ -313,6 +316,37 @@ class AgentRunner:
         else:
             cmd.append(prompt)
         result = await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+        if not result.success:
+            return result
+        # Codex emits JSONL events, not Claude's single JSON envelope. Only
+        # a completed turn with final text is eligible for delivery/ACK.
+        completed = False
+        final_text = None
+        new_session = None
+        try:
+            for line in result.output.splitlines():
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                kind = event.get("type")
+                if kind == "thread.started":
+                    new_session = event.get("thread_id")
+                elif kind in ("turn.failed", "error"):
+                    raise ValueError("Codex reported a failed turn")
+                elif kind == "item.completed":
+                    item = event.get("item", {})
+                    if item.get("type") == "agent_message":
+                        final_text = item.get("text")
+                elif kind == "turn.completed":
+                    completed = True
+            if not completed or not isinstance(final_text, str) or not final_text.strip():
+                raise ValueError("Codex returned no completed text response")
+            if not isinstance(new_session, str) or not new_session.strip():
+                raise ValueError("Codex returned no thread ID")
+        except (ValueError, AttributeError, TypeError) as exc:
+            return RunnerResult(False, "", error=str(exc), exit_code=1)
+        result.output = final_text.strip()
+        result.session_id = new_session
         if thread_id and result.session_id:
             self.session_map[thread_id] = result.session_id
             self._save_sessions()
@@ -347,6 +381,10 @@ class AgentRunner:
 
         try:
             env = worker_environment(self.agent_id, bus_url=self.bus_url)
+            if self.provider == "codex":
+                # This executor owns its own conversation, not the invoking TUI.
+                env.pop("CODEX_THREAD_ID", None)
+                env.pop("CODEX_SESSION_ID", None)
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(self.worktree_dir),
@@ -397,7 +435,7 @@ class AgentRunner:
             except Exception:
                 pass
 
-            if thread_id and new_session_id:
+            if self.provider != "codex" and thread_id and new_session_id:
                 self.session_map[thread_id] = new_session_id
                 self._save_sessions()
 

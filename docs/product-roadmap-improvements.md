@@ -1,6 +1,6 @@
 # Plan de Mejoras para Comercialización y Casos de Uso Empresariales
 
-Este documento define el roadmap para convertir `agent-bus` en un producto de coordinación de agentes desplegable en local, on-premise o SaaS. El producto central es el bus, la identidad, la entrega durable, los worktrees y el gate de integración. Hermes es una integración futura, no un requisito del núcleo.
+Este documento define el roadmap para convertir `agent-bus` en un producto de coordinación de agentes desplegable en local, on-premise o SaaS. El producto central es el bus, la identidad, la entrega durable, los worktrees y el gate de integración. El adaptador HTTP `HermesOrchestrator` y la conexión MCP de Hermes Agent están implementados; la aceptación T-18 usa un puente de publicación validado, descrito en [hermes-agent.md](hermes-agent.md). Ninguno es un requisito del núcleo.
 
 ---
 
@@ -28,14 +28,15 @@ Este documento define el roadmap para convertir `agent-bus` en un producto de co
 ---
 
 ### Nivel 2: Orquestación estructurada (siguiente prioridad)
-* [ ] **Contrato de inferencia y `HermesOrchestrator`:**
+* [x] **Contrato de inferencia y `HermesOrchestrator` HTTP:**
   - Soporte para endpoints compatibles con OpenAI / vLLM / Ollama / OpenRouter para conectar instancias de Hermes (ej. `Hermes-3-Llama-3.1-70B` / `Hermes-3-8B`).
-  - Soporte de Structured Outputs / JSON Schema nativo para garantizar que el desglose de tareas siempre sea sintácticamente válido.
-* [ ] **Desglose autónomo de tareas (Epic Breakdown):**
-  - Capacidad de Hermes para leer un issue o especificación de alto nivel y convertirlo en un grafo de tareas acíclico dirigido (DAG) con dependencias claras.
-  - Publicación y asignación automática en el bus (`broadcast_assignment` / `create_task`).
-* [ ] **Gatekeeper de integración:**
-  - Hermes actuando como revisor de código: evalúa diffs en la cola `in-review`, lee la salida de los tests en `.worktrees/` y autoriza al `BranchIntegrator` el merge a `main` o solicita correcciones al agente asignado.
+  - Solicitud de Structured Outputs y validación local de JSON Schema y DAG antes de publicar; una respuesta inválida se rechaza. Evidencia automatizada con inferencia simulada en TASK.md.
+* [x] **Desglose mediante inferencia HTTP:**
+  - `breakdown` / `orchestrate` convierten un objetivo textual en un DAG validado y publican tareas en lote con `operation_key`.
+* [x] **Conexión y aceptación real de Hermes Agent (T-18):**
+  - Hermes Agent v0.21.0 / gpt-5.6-sol conectado por MCP con identidad propia; mensajes, ACK, reanudación y desglose idempotente verificados. Publicación mediante puente Python al batch HTTP; no se implementó un worker Hermes ni una herramienta MCP de creación.
+* [x] **Gatekeeper de integración (T-19):**
+  - `CodeReviewGatekeeper` evalúa diff y resultados de tests mediante reglas; `BranchIntegrator` aplica la política `--require-approval` y registra el veredicto. La implementación actual no utiliza Hermes como revisor.
 
 
 ---
