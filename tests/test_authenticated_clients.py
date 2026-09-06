@@ -222,3 +222,85 @@ async def test_daemon_registration_failure_closes_client(credentials, monkeypatc
         await daemon.start()
     assert daemon._client is None
     assert not daemon._running
+
+
+def test_display_switches_configuration_at_use_time(tmp_path, monkeypatch):
+    from agent_bus.cli import display
+    monkeypatch.delenv("AGENT_BUS_AGENT_ID", raising=False)
+    monkeypatch.delenv("AGENT_ID", raising=False)
+    first, second = tmp_path / "first", tmp_path / "second"
+    # Deliberately leave CURRENT_AGENT_FILE at the fixture's unrelated location:
+    # neither lookup nor update may depend on that cached import-time constant.
+    monkeypatch.setenv("AGENT_BUS_CONFIG_DIR", str(first))
+    display.set_current_agent("alice")
+    assert display.get_current_agent() == "alice"
+    monkeypatch.setenv("AGENT_BUS_CONFIG_DIR", str(second))
+    assert display.get_current_agent() is None
+    display.set_current_agent("bob")
+    assert display.get_current_agent() == "bob"
+    assert (first / "current_agent").read_text() == "alice"
+    assert (second / "current_agent").read_text() == "bob"
+
+
+def test_worker_paths_remain_valid_after_changing_worktree(credentials, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_BUS_CONFIG_DIR", "config")
+    monkeypatch.setenv("AGENT_BUS_SESSION_FILE", "config/credentials/alice.json")
+    env = worker_environment("alice")
+    assert Path(env["AGENT_BUS_CONFIG_DIR"]).is_absolute()
+    assert Path(env["AGENT_BUS_SESSION_FILE"]).is_absolute()
+    other_worktree = tmp_path / "worktree"
+    other_worktree.mkdir()
+    monkeypatch.chdir(other_worktree)
+    monkeypatch.setenv("AGENT_BUS_CONFIG_DIR", env["AGENT_BUS_CONFIG_DIR"])
+    assert security.load_session("alice", session_file=env["AGENT_BUS_SESSION_FILE"])["agent_id"] == "alice"
+
+
+def test_hook_uses_installed_entrypoint_without_system_package(credentials, monkeypatch, tmp_path):
+    import os
+    import subprocess
+    import sys
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    # This server captures the hook subprocess; it never touches a personal hub.
+    requests = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append((self.path, self.headers.get("Authorization")))
+            body = json.dumps([{"from_agent": "bob", "reply_needed": True, "body": {"text": "Please review"}}]).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *_):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        env = os.environ.copy()
+        # The entrypoint's shebang chooses this venv. A dummy system python3
+        # rejects imports, demonstrating that the shell hook never depends on it.
+        binaries = tmp_path / "bin"
+        binaries.mkdir()
+        python_stub = binaries / "python3"
+        python_stub.write_text("#!/bin/sh\nexit 91\n")
+        python_stub.chmod(0o755)
+        entrypoint = binaries / "agent-bus"
+        entrypoint.write_text(f"#!{sys.executable}\nfrom agent_bus.cli.main import app\napp()\n")
+        entrypoint.chmod(0o755)
+        env["PATH"] = f"{binaries}:/usr/bin:/bin"
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+        env["AGENT_BUS_AGENT_ID"] = "alice"
+        env["AGENT_BUS_URL"] = f"http://127.0.0.1:{server.server_port}"
+        hook = Path(__file__).resolve().parents[1] / "hooks" / "stop-check-inbox.sh"
+        result = subprocess.run(["/bin/bash", str(hook)], env=env, capture_output=True, text=True, timeout=8)
+        assert result.returncode == 0
+        assert json.loads(result.stdout)["decision"] == "block", result.stderr
+        assert requests == [("/inbox/alice", f"Bearer {credentials['alice'][0]['token']}")]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

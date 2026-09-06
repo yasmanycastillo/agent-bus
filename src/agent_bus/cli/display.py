@@ -5,7 +5,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from agent_bus.config import DEFAULT_CONFIG_DIR
+from agent_bus.config import DEFAULT_CONFIG_DIR, get_config_dir
 
 console = Console()
 
@@ -20,15 +20,17 @@ def get_current_agent() -> str | None:
     if env_agent and env_agent.strip():
         return env_agent.strip()
 
-    # 2. Fall back to global current_agent file
-    if CURRENT_AGENT_FILE.exists():
-        return CURRENT_AGENT_FILE.read_text().strip() or None
+    # 2. Resolve project/session configuration at use time.
+    current_agent_file = get_config_dir() / "current_agent"
+    if current_agent_file.exists():
+        return current_agent_file.read_text().strip() or None
     return None
 
 
 def set_current_agent(agent_id: str) -> None:
-    CURRENT_AGENT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CURRENT_AGENT_FILE.write_text(agent_id)
+    current_agent_file = get_config_dir() / "current_agent"
+    current_agent_file.parent.mkdir(parents=True, exist_ok=True)
+    current_agent_file.write_text(agent_id)
 
 
 def generate_dashboard_renderable(

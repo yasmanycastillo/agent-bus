@@ -6,6 +6,7 @@ import logging
 import os
 from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import Any
+from pathlib import Path
 
 import httpx
 
@@ -19,9 +20,10 @@ def worker_environment(agent_id: str, *, per_agent: bool = False) -> dict[str, s
     """Select one worker's credentials without sharing an administrator's session."""
     env = os.environ.copy()
     env["AGENT_BUS_AGENT_ID"] = agent_id
-    env["AGENT_BUS_CONFIG_DIR"] = str(get_config_dir())
+    config_dir = get_config_dir().resolve()
+    env["AGENT_BUS_CONFIG_DIR"] = str(config_dir)
     if per_agent:
-        path = get_config_dir() / "credentials" / f"{agent_id}.json"
+        path = config_dir / "credentials" / f"{agent_id}.json"
     else:
         path = env.get("AGENT_BUS_SESSION_FILE")
     development = (
@@ -34,9 +36,9 @@ def worker_environment(agent_id: str, *, per_agent: bool = False) -> dict[str, s
     else:
         # Validates project, identity and expiry before any process is spawned.
         load_session(agent_id, session_file=path)
-        env["AGENT_BUS_SESSION_FILE"] = str(
-            path or get_config_dir() / "credentials" / f"{agent_id}.json"
-        )
+        # Keep the final filename unresolved so load_session still rejects symlinks.
+        selected = Path(path) if path else config_dir / "credentials" / f"{agent_id}.json"
+        env["AGENT_BUS_SESSION_FILE"] = str(selected.absolute())
     return env
 
 EventCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]

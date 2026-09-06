@@ -805,5 +805,49 @@ def mcp_server_cmd(bus_url: str, agent_id: str | None):
     asyncio.run(run_mcp_server(bus_url=bus_url, agent_id=agent_id))
 
 
+@app.command("hook-inbox", hidden=True)
+@click.option("--bus-url", default="http://127.0.0.1:8420")
+@click.option("--agent", "agent_id", default=None)
+def hook_inbox(bus_url: str, agent_id: str | None):
+    """Emit the Stop-hook result from the installed package's interpreter."""
+    import json
+    import signal
+
+    def deadline_expired(*_):
+        raise TimeoutError("Hook deadline exceeded")
+
+    previous = signal.signal(signal.SIGALRM, deadline_expired)
+    signal.alarm(4)
+    try:
+        actor = agent_id or get_current_agent()
+        if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
+            actor = load_session(actor)["agent_id"]
+        if not actor:
+            return
+        with sync_bus_client(actor, base_url=bus_url, timeout=3) as client:
+            response = client.get(f"/inbox/{actor}")
+            response.raise_for_status()
+            messages = response.json()
+        pending = [message for message in messages if message.get("reply_needed")]
+        if not pending:
+            return
+        lines = [
+            f"- {message['from_agent']}: {str((message.get('body') or {}).get('text', ''))[:80]}"
+            for message in pending[-3:]
+        ]
+        reason = (
+            f"Tienes {len(pending)} mensaje(s) en agent-bus que requieren respuesta. "
+            "Lee: agent-bus work inbox; responde: agent-bus work msg <agente> \"<respuesta>\".\n"
+            + "\n".join(lines)
+        )
+        click.echo(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
+    except Exception:
+        # Missing credentials, an unavailable bus or a rejected session must not block Stop.
+        return
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 if __name__ == "__main__":
     app()
