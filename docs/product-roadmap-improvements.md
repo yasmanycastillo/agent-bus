@@ -6,12 +6,21 @@ Este documento detalla el **roadmap técnico y de producto** necesario para conv
 
 ## 1. Mejoras Técnicas Necesarias por Nivel
 
-### Nivel 1: Conclusión del Core y Estabilidad Base (T-12 y T-13)
-* [ ] **T-12: Locks Robustos y Fencing Tokens:**
-  - Garantizar que los locks expiren limpiamente y que un titular expirado no pueda sobreescribir ni liberar el lock de un nuevo titular.
-  - Canonicalización de rutas relativas/absolutas entre diferentes worktrees de Git.
-* [ ] **T-13: Validación con Clientes Reales:**
-  - Validación automatizada y manual de interoperabilidad stdio con al menos dos clientes MCP externos reconocidos (ej. Claude Code, Aider, Cursor).
+### Nivel 1: Conclusión del Core y Estabilidad Base (T-12 a T-15) — ¡COMPLETADO!
+* [x] **T-12: Locks Robustos y Fencing Tokens:**
+  - Scope `checkout` y `project`, canonicalización de rutas y rechazo de escapes de worktree.
+  - Leases por sesión, TTL acotado (300 s default), reclamación de expirados y tokens de adquisición (`acquisition_id`) para evitar colisiones por titulares desfasados.
+* [x] **T-13: Validación con Clientes Reales:**
+  - Validación automatizada e interoperabilidad stdio demostrada contra **Claude Code** y **Codex CLI**.
+  - Evidencia auditada sin tokens en `docs/evidence/t13.json`.
+* [x] **T-14: Workers Recuperables y Adaptadores Nativos:**
+  - Adaptadores nativos para **Claude**, **Codex**, **Aider**, **AGY** y **Grok**.
+  - Persistencia de intentos en `inbox_delivery_state` y reanudación de sesiones `thread_id -> session_id`.
+* [x] **T-15: Integración Git Automatizada:**
+  - `BranchIntegrator` con verificación de estado previo (preflight), merges protegidos y rollback seguro ante fallos.
+  - Cola `in-review` y comandos CLI del ciclo de vida del integrador (`agent-bus integrator start/status/stop`).
+* [x] **Onboarding y Experiencia Interactiva:**
+  - CLI `quickstart` interactivo para autoconfiguración de proyectos, aislamiento de puertos de hubs y setup guiado de credenciales.
 
 ---
 
@@ -23,7 +32,8 @@ Este documento detalla el **roadmap técnico y de producto** necesario para conv
   - Capacidad de Hermes para leer un issue o especificación de alto nivel y convertirlo en un grafo de tareas acíclico dirigido (DAG) con dependencias claras.
   - Publicación y asignación automática en el bus (`broadcast_assignment` / `create_task`).
 * [ ] **Evaluación y Gatekeeper de Integración:**
-  - Hermes actuando como revisor de código: evalúa diffs, lee la salida de los tests en `.worktrees/` y decide si aprobar el merge a `main` o solicitar correcciones al agente asignado.
+  - Hermes actuando como revisor de código: evalúa diffs en la cola `in-review`, lee la salida de los tests en `.worktrees/` y autoriza al `BranchIntegrator` el merge a `main` o solicita correcciones al agente asignado.
+
 
 ---
 
