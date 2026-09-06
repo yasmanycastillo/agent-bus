@@ -152,7 +152,10 @@ CREATE TABLE IF NOT EXISTS locks (
     file_path TEXT PRIMARY KEY,
     locked_by TEXT NOT NULL,
     locked_at TEXT NOT NULL,
-    reason TEXT
+    reason TEXT,
+    session_id TEXT,
+    acquisition_id TEXT,
+    expires_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS kickoff (
@@ -188,6 +191,7 @@ class Database:
             if self.project_id is not None:
                 await self.bind_project(self.project_id)
             await self._migrate_inbox_deliveries()
+            await self._migrate_lock_leases()
         except BaseException:
             await self.close()
             raise
@@ -274,6 +278,23 @@ class Database:
             # Runs within this schema migration transaction and only once.
             from agent_bus.core.events import backfill_events
             await self.conn._execute(backfill_events, self.conn._conn)
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_lock_leases(self) -> None:
+        """Legacy four-column locks expire; restart never expires valid leases."""
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row["name"] for row in await self.conn.execute_fetchall("PRAGMA table_info(locks)")}
+            for name, kind in (("session_id", "TEXT"), ("acquisition_id", "TEXT"), ("expires_at", "REAL")):
+                if name not in columns:
+                    await self.conn.execute(f"ALTER TABLE locks ADD COLUMN {name} {kind}")
+            await self.conn.execute(
+                "UPDATE locks SET expires_at=0 WHERE session_id IS NULL OR acquisition_id IS NULL OR expires_at IS NULL"
+            )
+            await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_locks_expiry ON locks(expires_at)")
             await self.conn.commit()
         except BaseException:
             await self.conn.rollback()

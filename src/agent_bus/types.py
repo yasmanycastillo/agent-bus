@@ -112,6 +112,9 @@ class AgentSkill(BaseModel):
 
 
 class Lock(BaseModel):
+    acquisition_id: str
+    session_id: str
+    expires_at: datetime
     file_path: str
     locked_by: str
     locked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

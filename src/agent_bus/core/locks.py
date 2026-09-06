@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import math
+import secrets
+import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from agent_bus.reputation.database import Database
@@ -11,68 +15,141 @@ class LockError(Exception):
 
 
 class LockManager:
-    def __init__(self, db: Database) -> None:
+    """Leases on caller-canonicalized paths, fenced by a unique acquisition ID."""
+
+    def __init__(self, db: Database, *, clock: Callable[[], float] = time.time) -> None:
         self._db = db
+        self._clock = clock
 
-    async def acquire(self, file_path: str, agent_id: str, reason: str | None = None) -> Lock:
-        """Acquire once; retries conflict even when the agent already owns the lock."""
-        now = datetime.now(timezone.utc).isoformat()
-        cursor = await self._db.conn.execute(
-            "INSERT INTO locks (file_path, locked_by, locked_at, reason) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(file_path) DO NOTHING",
-            (file_path, agent_id, now, reason),
-        )
-        acquired = cursor.rowcount == 1
-        await cursor.close()
-        await self._db.conn.commit()
-        if not acquired:
-            existing = await self.get_lock(file_path)
-            owner = existing.locked_by if existing else "another acquisition"
-            raise LockError(f"File '{file_path}' is locked by '{owner}'; retry acquisition")
-        return Lock(
-            file_path=file_path,
-            locked_by=agent_id,
-            locked_at=datetime.fromisoformat(now),
-            reason=reason,
-        )
+    @staticmethod
+    def _session(agent_id: str, session_id: str | None) -> str:
+        # Only internal legacy callers may omit a session. HTTP requires one.
+        return session_id if session_id is not None else f"legacy:{agent_id}"
 
-    async def release(self, file_path: str, agent_id: str) -> None:
-        """Release only the caller's lock; an absent lock is an idempotent success."""
-        cursor = await self._db.conn.execute(
-            "DELETE FROM locks WHERE file_path = ? AND locked_by = ?", (file_path, agent_id)
-        )
-        released = cursor.rowcount == 1
-        await cursor.close()
-        await self._db.conn.commit()
-        if released:
-            return
-        existing = await self.get_lock(file_path)
-        if existing:
-            raise LockError(
-                f"Only '{existing.locked_by}' can release lock on '{file_path}'"
-            )
+    @staticmethod
+    def _expiry(now: float, ttl_seconds: int, session_expires_at: float | None) -> float:
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= 3600:
+            raise LockError("Lock TTL must be an integer between 1 and 3600 seconds")
+        expiry = now + ttl_seconds
+        if session_expires_at is not None:
+            if (isinstance(session_expires_at, bool)
+                    or not isinstance(session_expires_at, (int, float))
+                    or not math.isfinite(session_expires_at)
+                    or session_expires_at <= now):
+                raise LockError("Cannot acquire or renew a lock with an expired session")
+            expiry = min(expiry, session_expires_at)
+        return expiry
+
+    async def _mutate(self, operation):
+        """Consume SQL cursors and commit in one queued driver operation.
+
+        aiosqlite exposes no public multi-statement callback. Keeping this private
+        API at one boundary prevents another coroutine's commit from interleaving
+        a conditional mutation and its follow-up ownership check.
+        """
+        def transaction(connection):
+            if connection.in_transaction:
+                raise RuntimeError("Lock mutation requires a committed database")
+            connection.execute("SAVEPOINT lock_lease")
+            try:
+                # Reserve SQLite write ownership before sampling the clock: a
+                # blocked writer must not compare expiry against a stale time.
+                connection.execute("UPDATE locks SET expires_at=expires_at WHERE 0")
+                result = operation(connection)
+            except BaseException:
+                connection.execute("ROLLBACK TO lock_lease")
+                connection.execute("RELEASE lock_lease")
+                raise
+            # With no outer transaction, releasing the savepoint commits the
+            # acquisition before any other queued connection operation can run.
+            connection.execute("RELEASE lock_lease")
+            return result
+        return await self._db.conn._execute(transaction, self._db.conn._conn)
+
+    async def acquire(
+        self, file_path: str, agent_id: str, reason: str | None = None, *,
+        session_id: str | None = None, ttl_seconds: int = 300,
+        session_expires_at: float | None = None,
+    ) -> Lock:
+        session = self._session(agent_id, session_id)
+        acquisition = secrets.token_urlsafe(24)
+
+        def operation(connection):
+            now = self._clock()
+            expiry = self._expiry(now, ttl_seconds, session_expires_at)
+            rows = connection.execute(
+                "INSERT INTO locks (file_path, locked_by, locked_at, reason, session_id, acquisition_id, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(file_path) DO UPDATE SET "
+                "locked_by=excluded.locked_by, locked_at=excluded.locked_at, reason=excluded.reason, "
+                "session_id=excluded.session_id, acquisition_id=excluded.acquisition_id, expires_at=excluded.expires_at "
+                "WHERE COALESCE(locks.expires_at, 0) <= ? RETURNING *",
+                (file_path, agent_id, datetime.fromtimestamp(now, timezone.utc).isoformat(), reason,
+                 session, acquisition, expiry, now),
+            ).fetchall()
+            if not rows:
+                raise LockError(f"File '{file_path}' is locked by another acquisition")
+            return rows[0]
+        return self._row_to_lock(await self._mutate(operation))
+
+    async def release(
+        self, file_path: str, agent_id: str, *, session_id: str | None = None,
+        acquisition_id: str,
+    ) -> None:
+        if not acquisition_id:
+            raise LockError("An acquisition ID is required")
+        session = self._session(agent_id, session_id)
+
+        def operation(connection):
+            now = self._clock()
+            rows = connection.execute(
+                "DELETE FROM locks WHERE file_path=? AND locked_by=? AND session_id=? "
+                "AND acquisition_id=? AND expires_at>? RETURNING file_path",
+                (file_path, agent_id, session, acquisition_id, now),
+            ).fetchall()
+            if not rows and connection.execute("SELECT 1 FROM locks WHERE file_path=?", (file_path,)).fetchone():
+                raise LockError("Only the current, unexpired acquisition can release this lock")
+        await self._mutate(operation)
+
+    async def renew(
+        self, file_path: str, agent_id: str, *, session_id: str | None = None,
+        acquisition_id: str, ttl_seconds: int = 300, session_expires_at: float | None = None,
+    ) -> Lock:
+        if not acquisition_id:
+            raise LockError("An acquisition ID is required")
+        session = self._session(agent_id, session_id)
+
+        def operation(connection):
+            now = self._clock()
+            expiry = self._expiry(now, ttl_seconds, session_expires_at)
+            rows = connection.execute(
+                "UPDATE locks SET expires_at=? WHERE file_path=? AND locked_by=? AND session_id=? "
+                "AND acquisition_id=? AND expires_at>? RETURNING *",
+                (expiry, file_path, agent_id, session, acquisition_id, now),
+            ).fetchall()
+            if not rows:
+                raise LockError("Only the current, unexpired acquisition can renew this lock")
+            return rows[0]
+        return self._row_to_lock(await self._mutate(operation))
 
     async def get_lock(self, file_path: str) -> Lock | None:
-        cursor = await self._db.conn.execute_fetchall(
-            "SELECT * FROM locks WHERE file_path = ?", (file_path,)
+        rows = await self._db.conn.execute_fetchall(
+            "SELECT * FROM locks WHERE file_path=? AND expires_at>? "
+            "AND session_id IS NOT NULL AND acquisition_id IS NOT NULL", (file_path, self._clock()),
         )
-        if not cursor:
-            return None
-        return Lock(
-            file_path=cursor[0][0],
-            locked_by=cursor[0][1],
-            locked_at=datetime.fromisoformat(cursor[0][2]),
-            reason=cursor[0][3],
-        )
+        return self._row_to_lock(rows[0]) if rows else None
 
     async def list_locks(self) -> list[Lock]:
-        cursor = await self._db.conn.execute_fetchall("SELECT * FROM locks ORDER BY locked_at")
-        return [
-            Lock(
-                file_path=row[0],
-                locked_by=row[1],
-                locked_at=datetime.fromisoformat(row[2]),
-                reason=row[3],
-            )
-            for row in cursor
-        ]
+        rows = await self._db.conn.execute_fetchall(
+            "SELECT * FROM locks WHERE expires_at>? AND session_id IS NOT NULL "
+            "AND acquisition_id IS NOT NULL ORDER BY locked_at, file_path", (self._clock(),),
+        )
+        return [self._row_to_lock(row) for row in rows]
+
+    @staticmethod
+    def _row_to_lock(row) -> Lock:
+        return Lock(
+            file_path=row["file_path"], locked_by=row["locked_by"],
+            locked_at=datetime.fromisoformat(row["locked_at"]), reason=row["reason"],
+            session_id=row["session_id"], acquisition_id=row["acquisition_id"],
+            expires_at=datetime.fromtimestamp(row["expires_at"], timezone.utc),
+        )
