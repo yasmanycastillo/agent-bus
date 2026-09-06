@@ -42,7 +42,8 @@ async def test_room_ui_sirve_html(client):
     r = await client.get("/room")
     assert r.status_code == 200
     assert "War Room" in r.text
-    assert "EventSource" in r.text  # feed SSE conectado
+    assert 'id="login-form"' in r.text
+    assert 'type="password"' in r.text  # authenticated panel entry point
     assert "/room/api/overview" in r.text
 
 

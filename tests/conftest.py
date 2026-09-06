@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import os
+import json
 import socket
 import tempfile
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from types import SimpleNamespace
 
 import httpx
 import pytest
 import uvicorn
 
-from agent_bus.core.bus import MessageBus
+from agent_bus.core.bus import MessageBus, create_app
 from agent_bus.core.inbox import InboxManager
 from agent_bus.core.registry import AgentRegistry
 from agent_bus.reputation.database import Database
@@ -34,6 +36,7 @@ def isolated_agent_config(tmp_path, monkeypatch):
     monkeypatch.setattr(display, "CURRENT_AGENT_FILE", config_dir / "current_agent")
     monkeypatch.setattr(worker_cmds, "WORKERS_DIR", config_dir / "workers")
     monkeypatch.delenv("AGENT_BUS_AGENT_ID", raising=False)
+    monkeypatch.delenv("AGENT_ID", raising=False)
     # Individual authentication tests can override this explicitly.
     monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "1")
 
@@ -74,8 +77,8 @@ async def tmp_db():
             await db.close()
 
 
-@pytest.fixture
-def live_bus_url(tmp_path, allowed_test_ports):
+@contextmanager
+def running_bus(tmp_path, allowed_test_ports, *, configured=False):
     """A real HTTP/SSE hub on an OS-assigned port, with its own SQLite database."""
     db = Database(str(tmp_path / "live-bus.db"))
     bus = MessageBus(db, AgentRegistry(), InboxManager(db))
@@ -89,8 +92,9 @@ def live_bus_url(tmp_path, allowed_test_ports):
             await db.close()
 
     bus.app.router.lifespan_context = lifespan
+    app = create_app() if configured else bus.app
     server = uvicorn.Server(uvicorn.Config(
-        bus.app, host="127.0.0.1", port=0, log_level="error",
+        app, host="127.0.0.1", port=0, log_level="error",
         timeout_graceful_shutdown=2,
     ))
     with socket.socket() as listener:
@@ -113,6 +117,35 @@ def live_bus_url(tmp_path, allowed_test_ports):
                 thread.join(timeout=3)
             allowed_test_ports.discard(port)
             assert not thread.is_alive(), "Temporary hub failed to stop"
+
+
+@pytest.fixture
+def live_bus_url(tmp_path, allowed_test_ports):
+    with running_bus(tmp_path, allowed_test_ports) as url:
+        yield url
+
+
+@pytest.fixture
+def secure_bus(tmp_path, allowed_test_ports, monkeypatch):
+    """Strict, provisioned hub shared by actual client acceptance tests."""
+    from agent_bus.config import get_config_dir
+    from agent_bus.cli.main import app
+    from click.testing import CliRunner
+
+    monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "0")
+    monkeypatch.setenv("AGENT_BUS_PROJECT_ID", "acceptance-project")
+    db_path = str(tmp_path / "live-bus.db")
+    monkeypatch.setenv("AGENT_BUS_DATABASE_PATH", db_path)
+
+    sessions, paths = {}, {}
+    for agent, role in (("alice", "agent"), ("bob", "agent"), ("human", "admin")):
+        result = CliRunner().invoke(app, ["auth", "create", "--agent", agent, "--role", role])
+        assert result.exit_code == 0, result.output
+        paths[agent] = get_config_dir() / "credentials" / f"{agent}.json"
+        sessions[agent] = json.loads(paths[agent].read_text())
+        assert sessions[agent]["token"] not in result.output
+    with running_bus(tmp_path, allowed_test_ports, configured=True) as url:
+        yield SimpleNamespace(url=url, db_path=db_path, sessions=sessions, paths=paths)
 
 
 @pytest.fixture
