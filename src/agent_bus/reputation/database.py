@@ -174,6 +174,20 @@ CREATE TABLE IF NOT EXISTS kickoff (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_owner ON tasks(owner);
+
+CREATE TABLE IF NOT EXISTS reviews (
+    review_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    reviewer_agent_id TEXT NOT NULL,
+    reviewer_session_id TEXT NOT NULL,
+    sha TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    evidence TEXT DEFAULT '{}',
+    test_results TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reviews_task_id ON reviews(task_id);
 """
 
 
@@ -198,6 +212,7 @@ class Database:
             await self._migrate_inbox_deliveries()
             await self._migrate_lock_leases()
             await self._migrate_tasks()
+            await self._migrate_reviews()
         except BaseException:
             await self.close()
             raise
@@ -321,6 +336,32 @@ class Database:
                 if name not in columns:
                     await self.conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {col_def}")
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_operation_key ON tasks(operation_key)")
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_reviews(self) -> None:
+        """Ensure reviews table exists with idx_reviews_task_id."""
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS reviews (
+                    review_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    reviewer_agent_id TEXT NOT NULL,
+                    reviewer_session_id TEXT NOT NULL,
+                    sha TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    evidence TEXT DEFAULT '{}',
+                    test_results TEXT DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            await self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reviews_task_id ON reviews(task_id)"
+            )
             await self.conn.commit()
         except BaseException:
             await self.conn.rollback()

@@ -23,11 +23,13 @@ from agent_bus.core.kickoff import KickoffManager
 from agent_bus.core.locks import LockBusyError, LockError, LockManager
 from agent_bus.core.lock_paths import server_lock_path
 from agent_bus.core.registry import AgentRegistry
+from agent_bus.core.reviews import ReviewLog
 from agent_bus.core.skills import SkillRegistry
 from agent_bus.core.tasks import TaskDependencyError, TaskManager
 from agent_bus.reputation.database import Database, ProjectMismatchError
 from agent_bus.types import AgentInfo, AutonomyLevel, Envelope, MessageType, TaskStatus
 from agent_bus.security import AuthenticationError, Principal, SessionStore
+from agent_bus.worker.gatekeeper import ReviewDecision, Verdict
 
 
 class SendMessageRequest(BaseModel):
@@ -137,6 +139,19 @@ class KickoffStepRequest(BaseModel):
     completed_by: str | None = None
 
 
+class CreateReviewRequest(BaseModel):
+    task_id: str
+    sha: str
+    verdict: str
+    reason: str
+    evidence: dict = Field(default_factory=dict)
+    test_results: dict = Field(default_factory=dict)
+    reviewer_agent_id: str | None = None
+    reviewer_session_id: str | None = None
+    review_id: str | None = None
+    created_at: datetime | None = None
+
+
 class MessageBus:
     def __init__(self, db: Database, registry: AgentRegistry, inbox: InboxManager, project_id: str | None = None, context_path=None, project_root=None) -> None:
         from pathlib import Path
@@ -151,6 +166,7 @@ class MessageBus:
         self.inbox = inbox
         self.tasks = TaskManager(db)
         self.decisions = DecisionLog(db)
+        self.reviews = ReviewLog(db)
         self.locks = LockManager(db)
         self.skills = SkillRegistry(db)
         self.kickoff = KickoffManager(db)
@@ -548,6 +564,60 @@ class MessageBus:
             if not task:
                 return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
+
+        @self.app.post("/tasks/{task_id}/block")
+        async def block_task(task_id: str, request: Request, req: dict | None = None):
+            reason = req.get("reason") if req else None
+            task = await self.tasks.block(task_id, reason=reason)
+            if not task:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            return task.model_dump(mode="json")
+
+        # --- Review endpoints ---
+
+        @self.app.post("/reviews")
+        async def create_review(req: CreateReviewRequest, request: Request):
+            principal = request.state.principal
+            reviewer_agent_id = req.reviewer_agent_id
+            if not reviewer_agent_id and principal:
+                reviewer_agent_id = principal.agent_id
+            reviewer_agent_id = reviewer_agent_id or "gatekeeper"
+
+            reviewer_session_id = req.reviewer_session_id
+            if not reviewer_session_id and principal:
+                reviewer_session_id = getattr(principal, "session_id", "") or ""
+            reviewer_session_id = reviewer_session_id or ""
+
+            try:
+                verdict_enum = Verdict(req.verdict)
+            except ValueError:
+                return JSONResponse({"error": f"Invalid verdict: {req.verdict}"}, status_code=400)
+
+            import uuid
+            decision = ReviewDecision(
+                review_id=req.review_id or f"rev-{uuid.uuid4().hex[:8]}",
+                task_id=req.task_id,
+                sha=req.sha,
+                verdict=verdict_enum,
+                reason=req.reason,
+                evidence=req.evidence,
+                test_results=req.test_results,
+                reviewer_agent_id=reviewer_agent_id,
+                reviewer_session_id=reviewer_session_id,
+                created_at=req.created_at or datetime.now(timezone.utc),
+            )
+            saved = await self.reviews.add(decision)
+            return saved.model_dump(mode="json")
+
+        @self.app.get("/reviews")
+        async def list_reviews(task_id: str | None = Query(default=None)):
+            reviews = await self.reviews.list_all(task_id=task_id)
+            return [r.model_dump(mode="json") for r in reviews]
+
+        @self.app.get("/tasks/{task_id}/reviews")
+        async def get_task_reviews(task_id: str):
+            reviews = await self.reviews.list_for_task(task_id=task_id)
+            return [r.model_dump(mode="json") for r in reviews]
 
         # --- Decision endpoints ---
 
