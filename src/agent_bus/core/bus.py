@@ -240,7 +240,7 @@ class MessageBus:
                             actors.append("decided_by")
                         if path == "/register" or path.startswith("/locks/") or (
                             len(parts) == 3 and parts[0] == "tasks"
-                            and parts[2] in ("claim", "done", "review", "lock-files")
+                            and parts[2] in ("claim", "done", "review", "lock-files", "block")
                         ):
                             actors.append("agent_id")
                         if path.startswith("/kickoff/step/"):
@@ -568,9 +568,11 @@ class MessageBus:
         @self.app.post("/tasks/{task_id}/block")
         async def block_task(task_id: str, request: Request, req: dict | None = None):
             reason = req.get("reason") if req else None
-            task = await self.tasks.block(task_id, reason=reason)
+            principal = request.state.principal
+            actor = principal.agent_id if principal and not principal.is_admin else None
+            task = await self.tasks.block(task_id, reason=reason, actor=actor)
             if not task:
-                return JSONResponse({"error": "Task not found"}, status_code=404)
+                return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
 
         # --- Review endpoints ---
@@ -578,15 +580,18 @@ class MessageBus:
         @self.app.post("/reviews")
         async def create_review(req: CreateReviewRequest, request: Request):
             principal = request.state.principal
-            reviewer_agent_id = req.reviewer_agent_id
-            if not reviewer_agent_id and principal:
+            if principal:
+                # Legacy identity fields are assertions, never authority. Empty
+                # values mean unspecified for clients serializing default fields.
+                if req.reviewer_agent_id and req.reviewer_agent_id != principal.agent_id:
+                    return JSONResponse({"error": "Reviewer does not match authenticated session"}, status_code=403)
+                if req.reviewer_session_id and req.reviewer_session_id != principal.session_id:
+                    return JSONResponse({"error": "Reviewer session does not match authenticated session"}, status_code=403)
                 reviewer_agent_id = principal.agent_id
-            reviewer_agent_id = reviewer_agent_id or "gatekeeper"
-
-            reviewer_session_id = req.reviewer_session_id
-            if not reviewer_session_id and principal:
-                reviewer_session_id = getattr(principal, "session_id", "") or ""
-            reviewer_session_id = reviewer_session_id or ""
+                reviewer_session_id = principal.session_id
+            else:
+                reviewer_agent_id = req.reviewer_agent_id or "gatekeeper"
+                reviewer_session_id = req.reviewer_session_id or ""
 
             try:
                 verdict_enum = Verdict(req.verdict)
@@ -604,7 +609,7 @@ class MessageBus:
                 test_results=req.test_results,
                 reviewer_agent_id=reviewer_agent_id,
                 reviewer_session_id=reviewer_session_id,
-                created_at=req.created_at or datetime.now(timezone.utc),
+                created_at=datetime.now(timezone.utc),
             )
             saved = await self.reviews.add(decision)
             return saved.model_dump(mode="json")
