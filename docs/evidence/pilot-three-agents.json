@@ -1,0 +1,12 @@
+{
+  "date": "2026-09-06",
+  "mode": "supervised_real_native_providers",
+  "base_commit": "3ee1316",
+  "implementation": {"agent": "codex-worker-pilot", "provider": "codex", "commit": "d6f6ded", "task": "PILOT-WORKER-FIX", "final_status": "done"},
+  "tests": {"agent": "claude-worker-pilot", "provider": "claude", "commits": ["83c8cd0", "19d6955"], "task": "PILOT-WORKER-TESTS", "final_status": "done", "closure": "coordinator verified commit ancestry after grouped integration"},
+  "review": {"agent": "agy-review-pilot", "provider": "agy", "candidate_sha": "2a88e860727906452c2e9a4146a8a31cd4fee629", "verdict": "approve", "findings": [], "message_id": "9d04c501-23b2-4251-952b-99fd88b8df58", "method": "inline exact diff, no tools", "ran_tests": false},
+  "validation": {"targeted_passed": 5, "full_suite_passed": 663, "warnings": 2, "full_suite_seconds": 184.28, "integrator_reran_full_suite": true},
+  "integration": {"agent": "pilot-integrator", "implementation": "BranchIntegrator", "require_approval": true, "native_review_sha_enforced": true, "review_id": "rev-006babed", "merge_commit": "08ab262", "target_branch": "main"},
+  "recoveries": ["Claude worker restarted with narrowly allowed commands, preserving task and worktree", "AGY command denial respected; new review supplied exact diff without tools", "Dedicated Python environment used after shared environment interference"],
+  "limitations": ["Supervisor embeds real WorkerDaemon; stock run-team launch not demonstrated", "Coordinator assigned tasks and assembled candidate", "Initial Claude corrective edits lacked locks due command denial", "No centralized monetary budget demonstrated", "T-20/T-21/T-22 not executed"]
+}
