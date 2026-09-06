@@ -26,13 +26,19 @@ This repository is governed by the **agent-bus** autonomous multi-agent coordina
   ```bash
   uv run agent-bus work lock <file_path> --reason "<what you are doing>"
   ```
+- **Preserve the returned `acquisition_id` and `expires_at`**. Locks expire after 300 seconds by default; renew before expiration with the same session and token:
+  ```bash
+  uv run agent-bus work renew-lock <file_path> --acquisition-id <token>
+  ```
+  Stop editing if renewal fails. Use `--scope project` consistently on acquire, renew and release when coordinating the same logical resource across worktrees; the default `checkout` scope protects the physical file.
+
 - **Check active locks before modifying shared resources**:
   ```bash
   uv run agent-bus show locks
   ```
 - **Release your locks immediately when done**:
   ```bash
-  uv run agent-bus work unlock <file_path>
+  uv run agent-bus work unlock <file_path> --acquisition-id <token>
   ```
 
 ---

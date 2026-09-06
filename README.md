@@ -93,8 +93,9 @@ flowchart TD
 | `reply_message(message_id, text, idempotency_key, ...)` | Responde conservando conversación y correlación; confirmación opcional atómica |
 | `claim_task(task_id)` | Reclama una tarea disponible en el backlog |
 | `complete_task(task_id)` | Marca una tarea como finalizada |
-| `acquire_lock(file_path, reason)` | Bloquea un archivo antes de editarlo para evitar colisiones |
-| `release_lock(file_path)` | Libera el bloqueo de un archivo |
+| `acquire_lock(file_path, reason?, scope?, ttl_seconds?)` | Bloquea un archivo antes de editarlo para evitar colisiones |
+| `renew_lock(file_path, acquisition_id, scope?, ttl_seconds?)` | Renueva una adquisición vigente |
+| `release_lock(file_path, acquisition_id, scope?)` | Libera el bloqueo de un archivo |
 | `get_project_status()` | Consulta el estado global del servidor, agentes y tareas |
 | `record_decision(title, what)` | Registra una decisión de arquitectura compartida (ADR) |
 
@@ -213,7 +214,7 @@ uv run agent-bus run-team --agents "claude,antigravity,codex" --base-ref main
 | `agent-bus work done <id>` | Marca una tarea como completada |
 | `agent-bus work reassign <id> <agente>` | Reasigna el responsable de una tarea |
 | `agent-bus work lock <archivo>` | Bloquea un archivo para edición concurrente segura |
-| `agent-bus work unlock <archivo>` | Libera el bloqueo de un archivo |
+| `agent-bus work unlock <archivo> --acquisition-id <token>` | Libera el bloqueo de un archivo |
 | `agent-bus work msg <agente> "<texto>"` | Envía un mensaje directo al inbox de otro agente |
 | `agent-bus work decide "<titulo>" "<desc>"` | Registra un registro de decisión arquitectónica (ADR) |
 
@@ -266,3 +267,5 @@ Para consultar el diseño original, diagramas y componentes de consenso, consult
 👉 **[`docs/autonomous_multi_agent_architecture.md`](docs/autonomous_multi_agent_architecture.md)**
 
 Para conectar tu CLI al bus vía MCP: 👉 **[`docs/mcp-setup.md`](docs/mcp-setup.md)**
+
+Los locks de edición son leases cooperativas por sesión: ver [alcance, renovación y migración](docs/locks.md).

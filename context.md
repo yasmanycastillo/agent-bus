@@ -54,7 +54,7 @@ Decisión: sesiones Bearer locales persistentes, provisionadas por el operador d
 - La configuración admite directorio, base y proyecto explícitos por entorno; selección de identidad dinámica y rutas absolutas en subprocesos. `quickstart` autoinicia el origen HTTP loopback configurado, incluido su puerto (T-11). Los clientes restringen credenciales al origen del hub y requieren HTTPS fuera de loopback. Cada proyecto usa una base y un hub propios; T-11 persiste su vinculación y rechaza proyectos incompatibles.
 - El panel recibe un token administrativo en un formulario y lo mantiene en memoria; usa `fetch` con Authorization para HTTP/SSE.
 
-El token puede reutilizarse hasta revocación/vencimiento; por sí solo no aporta anti-replay por solicitud ni idempotencia. T-08 implementa esta última para envíos con clave, como se describe abajo. Tareas y locks continúan asociados al nombre del agente, sin leases por sesión (T-12). Compartir usuario Unix con acceso a todas las credenciales o a la base no protege frente a un agente malicioso.
+El token puede reutilizarse hasta revocación/vencimiento; por sí solo no aporta anti-replay por solicitud ni idempotencia. T-08 implementa esta última para envíos con clave, como se describe abajo. Tareas y locks continúan asociados al nombre del agente, con leases por sesión para locks (T-12). Compartir usuario Unix con acceso a todas las credenciales o a la base no protege frente a un agente malicioso.
 
 La suite legacy usa compatibilidad explícita; las pruebas nuevas de seguridad usan sesiones estrictas. La aceptación automatizada incluye provisión CLI y clientes MCP en proceso contra un hub efímero; la prueba de procesos stdio reales se incorpora en T-10; la aceptación con aplicaciones externas y navegador completo sigue en T-13.
 
@@ -158,4 +158,17 @@ T-10 se publicó en `origin/main` hasta `9010455` antes de iniciar esta tanda. I
 - Worker y watcher automático comparten guard `flock` por base/proyecto/agente. Observadores dry-run coexisten. Varias conexiones MCP con la misma identidad comparten inbox sin reserva de lectura; deben coordinar consumo/ACK. El guard es local Unix, no una lease distribuida.
 - `quickstart` respeta el puerto HTTP loopback configurado y rechaza un hub de otro proyecto; los destinos remotos no se autoinician.
 
-La siguiente tarea es **T-12**, alcance y renovación de locks por sesión. T-13 conserva la aceptación con aplicaciones MCP externas. El hub previo y sus listeners siguen activos sin reiniciarse ni migrarse automáticamente.
+T-12 incorpora alcance y renovación de locks por sesión, como se detalla a continuación. T-13 conserva la aceptación con aplicaciones MCP externas. El hub previo y sus listeners siguen activos sin reiniciarse ni migrarse automáticamente.
+
+
+## T-12: alcance y renovación de locks
+
+Implementación hasta `33eb90e`, validada con **592 pruebas aprobadas** en **137,77 s**, dos avisos de deprecación WebSocket. T-11 estaba publicado hasta `2a75289`. Contrato en [locks.md](docs/locks.md). Cada adquisición tiene sesión, token aleatorio y vencimiento; la base rechaza renovación/liberación por un token viejo, incluso si su sucesor pertenece al mismo agente y sesión. Los listados no exponen el token. No se permiten liberaciones sin `acquisition_id`.
+
+- Scope `checkout`: ruta física canónica desde el cwd del cliente, aislada entre copias de worktree. Scope `project`: recurso lógico bajo raíz canónica compartida, rechazando escapes. HTTP directo exige ruta relativa para `project`; CLI/MCP hacen la traducción desde su checkout.
+- TTL predeterminado 300 s, rango 1–3600 s, limitado por vencimiento de sesión. Renovación explícita mediante CLI `work renew-lock` o MCP `renew_lock`. Si falla o expira, detener la edición y adquirir de nuevo antes de continuar.
+- Migración: los locks antiguos sin sesión/token/lease quedan vencidos; volver a adquirir. La provisión Bearer, el hub y las credenciales se conservan. No se reinició el servicio previo de coordinación.
+- Las mutaciones consumen cursores y confirman en un callback atómico; el reloj se lee después de obtener acceso de escritura SQLite. Una transacción compartida pendiente produce un 503 reintentable, sin confirmar trabajo ajeno.
+- El lock es cooperativo: no intercepta editores externos ni frena escrituras de un proceso que ignora su vencimiento. No se cubren hardlinks, cambios de symlink posteriores ni montajes remotos distintos. `tasks/lock-files` es metadato descriptivo, no una adquisición de lease.
+
+Siguiente: **T-13**, aceptación con aplicaciones MCP externas y documentación de sus mecanismos reales de comunicación/reactivación.

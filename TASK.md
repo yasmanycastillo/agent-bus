@@ -28,7 +28,7 @@ T-01 habilita validaciones reproducibles. Después corregir T-02/T-03/T-04/T-05/
 | T-09 | P1 | Eventos recuperables y espera acotada | T-08 | completada | codex-integrator / codex-t09-storage / codex-t09-server / codex-t09-clients |
 | T-10 | P1 | SDK MCP y pruebas stdio | T-05, T-07, T-08, T-09 | completada | codex-integrator / codex-t10-stdio / codex-t10-contracts |
 | T-11 | P1 | Aislamiento por proyecto y sesión | T-05, T-06 | completada | codex-integrator / codex-t11-project / codex-t11-security / codex-t11-workers |
-| T-12 | P1 | Renovación y alcance de locks | T-04, T-11 | pendiente | — |
+| T-12 | P1 | Renovación y alcance de locks | T-04, T-11 | completada | codex-integrator / codex-t12-storage / codex-t12-paths / codex-t12-clients |
 | T-13 | P1 | Validación con dos clientes reales | T-01 a T-12 | pendiente | — |
 | T-14 | P2 | Workers recuperables y adaptadores | T-13 | pendiente | — |
 | T-15 | P2 | Integración Git verificada | T-14 | pendiente | — |
@@ -148,11 +148,11 @@ Definir namespace, descubrimiento de raíz y aislamiento de configuración/datos
 
 Definir recurso protegido, ruta canónica, propietario por sesión, lease y renovación. Coordinar el namespace con los worktrees.
 
-- [ ] Rutas equivalentes identifican el mismo recurso cuando corresponde.
-- [ ] Los recursos compartidos siguen protegidos y los archivos aislados no se bloquean entre sí por accidente.
-- [ ] Un lock abandonado expira según la política y una sesión viva puede renovarlo.
-- [ ] Un titular vencido no renueva ni libera el lock de su sucesor; usar token de adquisición o mecanismo equivalente.
-- [ ] Documentar los límites de los locks cooperativos frente a editores externos.
+- [x] Rutas equivalentes identifican el mismo recurso cuando corresponde.
+- [x] Los recursos compartidos siguen protegidos y los archivos aislados no se bloquean entre sí por accidente.
+- [x] Un lock abandonado expira según la política y una sesión viva puede renovarlo.
+- [x] Un titular vencido no renueva ni libera el lock de su sucesor; usar token de adquisición o mecanismo equivalente.
+- [x] Documentar los límites de los locks cooperativos frente a editores externos.
 
 ## T-13 — Aceptación del MVP y documentación realista
 
@@ -268,3 +268,21 @@ La aceptación automatizada cubre dos hubs HTTP simultáneos con nombres de tare
 Límites: varias conexiones manuales con la misma identidad comparten autoridad e inbox; no se promete consumo exclusivo por lectura. El guard automático es cooperativo, local Unix y requiere la misma base canónica; no es lease distribuida ni garantía exactamente una vez de efectos externos. Bases legacy con sesiones de distintos proyectos fallan sin separación automática.
 
 **Siguiente tarea: T-12**, alcance, propietario por sesión y renovación de locks de recursos. T-13 conserva aceptación con aplicaciones MCP externas. Se mantienen el hub previo y los listeners, sin reiniciar ni migrar automáticamente el servicio de coordinación.
+
+
+## Registro de T-12
+
+T-11 estaba publicado en `origin/main` hasta `2a75289`. Desarrollo aislado en worktrees de almacenamiento, rutas y clientes; integración hasta `33eb90e` en `agent/codex-integrator`.
+
+Implementado:
+
+- Scope físico `checkout` y lógico compartido `project`, con rutas canónicas, aliases por symlink, soporte de subdirectorios/worktrees y rechazo de escapes del proyecto.
+- Leases por sesión y token de adquisición, TTL 300 s por defecto (1–3600 s), limitado por la sesión. Reclamación de vencidos y renovación/liberación condicionales y atómicas; un token viejo no afecta a su sucesor, incluso bajo el mismo agente/sesión.
+- `renew_lock` MCP y `work renew-lock` CLI; token obligatorio al renovar/liberar. Listados y dashboard omiten el token. Instrucciones generadas, runner y AGENTS.md explican la conservación y renovación.
+- Migración transaccional de locks históricos, que quedan vencidos cuando no contienen una lease. Lectura del reloj tras obtener acceso de escritura SQLite; contención por transacción pendiente devuelve 503 reintentable sin confirmar trabajo ajeno.
+
+Validación final: **592 passed**, dos avisos de deprecación WebSocket, en **137,77 s**, con `uv run --locked pytest -q`. Antes, **117 pruebas dirigidas** de almacenamiento, HTTP y MCP pasaron en **35,85 s**, y **19 pruebas de clientes/rutas** en **0,71 s**. `ruff check --select F,E9` sobre implementación de locks/rutas, bus, DB, tipos, CLI, MCP y nuevas pruebas, más `git diff --check`, limpios. Revisión cruzada sin hallazgos materiales pendientes.
+
+Contrato y migración: [locks.md](docs/locks.md). Límites explícitos: renovación deliberada, sin fencing de escrituras del filesystem ni renovación automática por heartbeat; la revocación impide nuevas operaciones pero la lease existente conserva su vencimiento; `tasks/lock-files` sigue siendo metadato. El guard de ejecución local de T-11 es independiente.
+
+**Siguiente tarea: T-13**, aceptación con aplicaciones MCP externas y documentación realista de comunicación, espera y reactivación. El hub previo y los listeners permanecen activos; no se reinicia ni migra automáticamente ese servicio.

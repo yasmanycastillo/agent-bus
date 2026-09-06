@@ -106,7 +106,7 @@ El token es una credencial reutilizable hasta su vencimiento o revocación. No d
 
 - Proveer sesiones antes de activar el nuevo servidor y actualizar los clientes conjuntamente.
 - Las claves `.pub` anteriores no se convierten automáticamente en sesiones confiables.
-- Los mensajes, tareas y locks existentes se conservan. La identidad de propietario de tareas/locks continúa siendo `agent_id`; los leases y la diferenciación de sus sesiones corresponden a T-12.
+- Los mensajes, tareas y locks existentes se conservan. Las tareas conservan propietario `agent_id`; T-12 vincula los locks a sesión y token de adquisición, con vencimiento y renovación. Ver [migración de locks](locks.md).
 - `AGENT_BUS_ALLOW_UNSIGNED=1` habilita explícitamente compatibilidad sin autenticación para desarrollo y pruebas. No es el modo seguro. No usarlo para dar por aprobadas pruebas de autorización.
 - La suite mantiene pruebas legacy aisladas en ese modo y añade pruebas estrictas con sesiones y servicios efímeros.
 

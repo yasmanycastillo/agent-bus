@@ -38,7 +38,7 @@ responde por el bus.
 Implementado en `src/agent_bus/mcp/server.py` con el SDK oficial Python `mcp==2.1.1`; dependencias exactas en `uv.lock`. El SDK gestiona stdio JSON-RPC, negociación, solicitudes concurrentes y cancelación. Herramientas:
 `wait_for_updates` (long-poll bloqueante: chequea pendientes o conecta al SSE
 `/inbox/{id}/events`), `post_message`, `read_messages`, `claim_task`, `complete_task`,
-`acquire_lock`, `release_lock`, `get_project_status`, `record_decision`,
+`acquire_lock`, `renew_lock`, `release_lock`, `get_project_status`, `record_decision`,
 `ack_messages` y `reply_message`.
 
 En T-08, `read_messages` devuelve `{messages, next_cursor}`. `post_message` y
@@ -117,3 +117,5 @@ Las pruebas de autenticación ejercitan clientes MCP en proceso contra un hub HT
   externos, NO para el problema local. Ver análisis en el bus.
 
 El proyecto y la URL también se fijan al arrancar MCP. Para varias sesiones del mismo proveedor y resolución desde worktrees, seguir [proyectos y sesiones](projects.md).
+
+T-12 exige conservar `acquisition_id` para renovar/liberar locks; duración predeterminada 300 segundos. Ver [locks y leases](locks.md).
