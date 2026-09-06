@@ -28,10 +28,10 @@ class AgentRunner:
         provider: str = "claude",
         model: str | None = None,
         worktree_dir: Path | None = None,
-        bus_url: str | None = None,
         custom_executor: (
             Callable[[str, str | None], Coroutine[Any, Any, RunnerResult]] | None
         ) = None,
+        bus_url: str | None = None,
     ) -> None:
         self.bus_url = bus_url
         self.agent_id = agent_id

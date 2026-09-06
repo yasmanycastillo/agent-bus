@@ -232,6 +232,7 @@ def run_team(agents: str, mock: bool, base_ref: str, bus_url: str | None):
     # Validate every identity before creating worktrees or starting any worker.
     try:
         environments = {agent: worker_environment(agent, per_agent=True, bus_url=bus_url) for agent in agent_list}
+        providers = {agent: _worker_provider(agent, "mock" if mock else None, environments[agent]) for agent in agent_list}
     except AuthenticationError as exc:
         raise click.ClickException(str(exc)) from exc
     from agent_bus.project import get_checkout_root
@@ -251,7 +252,7 @@ def run_team(agents: str, mock: bool, base_ref: str, bus_url: str | None):
                 raise click.ClickException(f"No se pudo crear worktree para '{agent_id}': {exc}") from exc
 
         # 2. Iniciar daemon en background
-        provider = _worker_provider(agent_id, "mock" if mock else None, child_env)
+        provider = providers[agent_id]
         # Start worker via subprocess
         _workers_dir().mkdir(parents=True, exist_ok=True)
         pid_file = _pid_file(agent_id)
