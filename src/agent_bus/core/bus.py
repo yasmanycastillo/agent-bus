@@ -4,16 +4,20 @@ import asyncio
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
+from typing import Annotated
 
 import os
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 from sse_starlette.sse import EventSourceResponse
 
 from agent_bus.core.decisions import DecisionLog
-from agent_bus.core.inbox import InboxManager
+from agent_bus.core.inbox import (
+    IdempotencyConflict, InboxManager, InvalidCursor, MessageNotFound, SendResult,
+)
 from agent_bus.core.kickoff import KickoffManager
 from agent_bus.core.locks import LockError, LockManager
 from agent_bus.core.registry import AgentRegistry
@@ -34,6 +38,26 @@ class SendMessageRequest(BaseModel):
     signature: str | None = None
     correlation_id: str | None = None
     metadata: dict | None = None
+    conversation_id: str | None = None
+    idempotency_key: StrictStr | None = Field(default=None, min_length=1, max_length=128)
+
+
+class AcknowledgeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message_ids: list[Annotated[StrictStr, Field(min_length=1)]] = Field(min_length=1, max_length=100)
+
+
+class ReplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    body: dict
+    idempotency_key: StrictStr = Field(min_length=1, max_length=128)
+    reply_needed: StrictBool = False
+    acknowledge: StrictBool = False
+
+
+class FailureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    error: StrictStr = Field(min_length=1, max_length=2000)
 
 
 class RegisterRequest(BaseModel):
@@ -112,6 +136,19 @@ class MessageBus:
         self._setup_routes()
 
     def _setup_routes(self) -> None:
+        # Storage owns atomic conflict checks; translate failures consistently.
+        @self.app.exception_handler(IdempotencyConflict)
+        async def idempotency_conflict(request: Request, exc: IdempotencyConflict):
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+        @self.app.exception_handler(MessageNotFound)
+        async def missing_delivery(request: Request, exc: MessageNotFound):
+            return JSONResponse({"error": str(exc)}, status_code=404)
+
+        @self.app.exception_handler(InvalidCursor)
+        async def invalid_cursor(request: Request, exc: InvalidCursor):
+            return JSONResponse({"error": str(exc)}, status_code=422)
+
         @self.app.middleware("http")
         async def authenticate_request(request: Request, call_next):
             request.state.principal = None
@@ -150,7 +187,7 @@ class MessageBus:
                         body = {}
                     if isinstance(body, dict):
                         actors = []
-                        if path in ("/messages",) or path.endswith("/handoff"):
+                        if path in ("/messages",) or path.endswith(("/handoff", "/reply")):
                             actors.append("from_agent")
                         if path == "/decisions":
                             actors.append("decided_by")
@@ -228,22 +265,37 @@ class MessageBus:
                 signature=req.signature,
                 correlation_id=req.correlation_id,
                 metadata=req.metadata or {},
+                conversation_id=req.conversation_id,
             )
-            if req.to_agent and req.message_type != MessageType.BROADCAST:
-                msg_id = await self.inbox.deliver(envelope)
-                await self._push_to_agent(req.to_agent, envelope)
-                return {"message_id": msg_id, "status": "delivered"}
-            else:
-                agents = await self.registry.list_all()
-                results = []
-                for agent in agents:
-                    if agent.agent_id == req.from_agent:
-                        continue
-                    env_copy = envelope.model_copy(update={"to_agent": agent.agent_id})
-                    msg_id = await self.inbox.deliver(env_copy)
-                    await self._push_to_agent(agent.agent_id, env_copy)
-                    results.append(msg_id)
-                return {"message_ids": results, "status": "broadcast"}
+            return await self._send_message(envelope, req.idempotency_key)
+
+        @self.app.get("/inbox/{agent_id}/messages")
+        async def read_messages(
+            agent_id: str, cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100), reply_needed: bool | None = None,
+        ):
+            return await self.inbox.page(agent_id, cursor=cursor, limit=limit, reply_needed=reply_needed)
+
+        @self.app.post("/inbox/{agent_id}/ack")
+        async def acknowledge_messages(agent_id: str, req: AcknowledgeRequest):
+            return await self.inbox.acknowledgments(agent_id, req.message_ids)
+
+        @self.app.post("/inbox/{agent_id}/{message_id}/reply")
+        async def reply_message(agent_id: str, message_id: str, req: ReplyRequest):
+            result = await self.inbox.reply(
+                agent_id, message_id, req.body, idempotency_key=req.idempotency_key,
+                reply_needed=req.reply_needed, acknowledge=req.acknowledge,
+            )
+            return await self._publish_send(result)
+
+        @self.app.post("/inbox/{agent_id}/{message_id}/fail")
+        async def fail_message(agent_id: str, message_id: str, req: FailureRequest):
+            try:
+                return await self.inbox.record_failure(agent_id, message_id, req.error)
+            except MessageNotFound:
+                raise
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
 
         @self.app.get("/inbox/{agent_id}")
         async def get_inbox(agent_id: str):
@@ -252,25 +304,19 @@ class MessageBus:
 
         @self.app.get("/inbox/{agent_id}/pending")
         async def pending_inbox(agent_id: str):
-            messages = await self.inbox.get_inbox(agent_id)
-            count = len(messages)
-            reply_needed = [m for m in messages if m.reply_needed]
-            return {
-                "count": count,
-                "reply_needed": len(reply_needed),
-                "latest_senders": list({m.from_agent for m in messages[-5:]}),
-                "latest_summary": [
-                    {"from": m.from_agent, "text": str(m.body)[:60]}
-                    for m in messages[-3:]
-                ],
-            }
+            return await self.inbox.pending_summary(agent_id)
 
         @self.app.get("/inbox/{agent_id}/{message_id}")
         async def get_message(agent_id: str, message_id: str):
             msg = await self.inbox.get_message(agent_id, message_id)
             if not msg:
                 return JSONResponse({"error": "Message not found"}, status_code=404)
-            return msg.model_dump(mode="json")
+            state = await self.inbox.delivery_state(agent_id, message_id)
+            if state is None:
+                # Retention may remove an acknowledged delivery after the first
+                # read. Never turn missing state into an apparently pending item.
+                raise HTTPException(404, "Message delivery no longer exists")
+            return {**msg.model_dump(mode="json"), **state}
 
         @self.app.post("/inbox/{agent_id}/{message_id}/archive")
         async def archive_message(agent_id: str, message_id: str):
@@ -325,19 +371,14 @@ class MessageBus:
                         await self.registry.heartbeat(agent_id)
                         await websocket.send_json({"type": "heartbeat_ack"})
                         continue
-                    if envelope.to_agent and envelope.message_type != MessageType.BROADCAST:
-                        msg_id = await self.inbox.deliver(envelope)
-                        await self._push_to_agent(envelope.to_agent, envelope)
-                        await websocket.send_json({"type": "delivered", "message_id": msg_id})
-                    else:
-                        agents = await self.registry.list_all()
-                        for agent in agents:
-                            if agent.agent_id == agent_id:
-                                continue
-                            env_copy = envelope.model_copy(update={"to_agent": agent.agent_id})
-                            await self.inbox.deliver(env_copy)
-                            await self._push_to_agent(agent.agent_id, env_copy)
-                        await websocket.send_json({"type": "broadcast_sent"})
+                    # A WebSocket sender retains message_id when retrying an envelope.
+                    try:
+                        response = await self._send_message(envelope, "ws:" + sha256(envelope.message_id.encode()).hexdigest())
+                    except IdempotencyConflict as exc:
+                        await websocket.send_json({"type": "error", "status": 409, "error": str(exc)})
+                        continue
+                    response["type"] = "broadcast_sent" if response["status"] == "broadcast" else "delivered"
+                    await websocket.send_json(response)
                 await websocket.close(code=1008)
             except (WebSocketDisconnect, RuntimeError):
                 pass
@@ -513,24 +554,14 @@ class MessageBus:
             if not msg:
                 return JSONResponse({"error": "Message not found"}, status_code=404)
 
-            await self.inbox.archive("human", message_id)
-
-            envelope = Envelope(
-                from_agent=self._actor(request, "human"),
-                to_agent=msg.from_agent,
-                message_type=MessageType.INBOX,
-                body={
-                    "type": "approval_decision",
-                    "decision": decision,
-                    "note": note,
-                    "original": str(msg.body),
-                },
-                reply_needed=False,
-                correlation_id=message_id,
+            result = await self.inbox.reply(
+                "human", message_id,
+                {"type": "approval_decision", "decision": decision, "note": note, "original": str(msg.body)},
+                idempotency_key="room-approve:" + sha256(message_id.encode()).hexdigest(),
+                acknowledge=True, actor_id=self._actor(request, "human"),
             )
-            msg_id = await self.inbox.deliver(envelope)
-            await self._push_to_agent(msg.from_agent, envelope)
-            return {"status": "notified", "message_id": msg_id, "agent": msg.from_agent}
+            response = await self._publish_send(result)
+            return {**response, "status": "notified", "agent": msg.from_agent}
 
         @self.app.post("/room/api/assign")
         async def room_assign(req: dict, request: Request):
@@ -585,19 +616,10 @@ class MessageBus:
                 reply_needed=bool(req.get("reply_needed", False)),
                 related_task=req.get("related_task"),
             )
-            if envelope.to_agent:
-                msg_id = await self.inbox.deliver(envelope)
-                await self._push_to_agent(envelope.to_agent, envelope)
-                return {"status": "delivered", "message_id": msg_id}
-            agents = await self.registry.list_all()
-            results = []
-            for a in agents:
-                if a.agent_id == envelope.from_agent:
-                    continue
-                env_copy = envelope.model_copy(update={"to_agent": a.agent_id})
-                results.append(await self.inbox.deliver(env_copy))
-                await self._push_to_agent(a.agent_id, env_copy)
-            return {"status": "broadcast", "message_ids": results}
+            key = req.get("idempotency_key")
+            if key is not None and (not isinstance(key, str) or not 1 <= len(key) <= 128):
+                raise HTTPException(422, "idempotency_key must contain 1..128 characters")
+            return await self._send_message(envelope, key)
 
         @self.app.get("/room/api/overview")
         async def room_overview():
@@ -733,6 +755,30 @@ class MessageBus:
             if not result:
                 return JSONResponse({"error": "Step not found"}, status_code=404)
             return result.model_dump(mode="json")
+
+    async def _send_message(self, envelope: Envelope, idempotency_key: str | None = None) -> dict:
+        if envelope.to_agent not in (None, "*") and envelope.message_type != MessageType.BROADCAST:
+            recipients = [envelope.to_agent]
+        else:
+            recipients = [agent.agent_id for agent in await self.registry.list_all()
+                          if agent.agent_id != envelope.from_agent]
+        result = await self.inbox.send(envelope, recipients, idempotency_key=idempotency_key)
+        return await self._publish_send(result)
+
+    async def _publish_send(self, result: SendResult) -> dict:
+        if not result.replayed:
+            for recipient in result.recipients:
+                await self._push_to_agent(recipient, result.envelope.model_copy(update={"to_agent": recipient}))
+        broadcast = result.envelope.to_agent in (None, "*") or result.envelope.message_type == MessageType.BROADCAST
+        response = {
+            "message_id": result.envelope.message_id,
+            "conversation_id": result.envelope.conversation_id,
+            "status": "broadcast" if broadcast else "delivered",
+            "replayed": result.replayed,
+        }
+        if broadcast:
+            response["message_ids"] = [result.envelope.message_id for _ in result.recipients]
+        return response
 
     async def _task_failure(self, task_id: str, principal: Principal | None = None) -> JSONResponse:
         # This read only explains a failed conditional write; it never authorizes

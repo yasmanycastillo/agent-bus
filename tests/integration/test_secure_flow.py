@@ -32,8 +32,8 @@ async def test_secure_mcp_message_and_decision_identity(secure_bus, monkeypatch)
     assert "from_agent" not in definitions["post_message"]["inputSchema"]["properties"]
     assert "decided_by" not in definitions["record_decision"]["inputSchema"]["properties"]
 
-    sent = await tool(alice, "post_message", {"to_agent": "bob", "text": "Review T1"})
-    inbox = await tool(bob, "read_messages", {})
+    sent = await tool(alice, "post_message", {"to_agent": "bob", "text": "Review T1", "idempotency_key": "review-t1"})
+    inbox = (await tool(bob, "read_messages", {}))["messages"]
     assert len(inbox) == 1
     assert inbox[0]["message_id"] == sent["message_id"]
     assert inbox[0]["from_agent"] == "alice"
@@ -48,7 +48,7 @@ async def test_secure_mcp_message_and_decision_identity(secure_bus, monkeypatch)
         }},
     })
     assert "error" in forged or forged.get("result", {}).get("isError")
-    assert len(await tool(bob, "read_messages", {})) == 1
+    assert len((await tool(bob, "read_messages", {}))["messages"]) == 1
 
 
 async def test_secure_task_reassignment_revokes_previous_owner(secure_bus):
