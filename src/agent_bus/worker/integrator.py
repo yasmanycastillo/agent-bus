@@ -5,6 +5,7 @@ import json
 import logging
 import shutil
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -129,6 +130,32 @@ class BranchIntegrator:
         require_approval: bool | None = None,
     ) -> IntegratorResult:
         """Verifies candidate worktree, runs tests, and merges if green, or rejects with feedback."""
+        # The tested integration commit is kept reachable under a private ref
+        # until publish or abort; this wrapper guarantees cleanup on every path.
+        self._active_integration_ref = ""
+        try:
+            return await self._integrate_task_impl(
+                task_id, author_agent, worktree_dir, candidate_branch,
+                target_branch=target_branch, test_cmd=test_cmd,
+                acceptance_criteria=acceptance_criteria,
+                require_approval=require_approval,
+            )
+        finally:
+            if getattr(self, "_active_integration_ref", ""):
+                await self._delete_ref(self._active_integration_ref)
+                self._active_integration_ref = ""
+
+    async def _integrate_task_impl(
+        self,
+        task_id: str,
+        author_agent: str,
+        worktree_dir: Path,
+        candidate_branch: str,
+        target_branch: str = "main",
+        test_cmd: list[str] | None = None,
+        acceptance_criteria: list[str] | None = None,
+        require_approval: bool | None = None,
+    ) -> IntegratorResult:
         preflight_error = await self._preflight(worktree_dir, candidate_branch, target_branch)
         if preflight_error:
             return IntegratorResult(False, False, "rejected", error=preflight_error, output=preflight_error)
@@ -152,11 +179,14 @@ class BranchIntegrator:
             target_sha = await self._git_output("rev-parse", f"refs/heads/{target_branch}")
 
             # Build and test a temporary candidate worktree that combines the
-            # pinned candidate SHA with the current target branch, so the tested
-            # state is the state that will actually be integrated.
-            integration_sha, tests_passed, test_output, diff = await self._test_candidate(
-                candidate_sha, target_branch, worktree_dir, test_cmd
+            # pinned candidate SHA with the captured target SHA (never the
+            # movable branch name), so the tested state is the state that will
+            # actually be integrated. The combined commit is pinned under a
+            # private ref so it cannot be garbage-collected before publication.
+            integration_sha, integration_ref, tests_passed, test_output, diff = await self._test_candidate(
+                candidate_sha, target_sha, worktree_dir, test_cmd
             )
+            self._active_integration_ref = integration_ref
         else:
             tests_passed, test_output = await self.run_tests(worktree_dir, test_cmd)
             # Legacy non-git path (also exercised by tests that stub _git_output):
@@ -278,13 +308,9 @@ class BranchIntegrator:
             # otherwise the bus would still show the task as in_review.
             completed, completion_error = await self._finalize_merge(task_id)
             if not completed:
-                return IntegratorResult(
-                    success=False,
-                    merged=True,
-                    status="error",
-                    output=merge_output,
-                    error=f"Integrated {candidate_sha} into '{target_branch}' but failed to complete task {task_id}: {completion_error}",
-                    metadata={"review": decision.model_dump(mode="json"), "candidate_sha": candidate_sha, "integration_sha": integration_sha or None},
+                return await self._handle_done_failure(
+                    task_id, author_agent, candidate_sha, integration_sha,
+                    target_branch, target_sha, merge_output, decision, completion_error,
                 )
             return IntegratorResult(
                 success=True,
@@ -353,13 +379,9 @@ class BranchIntegrator:
             # otherwise the bus would still show the task as in_review.
             completed, completion_error = await self._finalize_merge(task_id)
             if not completed:
-                return IntegratorResult(
-                    success=False,
-                    merged=True,
-                    status="error",
-                    output=merge_output,
-                    error=f"Integrated {candidate_sha} into '{target_branch}' but failed to complete task {task_id}: {completion_error}",
-                    metadata={"review": decision.model_dump(mode="json"), "candidate_sha": candidate_sha, "integration_sha": integration_sha or None},
+                return await self._handle_done_failure(
+                    task_id, author_agent, candidate_sha, integration_sha,
+                    target_branch, target_sha, merge_output, decision, completion_error,
                 )
             return IntegratorResult(
                 success=True,
@@ -372,45 +394,53 @@ class BranchIntegrator:
     async def _test_candidate(
         self,
         sha: str,
-        target_branch: str,
+        target_sha: str,
         worktree_dir: Path,
         test_cmd: list[str] | None,
-    ) -> tuple[str, bool, str, str]:
-        """Build and test the exact candidate SHA combined with current target.
+    ) -> tuple[str, str, bool, str, str]:
+        """Build and test the exact candidate SHA combined with the captured target SHA.
 
-        Creates a throwaway worktree from ``target_branch``, merges the pinned
-        ``sha`` into it, runs the test suite, and captures the diff of the merged
-        result versus the target. Returns ``(sha, tests_passed, test_output,
-        diff)``. On infrastructure failure, tests are reported as failed with
-        the error in the output.
+        Creates a throwaway worktree detached at ``target_sha`` (never at the
+        movable branch name), merges the pinned ``sha`` into it, runs the test
+        suite, and captures the diff of the merged result versus ``target_sha``.
+        The combined commit is pinned under a unique private ref so it stays
+        reachable (GC-safe) until publish or abort.
+        Returns ``(integration_sha, integration_ref, tests_passed, test_output,
+        diff)``. On infrastructure failure tests are reported as failed.
         """
         work_root = Path(tempfile.mkdtemp(prefix="integrator-candidate-"))
         candidate_path: Path | None = None
+        integration_ref = f"refs/integrator/pending-{uuid.uuid4().hex[:12]}"
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "worktree", "add", "--detach", str(work_root / "candidate"), target_branch,
+                "git", "worktree", "add", "--detach", str(work_root / "candidate"), target_sha,
                 cwd=str(self.repo_dir),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
                 out = (stdout + stderr).decode("utf-8", errors="replace")
-                return sha, False, f"Failed to prepare candidate worktree: {out}", ""
+                return sha, "", False, f"Failed to prepare candidate worktree: {out}", ""
             candidate_path = work_root / "candidate"
 
-            merge_ok, merge_output = await self._merge_in_worktree(candidate_path, sha, target_branch)
+            merge_ok, merge_output = await self._merge_in_worktree(candidate_path, sha)
             if not merge_ok:
-                return sha, False, f"Candidate merge conflict against '{target_branch}':\n{merge_output}", ""
+                return sha, "", False, f"Candidate merge conflict against target {target_sha}:\n{merge_output}", ""
 
-            merged_sha_out = await self._git_output("rev-parse", "HEAD", cwd=candidate_path)
-            if merged_sha_out:
-                sha = merged_sha_out
+            integration_sha = await self._git_output("rev-parse", "HEAD", cwd=candidate_path)
+            if not integration_sha:
+                return sha, "", False, "Failed to resolve combined commit SHA.", ""
+
+            # Pin the combined commit under the private ref before anything else,
+            # so it cannot be garbage-collected between test and publish.
+            if not await self._update_ref(integration_ref, integration_sha, expected_old=""):
+                return sha, "", False, f"Failed to pin integration commit under {integration_ref}.", ""
 
             diff = await self._git_output(
-                "diff", f"{target_branch}...HEAD", cwd=candidate_path
+                "diff", f"{target_sha}...HEAD", cwd=candidate_path
             )
             tests_passed, test_output = await self.run_tests(candidate_path, test_cmd)
-            return sha, tests_passed, test_output, diff
+            return integration_sha, integration_ref, tests_passed, test_output, diff
         finally:
             if candidate_path is not None:
                 prune = await asyncio.create_subprocess_exec(
@@ -421,8 +451,8 @@ class BranchIntegrator:
                 await prune.communicate()
             shutil.rmtree(work_root, ignore_errors=True)
 
-    async def _merge_in_worktree(self, worktree: Path, sha: str, target_branch: str) -> tuple[bool, str]:
-        """Merge the pinned ``sha`` into ``target_branch`` inside a throwaway worktree."""
+    async def _merge_in_worktree(self, worktree: Path, sha: str) -> tuple[bool, str]:
+        """Merge the pinned ``sha`` into the detached target worktree."""
         try:
             proc = await asyncio.create_subprocess_exec(
                 "git", "merge", "--no-ff", "--no-edit", sha,
@@ -454,35 +484,184 @@ class BranchIntegrator:
     async def _integrate(
         self, integration_sha: str, target_branch: str, target_sha: str
     ) -> tuple[bool, str]:
-        """Move ``target_branch`` to the exact tested combined commit.
+        """Publish the tested combined commit via atomic compare-and-swap.
 
-        The combined commit was already built and tested in the throwaway
-        worktree. Before touching the target we verify it has not moved since
-        (target_sha); if it has, we report a conflict so the author rebases.
-        A fast-forward makes the final target tree exactly the tested tree.
+        Revalidates target state immediately before the CAS, then moves
+        ``refs/heads/<target>`` from ``target_sha`` to ``integration_sha`` in a
+        single ``git update-ref`` (atomic; fails if the ref moved meanwhile).
+        Afterwards the checked-out worktree/index is synchronized and the ref,
+        HEAD and tree are verified to equal the tested state exactly.
         """
         try:
             current = await self._git_output("symbolic-ref", "--short", "HEAD")
             if current != target_branch:
                 return False, f"Target checkout is on '{current or 'detached'}', expected '{target_branch}'."
+
+            # Revalidate immediately before the CAS: dirty tree, in-progress
+            # merge/rebase/cherry-pick, or a moved ref all abort publication.
+            status = await self._git_output("status", "--porcelain")
+            if status:
+                return False, f"Target worktree is dirty; refusing to publish:\n{status[:500]}"
+            for state_file in ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+                if (self._git_dir() / state_file).exists():
+                    return False, f"Git operation in progress ({state_file}); refusing to publish."
             head = await self._git_output("rev-parse", "HEAD")
             if target_sha and head != target_sha:
                 return False, (
                     f"Target '{target_branch}' moved from {target_sha} to {head} during integration; "
                     "please retry to recombine with the updated target."
                 )
-            proc = await asyncio.create_subprocess_exec(
-                "git", "merge", "--ff-only", integration_sha,
+
+            # Atomic compare-and-swap of the branch ref. update-ref fails if
+            # refs/heads/<target> does not still point at target_sha.
+            cas = await asyncio.create_subprocess_exec(
+                "git", "update-ref", f"refs/heads/{target_branch}", integration_sha, target_sha,
                 cwd=str(self.repo_dir),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
-            out = stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")
-            if proc.returncode != 0:
-                return False, "Failed to fast-forward target to tested commit: " + out
-            return (True, f"Integrated tested commit {integration_sha} into '{target_branch}'.\n" + out)
+            cas_out, cas_err = await cas.communicate()
+            if cas.returncode != 0:
+                out = (cas_out + cas_err).decode("utf-8", errors="replace")
+                return False, f"Atomic ref update lost or failed: {out}"
+
+            # Synchronize the checked-out worktree and index to the new ref.
+            reset = await asyncio.create_subprocess_exec(
+                "git", "reset", "--hard", integration_sha,
+                cwd=str(self.repo_dir),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            reset_out, reset_err = await reset.communicate()
+            if reset.returncode != 0:
+                out = (reset_out + reset_err).decode("utf-8", errors="replace")
+                return False, f"Ref published but worktree sync failed: {out}"
+
+            # Verify ref, HEAD and tree are exactly the tested state.
+            ref_now = await self._git_output("rev-parse", f"refs/heads/{target_branch}")
+            head_now = await self._git_output("rev-parse", "HEAD")
+            tree_ref = await self._git_output("rev-parse", f"{integration_sha}^{{tree}}")
+            tree_head = await self._git_output("rev-parse", "HEAD^{tree}")
+            if ref_now != integration_sha or head_now != integration_sha or tree_ref != tree_head:
+                return False, (
+                    f"Post-publish verification failed: ref={ref_now} head={head_now} "
+                    f"expected={integration_sha} tree_ref={tree_ref} tree_head={tree_head}"
+                )
+            return (True, f"Published tested commit {integration_sha} onto '{target_branch}'.")
         except Exception as exc:
             return (False, str(exc))
+
+    async def _rollback_target(
+        self, target_branch: str, integration_sha: str, previous_sha: str
+    ) -> tuple[bool, str]:
+        """Conditionally roll the target back; lose gracefully if we lost the ref."""
+        try:
+            cas = await asyncio.create_subprocess_exec(
+                "git", "update-ref", f"refs/heads/{target_branch}", previous_sha, integration_sha,
+                cwd=str(self.repo_dir),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await cas.communicate()
+            if cas.returncode != 0:
+                return (False, err.decode("utf-8", errors="replace"))
+            sync = await asyncio.create_subprocess_exec(
+                "git", "reset", "--hard", previous_sha,
+                cwd=str(self.repo_dir),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await sync.communicate()
+            return (True, "")
+        except Exception as exc:
+            return (False, str(exc))
+
+    async def _handle_done_failure(
+        self,
+        task_id: str,
+        author_agent: str,
+        candidate_sha: str,
+        integration_sha: str,
+        target_branch: str,
+        target_sha: str,
+        merge_output: str,
+        decision: ReviewDecision,
+        completion_error: str | None,
+    ) -> IntegratorResult:
+        """POST /done failed after publication: try conditional rollback, else reconcile.
+
+        Rollback happens only via compare-and-swap from integration_sha back to
+        target_sha; if another writer already advanced the target, the CAS loses
+        and we surface an explicit reconciliation-needed error instead of
+        silently reporting success or clobbering the newer state.
+        """
+        rolled_back, rollback_error = (False, "")
+        if integration_sha and target_sha:
+            rolled_back, rollback_error = await self._rollback_target(
+                target_branch, integration_sha, target_sha
+            )
+        base_meta = {
+            "review": decision.model_dump(mode="json"),
+            "candidate_sha": candidate_sha,
+            "integration_sha": integration_sha or None,
+        }
+        if rolled_back:
+            await self._notify_author_failure(
+                task_id, author_agent,
+                f"Integration rolled back because task completion failed: {completion_error}",
+                self._retry_counts.get(task_id, 0) + 1,
+            )
+            return IntegratorResult(
+                success=False,
+                merged=False,
+                status="error",
+                output=merge_output,
+                error=(
+                    f"Published {integration_sha} onto '{target_branch}' but POST /tasks/{task_id}/done "
+                    f"failed ({completion_error}); target rolled back to {target_sha}."
+                ),
+                metadata={**base_meta, "rolled_back": True},
+            )
+        await self._notify_bus_blocked(
+            task_id, author_agent,
+            f"Task {task_id} integrated as {integration_sha} but bus completion failed; "
+            "manual reconciliation required.",
+        )
+        return IntegratorResult(
+            success=False,
+            merged=True,
+            status="error",
+            output=merge_output,
+            error=(
+                f"Published {integration_sha} onto '{target_branch}' and POST /tasks/{task_id}/done failed "
+                f"({completion_error}); rollback lost the race ({rollback_error}). Target left at "
+                f"{integration_sha} — manual reconciliation of the bus task state is required."
+            ),
+            metadata={**base_meta, "rolled_back": False, "reconciliation_required": True},
+        )
+
+    def _git_dir(self) -> Path:
+        """Best-effort resolve of the .git dir (plain dir or worktree file)."""
+        git_path = self.repo_dir / ".git"
+        if git_path.is_file():
+            text = git_path.read_text(encoding="utf-8", errors="replace").strip()
+            if text.startswith("gitdir:"):
+                target = Path(text[len("gitdir:"):].strip())
+                return target if target.is_absolute() else (self.repo_dir / target)
+        return git_path
+
+    async def _update_ref(self, ref: str, new: str, expected_old: str = "") -> bool:
+        args = ["update-ref", ref, new] + ([expected_old] if expected_old else [])
+        proc = await asyncio.create_subprocess_exec(
+            "git", *args, cwd=str(self.repo_dir),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        return proc.returncode == 0
+
+    async def _delete_ref(self, ref: str) -> bool:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "update-ref", "-d", ref, cwd=str(self.repo_dir),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        return proc.returncode == 0
 
     async def _merge_branches(self, sha: str, target_branch: str) -> tuple[bool, str]:
         """Merge the pinned reviewed commit SHA into target branch in main repo."""
@@ -528,7 +707,8 @@ class BranchIntegrator:
         """Mark the task completed, surfacing persistence failures to the caller."""
         try:
             async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
-                await client.post(f"/tasks/{task_id}/done")
+                resp = await client.post(f"/tasks/{task_id}/done")
+                resp.raise_for_status()
             return (True, None)
         except Exception as exc:
             logger.error(f"Failed to mark task {task_id} done: {exc}")
@@ -555,6 +735,13 @@ class BranchIntegrator:
             return f"Candidate branch '{candidate_branch}' does not exist."
         if not await self._git_output("rev-parse", "--verify", f"refs/heads/{target_branch}"):
             return f"Target branch '{target_branch}' does not exist."
+        # Target checkout must be clean and idle before we test against it.
+        target_status = await self._git_output("status", "--porcelain")
+        if target_status:
+            return f"Target worktree is dirty; commit or stash before integrating:\n{target_status[:500]}"
+        for state_file in ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+            if (self._git_dir() / state_file).exists():
+                return f"Git operation in progress on target ({state_file}); refusing to integrate."
         return None
 
     async def _notify_author_failure(self, task_id: str, author_agent: str, details: str, retry: int) -> None:
@@ -622,7 +809,8 @@ class BranchIntegrator:
         """Persist the review decision; returns False if the audit trail was not written."""
         try:
             async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
-                await client.post("/reviews", json=decision.model_dump(mode="json"))
+                resp = await client.post("/reviews", json=decision.model_dump(mode="json"))
+                resp.raise_for_status()
             return True
         except Exception as exc:
             logger.error(f"Failed to record review for task {decision.task_id}: {exc}")
