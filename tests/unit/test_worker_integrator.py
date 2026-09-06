@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_bus.worker.integrator import BranchIntegrator, IntegratorResult
+from agent_bus.security import async_bus_client
+from agent_bus.worker.integrator import BranchIntegrator
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -442,17 +443,21 @@ async def test_record_review_real_404_fails_closed(tmp_path, live_bus_url):
     integrator = BranchIntegrator(repo_dir=repo, bus_url=live_bus_url)
 
     # Corrupt the decision after evaluation so the server rejects it (400).
+    http_evidence: list = []
+
     async def record_invalid(decision):
-        from agent_bus.worker.gatekeeper import ReviewDecision
         bad = decision.model_dump(mode="json")
         bad["verdict"] = "not-a-verdict"  # server returns 400
-        import httpx
         try:
-            async with async_bus_client(integrator.agent_id, base_url=integrator.bus_url, timeout=10.0) as client:
+            async with async_bus_client(
+                integrator.agent_id, base_url=integrator.bus_url, timeout=10.0
+            ) as client:
                 resp = await client.post("/reviews", json=bad)
+                http_evidence.append(resp.status_code)
                 resp.raise_for_status()
             return True
-        except Exception:
+        except Exception as exc:
+            http_evidence.append(f"exception:{type(exc).__name__}")
             return False
 
     integrator._record_review = record_invalid  # type: ignore
@@ -463,6 +468,8 @@ async def test_record_review_real_404_fails_closed(tmp_path, live_bus_url):
     assert res.success is False
     assert res.merged is False
     assert res.status == "error"
+    # The HTTP request really happened and the server answered 400
+    assert http_evidence and http_evidence[0] == 400
     # main untouched
     assert "feature.txt" not in [p.name for p in repo.iterdir()]
 
@@ -627,8 +634,6 @@ async def test_pending_ref_lifecycle_created_then_deleted(tmp_path):
 
     integrator._record_review = mock_record  # type: ignore
     integrator._finalize_merge = mock_finalize  # type: ignore
-
-    refs_seen: list[str] = []
 
     async def spy_run_tests(worktree_dir, test_cmd=None):
         # While testing, the pending ref must already exist... (it is created
