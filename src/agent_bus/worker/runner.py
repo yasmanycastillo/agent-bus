@@ -89,9 +89,11 @@ class AgentRunner:
 
         parts.append(
             "\n## Operating Rules:\n"
-            "1. Lock files before editing with `agent-bus work lock <file>`.\n"
+            "1. Lock files before editing with `agent-bus work lock <file>`; preserve acquisition_id and expires_at. "
+            "Renew before expiry with `agent-bus work renew-lock <file> --acquisition-id <token>`; stop editing if renewal fails.\n"
             "2. Run tests to verify your changes.\n"
-            "3. If done, unlock files and run `agent-bus work done <task_id>`.\n"
+            "3. If done, release each acquisition with `agent-bus work unlock <file> --acquisition-id <token>` "
+            "and run `agent-bus work done <task_id>`.\n"
             "4. If you need info from a peer, run `agent-bus work msg <agent> '<question>' --reply-needed`."
         )
 

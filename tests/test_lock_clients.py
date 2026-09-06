@@ -1,6 +1,5 @@
 """Acquisition tokens are explicit and paths retain each client's scope."""
 import json
-from pathlib import Path
 
 import httpx
 import pytest

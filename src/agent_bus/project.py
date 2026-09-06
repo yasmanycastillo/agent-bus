@@ -218,7 +218,7 @@ Use `agent-bus work check` for a quick check. Use `agent-bus work inbox` for ful
 
 - **Autonomous Background Listener**: You MUST have a background watcher/worker running during the entire session to reactively receive requests from other agents.
 - **Never** edit a file locked by another agent. Check with `agent-bus show locks`.
-- **Always** lock files before editing them (`agent-bus work lock <file>`).
+- **Always** lock files before editing them (`agent-bus work lock <file>`). Preserve acquisition_id and expires_at; renew with `agent-bus work renew-lock <file> --acquisition-id <token>` before expiry, and release with `agent-bus work unlock <file> --acquisition-id <token>`. Stop editing if renewal fails. Use `--scope project` consistently for resources shared across worktrees.
 - **Always** communicate via `agent-bus work msg` — never assume the other agent knows what you are doing.
 - **Always** register decisions that affect architecture or scope (`agent-bus work decide`).
 - **Always** hand off tasks properly with context if you cannot finish them.

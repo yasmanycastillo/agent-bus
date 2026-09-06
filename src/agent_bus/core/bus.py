@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import os
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -20,7 +20,8 @@ from agent_bus.core.inbox import (
     IdempotencyConflict, InboxManager, InvalidCursor, MessageNotFound, SendResult,
 )
 from agent_bus.core.kickoff import KickoffManager
-from agent_bus.core.locks import LockError, LockManager
+from agent_bus.core.locks import LockBusyError, LockError, LockManager
+from agent_bus.core.lock_paths import server_lock_path
 from agent_bus.core.registry import AgentRegistry
 from agent_bus.core.skills import SkillRegistry
 from agent_bus.core.tasks import TaskManager
@@ -85,15 +86,24 @@ class ReassignRequest(BaseModel):
     new_owner: str
 
 
-class LockRequest(BaseModel):
-    file_path: str
+class LockResourceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    file_path: str = Field(min_length=1, max_length=4096)
+    scope: Literal["checkout", "project"] = "checkout"
     agent_id: str | None = None
-    reason: str | None = None
 
 
-class ReleaseRequest(BaseModel):
-    file_path: str
-    agent_id: str | None = None
+class LockRequest(LockResourceRequest):
+    reason: str | None = Field(default=None, max_length=4096)
+    ttl_seconds: int = Field(default=300, ge=1, le=3600, strict=True)
+
+
+class ReleaseRequest(LockResourceRequest):
+    acquisition_id: str = Field(min_length=1, max_length=128)
+
+
+class RenewRequest(ReleaseRequest):
+    ttl_seconds: int = Field(default=300, ge=1, le=3600, strict=True)
 
 
 class DecisionRequest(BaseModel):
@@ -119,9 +129,11 @@ class KickoffStepRequest(BaseModel):
 
 
 class MessageBus:
-    def __init__(self, db: Database, registry: AgentRegistry, inbox: InboxManager, project_id: str | None = None, context_path=None) -> None:
+    def __init__(self, db: Database, registry: AgentRegistry, inbox: InboxManager, project_id: str | None = None, context_path=None, project_root=None) -> None:
         from pathlib import Path
         self.context_path = Path(context_path or Path(db.db_path).parent / "context.yaml").resolve()
+        self.project_root = Path(project_root).resolve() if project_root else None
+        self.lock_base_dir = self.project_root or Path(db.db_path).resolve().parent
         self.db = db
         self.project_id = project_id or os.environ.get("AGENT_BUS_PROJECT_ID", "default")
         self.sessions = SessionStore(db, self.project_id)
@@ -507,27 +519,63 @@ class MessageBus:
 
         # --- Lock endpoints ---
 
+        def lock_arguments(req, request):
+            principal = request.state.principal
+            path = server_lock_path(req.file_path, req.scope, project_root=self.project_root,
+                                    base_dir=self.lock_base_dir)
+            return path, self._actor(request, req.agent_id), principal
+
         @self.app.post("/locks/acquire")
         async def acquire_lock(req: LockRequest, request: Request):
-            req.agent_id = self._actor(request, req.agent_id)
             try:
-                lock = await self.locks.acquire(req.file_path, req.agent_id, req.reason)
+                path, agent, principal = lock_arguments(req, request)
+                lock = await self.locks.acquire(
+                    path, agent, req.reason, session_id=principal.session_id if principal else None,
+                    ttl_seconds=req.ttl_seconds,
+                    session_expires_at=principal.expires_at if principal else None,
+                )
                 return lock.model_dump(mode="json")
-            except LockError as e:
-                return JSONResponse({"error": str(e)}, status_code=409)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=422)
+            except LockBusyError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=503, headers={"Retry-After": "1"})
+            except LockError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
+
+        @self.app.post("/locks/renew")
+        async def renew_lock(req: RenewRequest, request: Request):
+            try:
+                path, agent, principal = lock_arguments(req, request)
+                lock = await self.locks.renew(
+                    path, agent, session_id=principal.session_id if principal else None,
+                    acquisition_id=req.acquisition_id, ttl_seconds=req.ttl_seconds,
+                    session_expires_at=principal.expires_at if principal else None,
+                )
+                return lock.model_dump(mode="json")
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=422)
+            except LockBusyError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=503, headers={"Retry-After": "1"})
+            except LockError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
 
         @self.app.post("/locks/release")
         async def release_lock(req: ReleaseRequest, request: Request):
-            req.agent_id = self._actor(request, req.agent_id)
             try:
-                await self.locks.release(req.file_path, req.agent_id)
+                path, agent, principal = lock_arguments(req, request)
+                await self.locks.release(path, agent, session_id=principal.session_id if principal else None,
+                                         acquisition_id=req.acquisition_id)
                 return {"status": "released"}
-            except LockError as e:
-                return JSONResponse({"error": str(e)}, status_code=403)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=422)
+            except LockBusyError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=503, headers={"Retry-After": "1"})
+            except LockError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=403)
 
         @self.app.get("/locks")
         async def list_locks():
-            return [lk.model_dump(mode="json") for lk in await self.locks.list_locks()]
+            return [lk.model_dump(mode="json", exclude={"acquisition_id"}) for lk in await self.locks.list_locks()]
 
         # --- Agent management endpoints ---
 
@@ -664,7 +712,7 @@ class MessageBus:
             return {
                 "tasks": [t.model_dump(mode="json") for t in tasks],
                 "agents": [a.model_dump(mode="json") for a in agents],
-                "locks": [l.model_dump(mode="json") for l in locks],
+                "locks": [l.model_dump(mode="json", exclude={"acquisition_id"}) for l in locks],
                 "decisions": [d.model_dump(mode="json") for d in decisions],
                 "pending_approvals": len([m for m in human_inbox if m.reply_needed]),
             }
@@ -965,6 +1013,6 @@ def create_app() -> FastAPI:
 
     registry = AgentRegistry(heartbeat_miss_threshold=config.bus.heartbeat_miss_threshold)
     inbox = InboxManager(db)
-    bus = MessageBus(db=db, registry=registry, inbox=inbox, project_id=config.bus.project_id, context_path=get_config_dir() / "context.yaml")
+    bus = MessageBus(db=db, registry=registry, inbox=inbox, project_id=config.bus.project_id, context_path=get_config_dir() / "context.yaml", project_root=config.project_root)
     bus.app.router.lifespan_context = lifespan
     return bus.app

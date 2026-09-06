@@ -109,12 +109,15 @@ async def test_secure_mcp_task_and_lock_lifecycle(secure_bus):
     assert (claimed["owner"], claimed["status"]) == ("alice", "in_progress")
     lock = await tool(alice, "acquire_lock", {"file_path": "review.py", "reason": "MCP review"})
     assert lock["locked_by"] == "alice"
+    renewed = await tool(alice, "renew_lock", {"file_path": "review.py", "acquisition_id": lock["acquisition_id"], "ttl_seconds": 600})
+    assert renewed["acquisition_id"] == lock["acquisition_id"]
+    lock = renewed
     async with Client(bob.sdk_server()) as client:
-        denied = await client.call_tool("release_lock", {"file_path": "review.py"})
+        denied = await client.call_tool("release_lock", {"file_path": "review.py", "acquisition_id": lock["acquisition_id"]})
     assert denied.is_error
     assert denied.structured_content["code"] == "hub_error"
     status = await tool(bob, "get_project_status", {})
-    assert status["locks"] == [lock]
-    await tool(alice, "release_lock", {"file_path": "review.py"})
+    assert status["locks"] == [{key: value for key, value in lock.items() if key != "acquisition_id"}]
+    await tool(alice, "release_lock", {"file_path": "review.py", "acquisition_id": lock["acquisition_id"]})
     assert (await tool(alice, "complete_task", {"task_id": "MCP-1"}))["status"] == "done"
     assert (await tool(alice, "get_project_status", {}))["locks"] == []

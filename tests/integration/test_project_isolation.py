@@ -74,6 +74,7 @@ def test_live_hubs_isolate_same_names_and_reject_foreign_credentials(two_project
         clients = [stack.enter_context(httpx.Client(base_url=project.url, headers=headers(project)))
                    for project in two_projects]
         sent = []
+        acquired_locks = []
         for project, client in zip(two_projects, clients):
             assert request(client, "GET", "/health")["project_id"] == project.project_id
             task = request(client, "POST", "/tasks", json={"task_id": "SAME-TASK", "title": project.project_id})
@@ -81,12 +82,13 @@ def test_live_hubs_isolate_same_names_and_reject_foreign_credentials(two_project
             request(client, "POST", "/tasks/SAME-TASK/claim", json={})
             locked = request(client, "POST", "/locks/acquire", json={"file_path": "same.py", "reason": project.project_id})
             assert locked["locked_by"] == "alice"
+            acquired_locks.append(locked)
             sent.append(request(client, "POST", "/messages", json={
                 "to_agent": "bob", "body": {"text": project.project_id}, "idempotency_key": "same-key",
             }))
         assert sent[0]["message_id"] != sent[1]["message_id"]
         request(clients[0], "POST", "/tasks/SAME-TASK/done")
-        request(clients[0], "POST", "/locks/release", json={"file_path": "same.py"})
+        request(clients[0], "POST", "/locks/release", json={"file_path": "same.py", "acquisition_id": acquired_locks[0]["acquisition_id"]})
         assert request(clients[0], "GET", "/tasks/SAME-TASK")["status"] == "done"
         assert request(clients[1], "GET", "/tasks/SAME-TASK")["status"] == "in_progress"
         assert request(clients[0], "GET", "/locks") == []

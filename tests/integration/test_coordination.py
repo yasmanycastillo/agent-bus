@@ -118,8 +118,8 @@ async def test_lock_conflict(client: AsyncClient):
 
 
 async def test_lock_release(client: AsyncClient):
-    await client.post("/locks/acquire", json={"file_path": "a.py", "agent_id": "claude"})
-    resp = await client.post("/locks/release", json={"file_path": "a.py", "agent_id": "claude"})
+    acquired = await client.post("/locks/acquire", json={"file_path": "a.py", "agent_id": "claude"})
+    resp = await client.post("/locks/release", json={"file_path": "a.py", "agent_id": "claude", "acquisition_id": acquired.json()["acquisition_id"]})
     assert resp.status_code == 200
 
     resp = await client.get("/locks")
@@ -127,8 +127,8 @@ async def test_lock_release(client: AsyncClient):
 
 
 async def test_lock_release_wrong_owner(client: AsyncClient):
-    await client.post("/locks/acquire", json={"file_path": "a.py", "agent_id": "claude"})
-    resp = await client.post("/locks/release", json={"file_path": "a.py", "agent_id": "codex"})
+    acquired = await client.post("/locks/acquire", json={"file_path": "a.py", "agent_id": "claude"})
+    resp = await client.post("/locks/release", json={"file_path": "a.py", "agent_id": "codex", "acquisition_id": acquired.json()["acquisition_id"]})
     assert resp.status_code == 403
 
 
