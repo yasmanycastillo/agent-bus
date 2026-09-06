@@ -154,7 +154,10 @@ class AgentRunner:
         if self.provider == "codex":
             return await self._execute_codex_cli(prompt, thread_id, timeout_seconds)
 
-        if self.provider in ("grok", "xai", "openai"):
+        if self.provider in ("grok", "xai"):
+            return await self._execute_grok_cli(prompt, thread_id, timeout_seconds)
+
+        if self.provider == "openai":
             return await self._execute_generic_cli(prompt, thread_id, timeout_seconds)
 
         return RunnerResult(
@@ -221,7 +224,7 @@ class AgentRunner:
                 exit_code=127,
             )
 
-        cmd = [agy_bin, "--prompt", prompt]
+        cmd = [agy_bin, "--prompt", prompt, "--output-format", "json"]
         if self.model:
             cmd.extend(["--model", self.model])
 
@@ -251,6 +254,18 @@ class AgentRunner:
         if self.model:
             cmd.extend(["--model", self.model])
 
+        return await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+
+    async def _execute_grok_cli(self, prompt: str, thread_id: str | None, timeout_seconds: float) -> RunnerResult:
+        """Invokes Grok Build's single-turn headless mode, avoiding its interactive TUI."""
+        grok_bin = shutil.which("grok")
+        if not grok_bin:
+            return RunnerResult(False, "", error="Grok CLI binary ('grok') not found in PATH.", exit_code=127)
+        cmd = [grok_bin, "-p", prompt, "--output-format", "json", "--no-alt-screen", "--no-plan"]
+        if self.model:
+            cmd.extend(["--model", self.model])
+        if thread_id and thread_id in self.session_map:
+            cmd.extend(["--resume", self.session_map[thread_id]])
         return await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
 
     async def _execute_codex_cli(
@@ -356,7 +371,7 @@ class AgentRunner:
             try:
                 data = json.loads(stdout_text)
                 if isinstance(data, dict):
-                    new_session_id = data.get("session_id")
+                    new_session_id = data.get("session_id") or data.get("sessionId")
             except Exception:
                 pass
 

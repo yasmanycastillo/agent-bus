@@ -104,3 +104,20 @@ async def test_codex_uses_native_exec_and_resume(monkeypatch, tmp_path):
     assert "sid-1" in calls[1]
     restored = AgentRunner("codex", provider="codex", session_file=tmp_path / "sessions.json")
     assert restored.session_map == {"thread": "sid-1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider, expected", [
+    ("agy", ["--prompt", "hello", "--output-format", "json"]),
+    ("grok", ["-p", "hello", "--output-format", "json", "--no-alt-screen", "--no-plan"]),
+])
+async def test_real_provider_adapters_use_headless_commands(monkeypatch, provider, expected):
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    calls = []
+    async def fake_subprocess(cmd, timeout, thread_id=None):
+        calls.append(cmd)
+        return RunnerResult(True, '{"sessionId":"sid"}', session_id="sid")
+    runner = AgentRunner(provider, provider=provider)
+    monkeypatch.setattr(runner, "_run_subprocess", fake_subprocess)
+    await runner.execute_turn("hello", thread_id="t")
+    assert calls[0][1:1 + len(expected)] == expected
