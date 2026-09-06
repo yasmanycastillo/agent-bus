@@ -64,6 +64,11 @@ def _has_project_marker(base: Path) -> bool:
     return True
 
 
+def _has_git_boundary(base: Path) -> bool:
+    """Recognize repository boundaries even when Git cannot read the metadata."""
+    return (base / ".git").exists()
+
+
 def resolve_project_root(cwd: Path | None = None) -> Path | None:
     """Find the nearest project, sharing canonical state across Git worktrees.
 
@@ -92,7 +97,7 @@ def resolve_project_root(cwd: Path | None = None) -> Path | None:
             return candidate
         # Fail closed if Git is unavailable or metadata is broken: do not
         # inherit an outer project's configuration through a nested repository.
-        if (candidate / ".git").exists():
+        if _has_git_boundary(candidate):
             return candidate
     return None
 
