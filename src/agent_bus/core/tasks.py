@@ -392,8 +392,7 @@ class TaskManager:
     ) -> Task | None:
         """Transfer a nonterminal task and audit it in one SQLite transaction.
 
-        All statements run in one aiosqlite worker operation: other coroutines
-        sharing the connection cannot commit between mutation and audit.
+        Mutation and audit commit together on a dedicated connection.
         """
         now = datetime.now(timezone.utc).isoformat()
         condition = "task_id = ? AND status != 'done'"
@@ -404,48 +403,40 @@ class TaskManager:
         action = "handoff" if require_owner else "reassign"
 
         def transaction(connection):
-            connection.execute("SAVEPOINT task_transfer")
-            try:
-                audit = connection.execute(
-                    """INSERT INTO audit_log
-                    (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, created_at)
-                    SELECT ?, task_id, ?, ?, owner, ?, ? FROM tasks WHERE """ + condition,
-                    (action, actor, session_id, new_owner, now) + params,
-                )
-                if audit.rowcount == 0:
-                    connection.execute("RELEASE task_transfer")
-                    return None
+            audit = connection.execute(
+                """INSERT INTO audit_log
+                (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, created_at)
+                SELECT ?, task_id, ?, ?, owner, ?, ? FROM tasks WHERE """ + condition,
+                (action, actor, session_id, new_owner, now) + params,
+            )
+            if audit.rowcount == 0:
+                return None
 
-                if new_owner == "free":
-                    dep_rows = connection.execute("SELECT depends_on FROM tasks WHERE task_id = ?", (task_id,)).fetchall()
-                    is_blocked = False
-                    if dep_rows and dep_rows[0][0]:
-                        deps = json.loads(dep_rows[0][0])
-                        if deps:
-                            placeholders = ",".join("?" * len(deps))
-                            c = connection.execute(
-                                f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) AND status = 'done'",
-                                tuple(deps),
-                            ).fetchone()[0]
-                            if c < len(deps):
-                                is_blocked = True
-                    status = ", status = 'blocked'" if is_blocked else ", status = 'pending'"
-                else:
-                    status = ", status = 'in_progress'"
+            if new_owner == "free":
+                dep_rows = connection.execute("SELECT depends_on FROM tasks WHERE task_id = ?", (task_id,)).fetchall()
+                is_blocked = False
+                if dep_rows and dep_rows[0][0]:
+                    deps = json.loads(dep_rows[0][0])
+                    if deps:
+                        placeholders = ",".join("?" * len(deps))
+                        c = connection.execute(
+                            f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) AND status = 'done'",
+                            tuple(deps),
+                        ).fetchone()[0]
+                        if c < len(deps):
+                            is_blocked = True
+                status = ", status = 'blocked'" if is_blocked else ", status = 'pending'"
+            else:
+                status = ", status = 'in_progress'"
 
-                rows = connection.execute(
-                    "UPDATE tasks SET owner = ?, updated_at = ?" + status
-                    + " WHERE " + condition + " RETURNING *",
-                    (new_owner, now) + params,
-                ).fetchall()
-                connection.execute("RELEASE task_transfer")
-                return rows[0]
-            except BaseException:
-                connection.execute("ROLLBACK TO task_transfer")
-                connection.execute("RELEASE task_transfer")
-                raise
+            rows = connection.execute(
+                "UPDATE tasks SET owner = ?, updated_at = ?" + status
+                + " WHERE " + condition + " RETURNING *",
+                (new_owner, now) + params,
+            ).fetchall()
+            return rows[0]
 
-        row = await self._db.conn._execute(transaction, self._db.conn._conn)
+        row = await self._db.transaction(transaction)
         return self._row_to_task(row) if row is not None else None
 
     async def unlock_files(self, task_id: str) -> Task | None:

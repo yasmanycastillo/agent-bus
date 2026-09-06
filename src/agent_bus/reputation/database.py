@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import aiosqlite
+import asyncio
 import secrets
 import re
+import sqlite3
+import time
 from pathlib import Path
 
 
@@ -197,13 +200,20 @@ class ProjectMismatchError(ValueError):
 
 class Database:
     def __init__(self, db_path: str, project_id: str | None = None) -> None:
-        self.db_path = db_path
+        # Keep an anchor connection alive for temporary databases, so every
+        # independent transaction sees the same schema and committed data.
+        self.db_path = (
+            f"file:agent-bus-{secrets.token_hex(16)}?mode=memory&cache=shared"
+            if db_path in ("", ":memory:") else db_path
+        )
         self.project_id = project_id
         self._connection: aiosqlite.Connection | None = None
 
     async def initialize(self) -> None:
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._connection = await aiosqlite.connect(self.db_path)
+        if not self.db_path.startswith("file:"):
+            self.db_path = str(Path(self.db_path).absolute())
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._connection = await aiosqlite.connect(self.db_path, uri=True)
         self._connection.row_factory = aiosqlite.Row
         try:
             await self._connection.executescript(SCHEMA)
@@ -367,26 +377,41 @@ class Database:
             await self.conn.rollback()
             raise
 
-    async def transaction(self, operation, *, savepoint: str = "db_tx"):
-        """Execute a multi-statement callback atomically within a SQLite savepoint.
+    async def transaction(self, operation):
+        """Run a synchronous callback in its own committed transaction.
 
-        Confines the entire transaction to a single aiosqlite worker callback.
-        Releasing the outermost savepoint commits immediately to disk without
-        calling connection.commit(), avoiding cross-coroutine commit interference
-        on the shared connection.
+        Connection creation, writer reservation, callback and cleanup all run
+        in one worker job. No pending work on ``conn`` can absorb this commit.
+        Once dispatched, cancellation of the awaiting coroutine does not stop
+        the worker; it still completes or rolls back and closes its connection.
         """
-        def runner(connection):
-            connection.execute(f"SAVEPOINT {savepoint}")
+        self.conn  # Require an initialized database (including its memory anchor).
+
+        def runner():
+            connection = sqlite3.connect(self.db_path, uri=True)
+            connection.row_factory = sqlite3.Row
             try:
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        break
+                    except sqlite3.OperationalError as exc:
+                        # Shared-cache memory databases return SQLITE_LOCKED
+                        # immediately instead of honoring SQLite's busy timeout.
+                        if (exc.sqlite_errorcode & 0xff) != sqlite3.SQLITE_LOCKED or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.01)
                 result = operation(connection)
-                connection.execute(f"RELEASE {savepoint}")
+                connection.commit()
                 return result
             except BaseException:
-                connection.execute(f"ROLLBACK TO {savepoint}")
-                connection.execute(f"RELEASE {savepoint}")
+                connection.rollback()
                 raise
+            finally:
+                connection.close()
 
-        return await self.conn._execute(runner, self.conn._conn)
+        return await asyncio.to_thread(runner)
 
     @property
     def conn(self) -> aiosqlite.Connection:
