@@ -156,7 +156,24 @@ class AgentRunner:
         if thread_id and thread_id in self.session_map:
             cmd.extend(["--resume", self.session_map[thread_id]])
 
-        return await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+        result = await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+        if not result.success:
+            return result
+        # The Claude adapter requests a JSON envelope, not the user-facing reply.
+        # A zero process exit code alone does not imply a successful model turn.
+        try:
+            envelope = json.loads(result.output)
+        except (ValueError, TypeError):
+            envelope = None
+        text = envelope.get("result") if isinstance(envelope, dict) else None
+        if not isinstance(envelope, dict) or envelope.get("is_error") or not isinstance(text, str) or not text.strip():
+            result.success = False
+            result.error = (text[:500] if isinstance(text, str) and text.strip()
+                            else "Claude CLI returned no successful text result")
+            result.output = ""
+            return result
+        result.output = text.strip()
+        return result
 
     async def _execute_agy_cli(
         self,
@@ -244,9 +261,24 @@ class AgentRunner:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     process.communicate(), timeout=timeout_seconds
                 )
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+            except (asyncio.CancelledError, asyncio.TimeoutError) as exc:
+                # A pending delivery will be retried, so its previous process
+                # must finish before cancellation can leave the runner.
+                if process.returncode is None:
+                    try:
+                        process.terminate()
+                    except ProcessLookupError:
+                        pass
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    await process.wait()
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 return RunnerResult(
                     success=False,
                     output="",
