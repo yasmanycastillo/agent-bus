@@ -74,7 +74,7 @@ async def test_worker_daemon_processes_urgent_message(test_bus):
 
 
 @pytest.mark.asyncio
-async def test_worker_daemon_claims_and_runs_task(test_bus):
+async def test_worker_daemon_claims_and_runs_task(test_bus, tmp_path):
     # Register agent
     await test_bus.registry.register(AgentInfo(agent_id="worker_bob", display_name="Bob"))
 
@@ -87,7 +87,8 @@ async def test_worker_daemon_claims_and_runs_task(test_bus):
         executed_tasks.append(prompt)
         return RunnerResult(success=True, output="Feature X built.")
 
-    runner = AgentRunner(agent_id="worker_bob", custom_executor=mock_exec)
+    # worktree_dir aísla el auto-commit de _handle_active_task del checkout real
+    runner = AgentRunner(agent_id="worker_bob", custom_executor=mock_exec, worktree_dir=tmp_path)
 
     transport = ASGITransport(app=test_bus.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
