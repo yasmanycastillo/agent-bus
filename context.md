@@ -209,4 +209,17 @@ Completada e integrada en `main`. Suite completa: **613 pruebas aprobadas** en *
 - `WorkerDaemon` consulta exclusivamente tareas desbloqueadas (`ready_only=true`). Intentos de reclamo sobre tareas bloqueadas son rechazados con 409 Conflict.
 - Dashboard (`generate_dashboard_renderable`, `print_tasks_table`, CLI `agent-bus top`, `agent-bus show tasks`) muestra columnas `Depends On` e indicador visual `[blocked]`.
 
-Las siguientes tareas operativas (HermesOrchestrator T-18, Gatekeeper T-19, cuotas/presupuesto T-20 y consola local React T-21) continúan según el backlog de [TASK.md](TASK.md).
+## T-18: HermesOrchestrator y salidas estructuradas
+
+Completada e integrada en `main`. Suite completa: **639 pruebas aprobadas** en **152,02 s**, dos avisos de deprecación WebSocket (`uv run pytest -q`).
+
+- Configuración desacoplada y libre de secretos en Git (`OrchestratorConfig` en `src/agent_bus/orchestrator/config.py`): soporte multi-proveedor para OpenAI, vLLM, Ollama, OpenRouter y endpoints personalizados. Extracción dinámica de claves API desde variables de entorno y rechazo estricto de secretos en archivos versionados (`is_tracked_by_git`). Reglas `.gitignore` reforzadas (`.env`, `*.env`, `.env.*`, `*secret*`, `*.secret`).
+- Cliente de inferencia asíncrono (`InferenceClient` en `src/agent_bus/orchestrator/client.py`) con soporte para llamadas de chat completions con modo JSON y structured outputs vía `httpx.AsyncClient`.
+- Validación estricta con JSON Schema y DAG (`src/agent_bus/orchestrator/schema.py`): validación contra `TASK_BREAKDOWN_JSON_SCHEMA` (Draft 2020-12 / OpenAI Structured Outputs) con `additionalProperties: False`, modelado Pydantic (`TaskBreakdownPlan`, `BreakdownTaskItem`) y comprobación de consistencia acíclica de dependencias.
+- Orquestador `HermesOrchestrator` (`src/agent_bus/orchestrator/hermes.py`):
+  - `breakdown_objective`: invoca la inferencia, valida el schema estricto y retorna el plan. Ante errores de red, timeout, errores HTTP de backend o JSON malformado, captura el fallo y retorna un reporte observable (`BreakdownFailureReport`) con estado `blocked` y causa descriptiva.
+  - `publish_breakdown`: publica tareas en lote (`POST /tasks/batch`) de forma idempotente con `operation_key`.
+  - `orchestrate`: flujo end-to-end con emisión de broadcast a la red de agentes en el bus.
+- Comandos CLI (`src/agent_bus/cli/orchestrator_cmds.py`, expuestos en `agent-bus breakdown` y `agent-bus orchestrate`): permiten desglosar y publicar o inspeccionar con `--dry-run` y `--json-output`.
+
+Las siguientes tareas operativas (Gatekeeper T-19, cuotas/presupuesto T-20 y consola local React T-21) continúan según el backlog de [TASK.md](TASK.md).

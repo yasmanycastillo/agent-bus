@@ -18,3 +18,10 @@ htmlcov/
 *.db
 .agent-bus/
 .worktrees/
+
+# Secrets and environment configurations
+.env
+*.env
+.env.*
+*secret*
+*.secret

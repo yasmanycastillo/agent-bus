@@ -32,9 +32,9 @@ T-01 habilita validaciones reproducibles. T-01 a T-15 estabilizan el core; T-16 
 | T-13 | P1 | Validación con dos clientes reales | T-01 a T-12 | completada | codex-integrator / codex-t13-acceptance |
 | T-14 | P2 | Workers recuperables y adaptadores | T-13 | completada | codex-integrator / codex-t14-worker |
 | T-15 | P2 | Integración Git verificada | T-14 | completada | codex-integrator / codex-t15-integrator |
-| T-16 | P1 | Piloto real de operación end-to-end | T-15 | pendiente | — |
-| T-17 | P1 | Contrato de tareas, dependencias y DAG | T-16 | pendiente | — |
-| T-18 | P1 | HermesOrchestrator y salidas estructuradas | T-17 | pendiente | — |
+| T-16 | P1 | Piloto real de operación end-to-end | T-15 | completada | codex-integrator |
+| T-17 | P1 | Contrato de tareas, dependencias y DAG | T-16 | completada | codex-t17-dag |
+| T-18 | P1 | HermesOrchestrator y salidas estructuradas | T-17 | completada | codex-t18-hermes |
 | T-19 | P1 | Gatekeeper de revisión y autorización de merge | T-17 | pendiente | — |
 | T-20 | P1 | Cuotas, presupuesto y métricas de consumo | T-16 | pendiente | — |
 | T-21 | P1 | Consola local React integrada | T-16 | pendiente | — |
@@ -245,9 +245,26 @@ Validación: **613 passed**, 2 warnings en 153,15 s con `uv run pytest -q`.
 
 Crear un adaptador configurable para endpoints OpenAI-compatible, vLLM, Ollama y OpenRouter. Hermes debe ser reemplazable y no una dependencia del bus.
 
-- [ ] La configuración no contiene secretos en Git.
-- [ ] El desglose exige JSON Schema validado antes de publicar tareas.
-- [ ] Un fallo de inferencia deja el objetivo pendiente o bloqueado con motivo observable.
+- [x] La configuración no contiene secretos en Git.
+- [x] El desglose exige JSON Schema validado antes de publicar tareas.
+- [x] Un fallo de inferencia deja el objetivo pendiente o bloqueado con motivo observable.
+
+### Registro de T-18
+
+Se implementó `HermesOrchestrator` con soporte multi-proveedor y salidas estructuradas estrictas:
+1. `.gitignore` reforzado para ignorar explícitamente archivos de entorno y secretos (`.env`, `*.env`, `.env.*`, `*secret*`, `*.secret`).
+2. Configuración sin secretos en Git (`OrchestratorConfig` en `src/agent_bus/orchestrator/config.py`): resolución desde variables de entorno (`HERMES_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `VLLM_API_KEY`, `OLLAMA_API_KEY`), rechazo explícito de secretos en archivos de configuración rastreados por Git (`is_tracked_by_git`). Soporta endpoints para OpenAI, vLLM, Ollama, OpenRouter y configuraciones personalizadas.
+3. Cliente de inferencia asíncrono (`InferenceClient` en `src/agent_bus/orchestrator/client.py`) sobre `httpx.AsyncClient` con soporte para chat completions, headers por proveedor y modo JSON/salidas estructuradas.
+4. Schema estricto y validación DAG (`src/agent_bus/orchestrator/schema.py`): Pydantic models `TaskBreakdownPlan` y `BreakdownTaskItem`, JSON Schema estricto Draft 2020-12 / OpenAI Structured Outputs con `additionalProperties: False`, validación de consistencia interna de grafo acíclico dirigido (DAG, sin ciclos ni auto-dependencias).
+5. Orquestador `HermesOrchestrator` (`src/agent_bus/orchestrator/hermes.py`):
+   - `breakdown_objective`: Invoca inferencia, extrae y valida el JSON Schema. Ante fallos de red, timeouts, errores HTTP 5xx/4xx o violaciones de schema, captura el error y retorna un reporte observable de fallo (`BreakdownFailureReport`) con estado bloqueado (`blocked`) y causa explícita.
+   - `publish_breakdown`: Publica tareas al bus mediante `POST /tasks/batch` con soporte de idempotencia por `operation_key`.
+   - `orchestrate`: Flujo end-to-end que orquesta desglose, validación, publicación y notificación broadcast a la red de agentes en el bus.
+6. Comandos CLI (`src/agent_bus/cli/orchestrator_cmds.py`, registrados en `src/agent_bus/cli/main.py`): `agent-bus breakdown` y `agent-bus orchestrate` con visualización en tabla Rich, salida opcional en JSON (`--json-output`), modo dry-run y parámetros de configuración por CLI/entorno.
+7. Suite exhaustiva de pruebas unitarias (`tests/unit/test_orchestrator.py`, 23 pruebas) e integración con el bus FastAPI real y mock de inferencia HTTP (`tests/integration/test_orchestrator_integration.py`, 3 pruebas).
+
+Validación: **639 passed**, 2 warnings en 152,02 s con `uv run pytest -q`.
+
 
 ## T-19 — Gatekeeper de revisión y autorización de merge
 
