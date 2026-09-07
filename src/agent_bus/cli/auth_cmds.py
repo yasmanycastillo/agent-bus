@@ -25,7 +25,8 @@ def auth():
 @click.option("--role", type=click.Choice(["agent", "admin"]), default="agent", show_default=True)
 @click.option("--ttl", type=click.IntRange(1, 2592000), default=86400, show_default=True)
 @click.option("--output", type=click.Path(path_type=Path))
-def create(agent: str | None, provider: str | None, role: str, ttl: int, output: Path | None):
+@click.option("--quiet", is_flag=True, help="No imprimir el token en la terminal (solo el archivo)")
+def create(agent: str | None, provider: str | None, role: str, ttl: int, output: Path | None, quiet: bool):
     """Create a session file (0600); refuses to overwrite existing credentials."""
     try:
         if provider is not None:
@@ -76,7 +77,13 @@ def create(agent: str | None, provider: str | None, role: str, ttl: int, output:
             raise click.ClickException(str(exc)) from None
         raise
     click.echo(f"Session {session['session_id']} created for {agent} ({role})")
-    click.echo(f"Credentials: {target}; expires at UNIX {session['expires_at']:.0f}")
+    if quiet:
+        click.echo(f"Credentials: {target}; expires at UNIX {session['expires_at']:.0f}")
+    else:
+        # El token es el secreto de autenticación: se muestra para copiarlo
+        # (p. ej. al login de la consola). Usa --quiet si tu terminal registra historia.
+        click.echo(f"Token: {session['token']}")
+        click.echo(f"Credentials: {target}; expires at UNIX {session['expires_at']:.0f}")
 
 
 @auth.command("revoke")

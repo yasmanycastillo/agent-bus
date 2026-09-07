@@ -19,7 +19,7 @@ uv run agent-bus auth create --agent bob --role agent
 uv run agent-bus serve --host 127.0.0.1
 ```
 
-Usar las mismas variables al provisionar y al arrancar el hub. Cada proyecto debe usar su propia base y directorio de configuración: la base completa queda vinculada persistentemente a un proyecto (T-11). El directorio `.agent-bus/` está excluido de Git. La provisión imprime la ubicación del archivo, no el token.
+Usar las mismas variables al provisionar y al arrancar el hub. Cada proyecto debe usar su propia base y directorio de configuración: la base completa queda vinculada persistentemente a un proyecto (T-11). El directorio `.agent-bus/` está excluido de Git. La provisión imprime el token para poder copiarlo (por ejemplo, al login de la consola en `/console`); usa `--quiet` si tu terminal registra historia y prefieres leerlo solo del archivo `credentials/<agente>.json`.
 
 La configuración también admite `database_path` y `bus.project_id` en YAML. Las variables de entorno tienen precedencia. Si existe una base del formato antiguo en la raíz del directorio de configuración y no existe la base predeterminada de `data/`, se conserva aquella ubicación. Una ruta explícita elimina cualquier ambigüedad.
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import aiosqlite
 import secrets
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -213,6 +214,7 @@ class Database:
             await self._migrate_lock_leases()
             await self._migrate_tasks()
             await self._migrate_reviews()
+            await self._migrate_worker_control()
         except BaseException:
             await self.close()
             raise
@@ -342,6 +344,72 @@ class Database:
             raise
 
     async def _migrate_reviews(self) -> None:
+        """Ensure reviews table exists with idx_reviews_task_id."""
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS reviews (
+                    review_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    reviewer_agent_id TEXT NOT NULL,
+                    reviewer_session_id TEXT NOT NULL,
+                    sha TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    evidence TEXT DEFAULT '{}',
+                    test_results TEXT DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            await self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reviews_task_id ON reviews(task_id)"
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_worker_control(self) -> None:
+        """Ensure worker_control table exists (paused flag per agent, T-21)."""
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS worker_control (
+                    agent_id TEXT PRIMARY KEY,
+                    paused INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def set_worker_paused(self, agent_id: str, paused: bool) -> None:
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """INSERT INTO worker_control (agent_id, paused, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(agent_id) DO UPDATE SET paused = excluded.paused, updated_at = excluded.updated_at""",
+                (agent_id, int(paused), datetime.now(timezone.utc).isoformat()),
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def is_worker_paused(self, agent_id: str) -> bool:
+        rows = await self.conn.execute_fetchall(
+            "SELECT paused FROM worker_control WHERE agent_id = ?", (agent_id,)
+        )
+        return bool(rows and rows[0]["paused"])
+
+    async def list_paused_workers(self) -> list[str]:
+        rows = await self.conn.execute_fetchall(
+            "SELECT agent_id FROM worker_control WHERE paused = 1"
+        )
+        return [r["agent_id"] for r in rows]
+
         """Ensure reviews table exists with idx_reviews_task_id."""
         await self.conn.execute("BEGIN IMMEDIATE")
         try:

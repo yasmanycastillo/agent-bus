@@ -247,3 +247,13 @@ Completada e integrada en `main`. Suite completa: **653 pruebas aprobadas** en *
 - Endpoints en bus (`POST /reviews`, `GET /reviews`, `GET /tasks/{task_id}/reviews`) y CLI `agent-bus show reviews`.
 
 Las siguientes tareas operativas (cuotas/presupuesto T-20 y consola local React T-21) continúan según el backlog de [TASK.md](TASK.md).
+
+## T-21 (fase consola): consola React local y contrato de uso congelado
+
+Implementado y validado con **682 pruebas aprobadas** en **163,27 s** (`uv run pytest -q`). Sin usar la CLI de coordinación agent-bus en esta sesión, a petición del usuario.
+
+- Consola React 18 (UMD) + htm vendoreados en `src/agent_bus/web/console/`, sin toolchain Node ni SaaS. Se sirve en `/console` (HTML sin auth de página) y `/console/static/*`; los datos siempre requieren sesión admin (`/room/api/*` ya lo exige el middleware). Comando `agent-bus ui [--no-browser]` arranca/reusa el hub y abre el navegador.
+- Operaciones nuevas: `POST /room/api/tasks`, `POST /room/api/tasks/{id}/status` (done/in_review/block/unblock), `POST /room/api/workers/{id}/pause|resume` y `GET /workers/{id}/paused`. Tabla `worker_control` persiste el flag `paused`; `room/api/assign` devuelve 409 para agentes pausados y el `WorkerDaemon` no consulta inbox ni reclama tareas mientras esté pausado (consulta `GET /workers/{id}/paused` en cada tick; hubs legacy sin ese endpoint mantienen el comportamiento anterior). `/room/api/overview` ahora incluye `paused_workers`.
+- Contrato congelado para T-20: `GET /room/api/usage` responde `{available: false, reason: "metrics_unavailable", message, schema_version: 1, data: null}`. La UI muestra "Métricas no disponibles" y ya sabe renderizar `data` (proyecto, agentes, by_task, cost_usd) cuando T-20 ponga `available: true`; no deberá requerir cambios de frontend. El único precedente de presupuesto en memoria es `BudgetBreaker` (`worker/circuit_breaker.py`).
+- Tests: `tests/test_usage_contract.py` congela el shape (200/401/403); `tests/test_console_integration.py` cubre operaciones, pausa, estáticos y escapes de ruta; `tests/test_cli_ux.py` cubre `agent-bus ui` con `webbrowser` simulado. El hub fake de `tests/test_message_workers.py` aprendió la ruta `/workers/bob/paused`.
+- Pendiente de T-21: vista de worktrees, prueba end-to-end de reconexión en navegador real y validación manual del flujo completo. `/room` (War Room) se conserva sin cambios.

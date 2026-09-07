@@ -44,6 +44,8 @@ class DeliveryHub:
         if path == "/inbox/bob/source/fail":
             self.failures.append(json.loads(request.content)["error"])
             return httpx.Response(200, json={"acknowledged": self.message["acknowledged"]})
+        if path == "/workers/bob/paused":
+            return httpx.Response(200, json={"agent_id": "bob", "paused": False})
         if path in ("/decisions", "/tasks"):
             return httpx.Response(200, json=[])
         if path == "/agents/bob/active-work":
@@ -233,3 +235,29 @@ async def test_watcher_cli_cancel_terminates_and_reaps_child(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await running
     assert process.terminated and process.reaped
+
+
+async def test_paused_worker_claims_nothing():
+    """Un daemon pausado no procesa mensajes ni reclama tareas hasta reanudarlo."""
+    hub = DeliveryHub()
+    called = []
+
+    async def execute(prompt, session_id):
+        called.append(prompt)
+        return RunnerResult(success=True, output="done")
+
+    hub.pages_paused = True
+    original_handle = hub.handle
+
+    def handle(request):
+        if hub.pages_paused and request.url.path == "/workers/bob/paused":
+            return httpx.Response(200, json={"agent_id": "bob", "paused": True})
+        return original_handle(request)
+
+    hub.handle = handle
+    worker = make_worker(execute)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="http://127.0.0.1") as client:
+        worker._client = client
+        await worker._check_and_process_pending()
+    assert called == []
+    assert hub.pages == []  # ni siquiera consultó su inbox

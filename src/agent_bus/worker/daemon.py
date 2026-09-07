@@ -143,6 +143,15 @@ class WorkerDaemon:
         if not self._client:
             return
 
+        # An administrator may pause this worker from the console; the daemon
+        # stays connected but claims nothing until it is resumed.
+        try:
+            paused_resp = await self._client.get("/workers/{}/paused".format(self.agent_id))
+            if paused_resp.status_code == 200 and paused_resp.json().get("paused"):
+                return
+        except Exception:
+            pass  # keep legacy behavior if the endpoint is unavailable
+
         self._message_retry_after = {
             key: deadline for key, deadline in self._message_retry_after.items()
             if deadline > time.monotonic()

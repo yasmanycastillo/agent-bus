@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 
 import os
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 from sse_starlette.sse import EventSourceResponse
 
@@ -201,7 +201,7 @@ class MessageBus:
             if request.headers.get("X-Agent-Bus-Project", self.project_id) != self.project_id:
                 return JSONResponse({"error": "Hub belongs to a different project"}, status_code=403)
             path = request.url.path
-            if path in ("/health", "/room"):
+            if path in ("/health", "/room", "/console") or path.startswith("/console/static/"):
                 return await call_next(request)
             try:
                 principal, token = await self._authenticate(request.headers.get("authorization"))
@@ -738,6 +738,29 @@ class MessageBus:
             html_path = Path(__file__).parent.parent / "web" / "room.html"
             return HTMLResponse(html_path.read_text())
 
+        @self.app.get("/console", response_class=HTMLResponse)
+        async def console_ui():
+            """Consola React local (T-21); los datos requieren sesión admin."""
+            html_path = Path(__file__).parent.parent / "web" / "console" / "index.html"
+            return HTMLResponse(html_path.read_text())
+
+        @self.app.get("/console/static/{rel_path:path}")
+        async def console_static(rel_path: str):
+            # Rutas dentro del paquete únicamente; sin escapes de directorio.
+            base = (Path(__file__).parent.parent / "web" / "console").resolve()
+            target = (base / rel_path).resolve()
+            if not str(target).startswith(str(base) + os.sep):
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            if not target.is_file():
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            media = {
+                ".js": "application/javascript",
+                ".css": "text/css",
+                ".html": "text/html",
+                ".map": "application/json",
+            }
+            return FileResponse(target, media_type=media.get(target.suffix, "application/octet-stream"))
+
         @self.app.get("/room/api/pending-approvals")
         async def room_pending_approvals():
             """Mensajes dirigidos al humano que requieren su decisión."""
@@ -774,6 +797,8 @@ class MessageBus:
             agent_id = req.get("agent_id", "")
             if not task_id or not agent_id:
                 return JSONResponse({"error": "task_id and agent_id required"}, status_code=400)
+            if await self.db.is_worker_paused(agent_id):
+                return JSONResponse({"error": "Worker is paused"}, status_code=409)
 
             principal = request.state.principal
             if principal:
@@ -832,6 +857,7 @@ class MessageBus:
             agents = await self.registry.list_all()
             locks = await self.locks.list_locks()
             decisions = await self.decisions.list_all()
+            paused = set(await self.db.list_paused_workers())
             try:
                 human_inbox = await self.inbox.get_inbox("human")
             except Exception:
@@ -841,8 +867,106 @@ class MessageBus:
                 "agents": [a.model_dump(mode="json") for a in agents],
                 "locks": [l.model_dump(mode="json", exclude={"acquisition_id"}) for l in locks],
                 "decisions": [d.model_dump(mode="json") for d in decisions],
+                "paused_workers": sorted(paused),
                 "pending_approvals": len([m for m in human_inbox if m.reply_needed]),
             }
+
+        @self.app.get("/room/api/usage")
+        async def room_usage():
+            """Contrato congelado (schema_version 1) de presupuesto/consumo.
+
+            Mientras T-20 no esté implementado, responde ``available: false``
+            con ``reason: metrics_unavailable`` y ``data: null``. Cuando T-20
+            aterrice, este endpoint cambia únicamente a ``available: true`` y
+            rellena ``data`` con USAGE_SCHEMA_V1:
+            ``{"project": {budget_tokens, spent_tokens, cost_usd,
+            window_start, window_end}, "agents": [{agent_id, quota_tokens,
+            spent_tokens, cost_usd, requests, by_task: [{task_id,
+            spent_tokens, cost_usd}]}], "updated_at"}``.
+            Tokens son enteros, ``cost_usd`` float con 4 decimales y
+            ``available: false`` implica siempre ``data: null``.
+            """
+            return {
+                "available": False,
+                "reason": "metrics_unavailable",
+                "message": "Presupuesto/consumo (T-20) aún no implementado",
+                "schema_version": 1,
+                "data": None,
+            }
+
+        @self.app.post("/room/api/tasks")
+        async def room_create_task(req: dict, request: Request):
+            """Crear una tarea desde la consola; actor = sesión admin."""
+            task_id = req.get("task_id") or ""
+            title = req.get("title") or ""
+            if not task_id or not title:
+                return JSONResponse({"error": "task_id and title required"}, status_code=400)
+            try:
+                task = await self.tasks.create(
+                    task_id=task_id,
+                    title=title,
+                    description=req.get("description"),
+                    owner=req.get("owner", "free"),
+                    acceptance_criteria=req.get("acceptance_criteria"),
+                    test_cmd=req.get("test_cmd"),
+                    depends_on=req.get("depends_on"),
+                )
+            except TaskDependencyError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=422)
+            return JSONResponse(task.model_dump(mode="json"), status_code=201)
+
+        @self.app.post("/room/api/tasks/{task_id}/status")
+        async def room_task_status(task_id: str, req: dict, request: Request):
+            """Transición de estado administrada desde la consola, con auditoría de actor."""
+            action = req.get("action") or ""
+            principal = request.state.principal
+            actor = principal.agent_id if principal else "human"
+            session_id = principal.session_id if principal else ""
+
+            task = await self.tasks.get(task_id)
+            if not task:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+
+            if action == "done":
+                updated = await self.tasks.complete(task_id)
+            elif action == "in_review":
+                updated = await self.tasks.submit_review(task_id)
+            elif action == "block":
+                updated = await self.tasks.block(task_id, req.get("reason"))
+            elif action == "unblock":
+                updated = await self.tasks.reassign(task_id, task.owner)
+            else:
+                return JSONResponse(
+                    {"error": "action must be one of: done, in_review, block, unblock"},
+                    status_code=400,
+                )
+            if not updated:
+                return await self._task_failure(task_id, principal)
+            await self.db.conn.execute(
+                "INSERT INTO audit_log (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (f"console_status_{action}", task_id, actor, session_id, task.owner, updated.owner,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            await self.db.conn.commit()
+            return updated.model_dump(mode="json")
+
+        @self.app.get("/workers/{agent_id}/paused")
+        async def worker_paused(agent_id: str):
+            """Estado de pausa de un worker (lo consulta el propio daemon)."""
+            return {"agent_id": agent_id, "paused": await self.db.is_worker_paused(agent_id)}
+
+        @self.app.post("/room/api/workers/{agent_id}/pause")
+        async def room_pause_worker(agent_id: str):
+            """Pausar un worker: el dispatcher no le asigna tareas mientras esté pausado."""
+            await self.db.set_worker_paused(agent_id, True)
+            return {"agent_id": agent_id, "paused": True}
+
+        @self.app.post("/room/api/workers/{agent_id}/resume")
+        async def room_resume_worker(agent_id: str):
+            """Reanudar un worker pausado."""
+            await self.db.set_worker_paused(agent_id, False)
+            return {"agent_id": agent_id, "paused": False}
 
         @self.app.post("/tasks/{task_id}/handoff")
         async def handoff_task(task_id: str, req: dict, request: Request):

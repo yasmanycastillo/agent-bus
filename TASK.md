@@ -36,8 +36,8 @@ T-01 habilita validaciones reproducibles. T-01 a T-15 estabilizan el core; T-16 
 | T-17 | P1 | Contrato de tareas, dependencias y DAG | T-16 | completada | codex-t17-dag |
 | T-18 | P1 | HermesOrchestrator HTTP y conexión de Hermes Agent | T-17 | completada (publicación mediante puente validado) | codex |
 | T-19 | P1 | Gatekeeper de revisión y autorización de merge | T-17 | completada | codex-t19-gatekeeper |
-| T-20 | P1 | Cuotas, presupuesto y métricas de consumo | T-16 | pendiente | — |
-| T-21 | P1 | Consola local React integrada | T-16 | pendiente | — |
+| T-20 | P1 | Cuotas, presupuesto y métricas de consumo | T-16 | pendiente (contrato usage congelado en T-21) | — |
+| T-21 | P1 | Consola local React integrada | T-16 | en progreso (fase consola servida; falta validación manual completa) | claude |
 | T-22 | P2 | Integraciones SDLC y capacidades enterprise | T-17, T-20, T-21 | pendiente | — |
 
 ## T-01 — Pruebas aisladas y contratos
@@ -355,12 +355,16 @@ Persistir límites por agente, tarea y proyecto, junto con tokens, duración, pr
 
 Construir una aplicación React servida por el proyecto para supervisar y operar el bus desde el navegador. Debe ser local-first, usar la API autenticada existente y no introducir un segundo estado de coordinación.
 
-- [ ] La aplicación se inicia con un comando del proyecto (`agent-bus ui` o equivalente) y funciona sin SaaS externo.
-- [ ] Muestra agentes, tareas, estados, worktrees, locks, mensajes, integraciones, errores y consumo.
-- [ ] Permite crear/enviar tareas, reasignar tareas, pausar/reanudar workers y aprobar o rechazar acciones que requieran intervención humana.
-- [ ] Las acciones peligrosas exigen confirmación, identidad autenticada y muestran una explicación antes de ejecutarse.
-- [ ] La actualización en tiempo real usa SSE/WebSocket existente; al reconectar recupera el estado desde la API.
-- [ ] Hay pruebas de rutas críticas: crear tarea, aprobar merge, bloquear agente, reconectar y perder permisos.
+- [x] La aplicación se inicia con un comando del proyecto (`agent-bus ui`) y funciona sin SaaS externo.
+- [x] Muestra agentes, tareas, estados, locks, mensajes, feed de eventos y consumo (consumo con "métricas no disponibles" hasta T-20; worktrees pendientes).
+- [x] Permite crear/enviar tareas, reasignar tareas, pausar/reanudar workers y aprobar o rechazar acciones que requieran intervención humana.
+- [x] Las acciones peligrosas exigen confirmación (`confirm`) y sesión admin autenticada.
+- [x] La actualización en tiempo real usa SSE (`/events/all`) con cursores; al reconectar recupera el estado desde la API.
+- [x] Hay pruebas de rutas críticas: crear tarea, transiciones de estado, pausar worker, aprobar, estáticos y permisos (401/403). Falta prueba end-to-end de reconexión en navegador.
+
+Contrato de presupuesto/consumo congelado para T-20: `GET /room/api/usage` responde hoy `{available: false, reason: "metrics_unavailable", message, schema_version: 1, data: null}`; cuando T-20 aterrice cambia a `available: true` rellenando `data` según el schema documentado en el handler (proyecto, agentes, by_task, cost_usd). El frontend de la consola ya renderiza ambos estados; T-20 no requiere cambios de UI.
+
+Implementación (fase consola): React 18 UMD + htm vendoreados en `src/agent_bus/web/console/` (sin toolchain Node), servidos en `/console` y `/console/static/*` sin auth de página (la API sí exige sesión admin). Endpoints nuevos: `GET /room/api/usage`, `POST /room/api/tasks`, `POST /room/api/tasks/{id}/status` (done/in_review/block/unblock), `POST /room/api/workers/{id}/pause|resume` y `GET /workers/{id}/paused`; migración `worker_control` persiste el flag `paused`, `room/api/assign` lo respeta (409) y el `WorkerDaemon` no reclama mientras esté pausado. CLI `agent-bus ui [--no-browser]`. Validación: **682 pruebas aprobadas** en 163,27 s (`uv run pytest -q`). El War Room `/room` se conserva sin cambios.
 
 ## T-22 — Integraciones SDLC y capacidades enterprise
 

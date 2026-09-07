@@ -193,6 +193,43 @@ def serve(host: str, port: int, run_daemon: bool, do_stop: bool, do_status: bool
     uvicorn.run("agent_bus.core.bus:create_app", host=host, port=port, factory=True, reload=False)
 
 
+@app.command()
+@click.option("--host", default=None, help="Bind host (configured URL by default)")
+@click.option("--port", default=None, type=click.IntRange(1, 65535), help="Bind port")
+@click.option("--no-browser", is_flag=True, help="No abrir el navegador automáticamente")
+def ui(host: str, port: int, no_browser: bool):
+    """Abrir la consola web local (arranca el hub si no está corriendo)."""
+    from urllib.parse import urlsplit
+
+    endpoint = urlsplit(get_bus_url())
+    host = host or endpoint.hostname or "127.0.0.1"
+    port = port or endpoint.port or (443 if endpoint.scheme == "https" else 80)
+    _start_daemon(host, port)
+
+    import time
+    import httpx
+
+    url = f"{endpoint.scheme if endpoint.scheme else 'http'}://{host}:{port}/console"
+    deadline = time.monotonic() + 10
+    ready = False
+    while time.monotonic() < deadline:
+        try:
+            if httpx.get(f"http://{host}:{port}/health", timeout=1.0).status_code == 200:
+                ready = True
+                break
+        except httpx.HTTPError:
+            time.sleep(0.3)
+    if not ready:
+        click.echo("El hub no respondió a tiempo; consulta 'agent-bus serve --status' y abre:")
+        click.echo(url)
+        return
+    click.echo(f"Consola disponible en {url}")
+    if not no_browser:
+        import webbrowser
+
+        webbrowser.open(url)
+
+
 def _runtime_environment():
     config = load_config()
     environment = os.environ.copy()
