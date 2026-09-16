@@ -16,7 +16,17 @@ Incluye cancelación al salir y descarte de respuestas de sesiones anteriores.
 cuotas ni validación con modelos externos. Validación: **736 pruebas aprobadas**
 (dos avisos WebSocket, 187,82 s) y aceptación adicional en Chromium real con
 creación/reasignación, respuesta, replay, móvil y aislamiento de sesiones.
-Etapa validada y preparada para publicación junto con esta documentación.
+Consola publicada en `2bd55b5`.
+
+## Demo reproducible
+
+`agent-bus demo` prepara un proyecto temporal y dos clientes MCP reales con actores
+programados. Reproduce conflicto, entrega idempotente, prueba de QA fallida,
+aprobación/rechazo y corrección. `--yes` simula aprobación; `--report` conserva
+la evidencia sin secretos. No usa modelos comerciales. [Guía](docs/demo.md).
+Validación: **740 pruebas aprobadas** (dos avisos WebSocket, 217,15 s) y ejecución
+del wheel fuera del checkout con Python 3.13.1, completada en 6,8 s.
+Aceptación con modelos externos y video de lanzamiento pendientes.
 
 ## Lectura al iniciar una sesión
 

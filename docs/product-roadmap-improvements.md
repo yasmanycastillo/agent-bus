@@ -182,3 +182,10 @@ Son hipótesis de producto, no funcionalidades entregadas:
 
 Cada vertical necesita su contrato de tareas, límites de permisos, entorno de
 validación y métricas de aceptación antes de considerarse parte de la oferta.
+
+### Demo de primer uso
+
+Implementación posterior a la consola: [demo reproducible](demo.md), invocable
+como `agent-bus demo`. Actores programados y transporte MCP real; conflicto de
+archivos, evidencia de pruebas, revisión y aprobación/rechazo. No sustituye la
+aceptación con proveedores ni demuestra autonomía o consenso entre modelos.

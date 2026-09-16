@@ -13,9 +13,9 @@ comparte tareas, reserva archivos y entrega resultados con trazabilidad mediante
 
 | Etapa | Entrega | Criterio de salida | Estado |
 |---|---|---|---|
-| 1. Primer uso | `onboard --mcp-only`, configuración por identidad, licencia y guía | Instalación del wheel fuera del checkout; hub autenticado; dos conexiones MCP; repetición sin rotar credenciales; conflictos diagnosticados | Implementado y validado localmente |
-| 2. Consola única | Resumen de intervención, detalle de tarea, aprobaciones completas, actividad filtrable | Prueba real de navegador: login, tarea, aprobación, desconexión y reconexión; conservar cursores y protección de sesión; luego migrar `/room` | Implementado localmente |
-| 3. Demo | Dos agentes sobre un repositorio pequeño: reserva, conflicto, entrega y revisión | Ejecución repetible; distinguir actores simulados de modelos reales; medir duración, intervenciones y coste cuando sea conocido | Pendiente |
+| 1. Primer uso | `onboard --mcp-only`, configuración por identidad, licencia y guía | Instalación del wheel fuera del checkout; hub autenticado; dos conexiones MCP; repetición sin rotar credenciales; conflictos diagnosticados | Publicado en `e7f654a` |
+| 2. Consola única | Resumen de intervención, detalle de tarea, aprobaciones completas, actividad filtrable | Prueba real de navegador: login, tarea, aprobación, desconexión y reconexión; conservar cursores y protección de sesión; luego migrar `/room` | Publicado en `2bd55b5` |
+| 3. Demo | Dos agentes sobre un repositorio pequeño: reserva, conflicto, entrega y revisión | Ejecución repetible; distinguir actores simulados de modelos reales; medir duración, intervenciones y coste cuando sea conocido | Demo determinista implementada; proveedores reales pendientes |
 | 4. Preparar release | README, changelog, paquete, metadatos Registry, video de 60–90 s | Versión instalable desde máquina limpia; enlaces válidos; licencia incluida; video muestra la versión real | Pendiente |
 | 5. Piloto externo | Usuarios nuevos realizan el recorrido sin ayuda | Registrar problemas y porcentaje de primeros usos completados; corregir bloqueos antes de atraer más tráfico | Pendiente externo |
 | 6. Distribución | PyPI/Registry y lanzamiento acotado en comunidades | Nombre del paquete y namespace verificados; texto revisado; disponibilidad para atender problemas | Pendiente de publicación |
@@ -79,4 +79,19 @@ Validación final de esta etapa: **736 pruebas aprobadas**, dos avisos existente
 de deprecación WebSocket, en **187,82 s** (`uv run pytest -q`). La prueba Chromium
 adicional aprobó creación/reasignación, seis solicitudes completas, respuesta real,
 replay tras corte, filtro, móvil y aislamiento de sesiones. La etapa de consola
-es posterior a `e7f654a` y está preparada para publicación.
+está publicada en `2bd55b5`.
+
+## Demo reproducible posterior a la consola
+
+`agent-bus demo` ejecuta dos actores programados mediante MCP stdio real en un
+proyecto temporal. Incluye conflicto con rollback de reservas, entrega idempotente,
+prueba de QA fallida, decisión humana, corrección y revisión final.
+`--yes` simula explícitamente la decisión; `--report` exporta evidencia sin secretos.
+[Guía reproducible](demo.md). La aceptación con modelos externos sigue pendiente.
+La publicación en PyPI/Registry y la aceptación externa siguen pendientes.
+
+Validación de la demo: **740 pruebas aprobadas**, dos avisos de deprecación
+WebSocket, en **217,15 s** (`uv run pytest -q`). Incluye aprobación, rechazo,
+protección del informe y aislamiento frente a variables heredadas. Wheel instalado
+fuera del checkout, Python 3.13.1: recorrido completo en **6,8 s** con dependencias
+ya instaladas y aprobación simulada. No mide instalación fría ni modelos externos.

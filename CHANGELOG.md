@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Demo aislada `agent-bus demo`: dos actores programados con MCP real, conflicto
+  de archivos, pruebas ejecutadas, revisión y aprobación/rechazo desde terminal.
+- Informe JSON opcional sin secretos y aprobación simulada explícita para CI.
+
 - Consola única en `/console` y `/room`: detalle/historial de tareas, solicitudes
   completas, filtros, reservas y recuperación de conexión.
 - Protección frente a respuestas de sesiones anteriores y cancelación del stream

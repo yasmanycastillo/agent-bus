@@ -8,6 +8,19 @@
 
 **Coordina agentes de distintas herramientas sobre un mismo proyecto: comparte tareas, reserva archivos y entrega resultados con trazabilidad mediante MCP.**
 
+## Probar la coordinación
+
+```sh
+# Con el paquete instalado:
+agent-bus demo
+# Desde el checkout:
+uv run agent-bus demo
+```
+
+Dos actores programados usan MCP real para reservar un archivo, detectar un
+conflicto, revisar una entrega y pedir una decisión humana. No requiere claves
+de modelos ni modifica tu proyecto. [Recorrido y evidencia](docs/demo.md).
+
 ## Primer uso
 
 Preparar únicamente MCP, sin workers ni integración automática:
