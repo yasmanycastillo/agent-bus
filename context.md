@@ -8,6 +8,15 @@ Consolidar agent-bus como un producto local de coordinación y ejecución de age
 
 ## Lectura al iniciar una sesión
 
+Plan activo de primera versión pública: [launch-plan.md](docs/launch-plan.md).
+Se prioriza primer uso MCP reproducible, consola única y demo antes de difusión.
+Primera implementación local: `onboard --mcp-only`, comprobación del hub y sesiones,
+snippets por identidad, licencia MIT y guía [first-run.md](docs/first-run.md).
+Validación de esta entrega: 39 pruebas dirigidas aprobadas y wheel independiente
+con dos bootstrap MCP reales en Python 3.13.1. Antes de publicar: suite completa
+con **731 pruebas aprobadas**, dos avisos WebSocket, en 183,65 s.
+No confundir esta preparación con publicación en PyPI/Registry o aceptación externa.
+
 1. Leer [AGENTS.md](AGENTS.md) y respetar listener, inbox, locks y aislamiento cuando corresponda.
 2. Leer este archivo y comprobar el checkout, la rama y los cambios locales actuales.
 3. Consultar [TASK.md](TASK.md): es el backlog operativo y registro del avance.

@@ -3,6 +3,8 @@ name = "agent-bus"
 version = "0.1.0"
 description = "Protocolo de comunicacion entre agentes IA sin dependencia de tmux"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Yasmany Castillo", email = "yasmany003@gmail.com" }
 ]

@@ -18,11 +18,22 @@ def _run(*args: str) -> None:
 @click.option("--agents", default=None, help="Lista agente:proveedor separada por comas.")
 @click.option("--admin", default="integrator", show_default=True, help="Identidad administradora.")
 @click.option("--mock", is_flag=True, help="Usar workers mock durante la prueba inicial.")
-@click.option("--port", default=8421, type=click.IntRange(1, 65535), show_default=True,
+@click.option("--mcp-only", is_flag=True, help="Preparar hub y configuraciones MCP sin workers ni integrador.")
+@click.option("--yes", is_flag=True, help="Autorizar la provisión local sin preguntas en modo --mcp-only.")
+@click.option("--port", default=None, type=click.IntRange(1, 65535),
               help="Puerto aislado del hub de este proyecto.")
-def onboard(agents: str | None, admin: str, mock: bool, port: int) -> None:
+def onboard(agents: str | None, admin: str, mock: bool, port: int | None, mcp_only: bool, yes: bool) -> None:
     """Preparar un proyecto completo con preguntas guiadas y confirmaciones."""
     click.echo("\nagent-bus: asistente de puesta en marcha\n")
+    if mcp_only:
+        if mock:
+            raise click.UsageError("--mock requiere el modo de workers")
+        from agent_bus.cli.first_run import onboard_mcp
+        onboard_mcp(agents, admin, port, yes, _run)
+        return
+    if yes:
+        raise click.UsageError("--yes requiere --mcp-only")
+    port = port or 8421
     _run("init", "--bus-url", f"http://127.0.0.1:{port}")
     if not agents:
         agents = click.prompt("Agentes (ej. claude:claude,agy:agy,grok:grok)",

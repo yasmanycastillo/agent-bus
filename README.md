@@ -6,7 +6,22 @@
 [![MCP](https://img.shields.io/badge/MCP_Python_SDK-2.1.1-orange.svg)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
-**Bus local de comunicación y coordinación entre agentes, con interfaz MCP.**
+**Coordina agentes de distintas herramientas sobre un mismo proyecto: comparte tareas, reserva archivos y entrega resultados con trazabilidad mediante MCP.**
+
+## Primer uso
+
+Preparar únicamente MCP, sin workers ni integración automática:
+
+```sh
+# Desde este checkout, con uv instalado:
+uv tool install .
+agent-bus --project /ruta/mi-proyecto onboard --mcp-only
+```
+
+El asistente provisiona sesiones, comprueba el hub y genera configuraciones JSON
+por agente. [Guía de instalación y conexión](docs/first-run.md).
+Todavía no se anuncia una release pública verificada en PyPI ni una instalación
+en dos minutos. [Plan y criterios de lanzamiento](docs/launch-plan.md).
 
 `agent-bus` permite que varios agentes intercambien mensajes, reclamen tareas y coordinen archivos dentro de un proyecto. El hub conserva las entregas mientras los clientes están desconectados; cada aplicación necesita consultar o mantener una espera activa para procesarlas.
 
@@ -93,6 +108,11 @@ flowchart TD
 
 | Herramienta | Descripción |
 | :--- | :--- |
+| `bootstrap_agent()` | Primera llamada: identidad, proyecto y orientación inicial |
+| `my_pending_items()` | Resumen de pendientes de la sesión |
+| `prepare_edit(...)` | Reserva atómica de varios archivos antes de editar |
+| `complete_handoff(...)` | Entrega con evidencia declarada, mensaje y liberaciones explícitas |
+| `get_agent_instructions()` | Protocolo de uso sin modificar estado |
 | `wait_for_updates(timeout, event_cursor?)` | Devuelve pendientes o espera eventos recuperables con plazo total de 1–120 s; [cursores y recuperación](docs/events.md) |
 | `post_message(to_agent, text, idempotency_key, ...)` | Envía mensajes directos o respuestas a otros agentes |
 | `read_messages(cursor, limit)` | Consulta una página pendiente sin confirmar su lectura |

@@ -73,6 +73,13 @@ El control de consumo debe preceder a una oferta de ejecución autónoma comerci
 **Salida:** el operador puede consultar gasto/consumo, fijar límites y comprobar
 que se respetan tras fallos y reanudaciones, sin editar SQLite.
 
+### Prioridad de lanzamiento — Primer uso y aceptación externa
+
+El [plan de primera versión pública](launch-plan.md) fija la secuencia inmediata:
+onboarding MCP, consola única, demo reproducible, release y pilotos externos antes
+de difusión. Esta secuencia de lanzamiento precede a las ampliaciones de producto
+enumeradas aquí; no convierte las cuotas pendientes en una garantía disponible.
+
 ### Prioridad 2 — Recuperación guiada y aceptación operativa
 
 `agent-bus onboard` ya existe. Su evolución debe reducir los pasos manuales que
