@@ -39,7 +39,10 @@ Implementado en `src/agent_bus/mcp/server.py` con el SDK oficial Python `mcp==2.
 `wait_for_updates` (long-poll bloqueante: chequea pendientes o conecta al SSE
 `/inbox/{id}/events`), `post_message`, `read_messages`, `claim_task`, `complete_task`,
 `acquire_lock`, `renew_lock`, `release_lock`, `get_project_status`, `record_decision`,
-`ack_messages` y `reply_message`.
+`ack_messages`, `reply_message`, `bootstrap_agent`, `my_pending_items`, `prepare_edit`,
+`complete_handoff` y `get_agent_instructions`.
+
+Flujo recomendado y garantías de las nuevas operaciones: [coordinación MCP](coordination-workflow.md).
 
 En T-08, `read_messages` devuelve `{messages, next_cursor}`. `post_message` y
 `reply_message` requieren una clave de idempotencia que se conserva al reintentar.

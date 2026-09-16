@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr
 from agent_bus.security import AuthenticationError, async_bus_client, load_session
 from agent_bus.core.sse import iter_sse_frames
 from agent_bus.mcp.transport import cancellable_stdio
+from agent_bus.mcp import coordination
 
 logger = logging.getLogger("agent_bus.mcp")
 
@@ -188,7 +189,7 @@ class McpServer:
         if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
             self.session = load_session(agent_id)
         self.agent_id = self.session["agent_id"] if self.session else agent_id
-        self.tools = copy.deepcopy(TOOLS_DEFINITIONS)
+        self.tools = copy.deepcopy(TOOLS_DEFINITIONS + coordination.TOOLS)
         if self.session:
             for tool in self.tools:
                 schema = tool["inputSchema"]
@@ -271,6 +272,8 @@ class McpServer:
         return bound
 
     async def execute_tool(self, name: str, args: dict[str, Any]) -> Any:
+        if name in coordination.MODELS:
+            return await coordination.execute(self, name, args)
         args = self._bind_identity(args)
         if name == "wait_for_updates":
             wait = WaitArguments.model_validate(args)

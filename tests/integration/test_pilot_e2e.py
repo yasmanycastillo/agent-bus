@@ -43,6 +43,9 @@ def pilot_git_repo(tmp_path: Path) -> Path:
     _git(repo, "config", "user.name", "Pilot Agent")
 
     # Initial file and test script
+    # Runtime/worktree directories and Python test artifacts are not source.
+    # Keep the candidate and target clean under the production integration gate.
+    (repo / ".gitignore").write_text(".agent-bus/\n.worktrees/\n__pycache__/\n")
     (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
     (repo / "test_calc.py").write_text(
         "import sys\nfrom calc import add\n\ndef test_add():\n    assert add(2, 3) == 5\n\nif __name__ == '__main__':\n    test_add()\n    print('ALL_TESTS_PASSED')\n"
@@ -195,7 +198,7 @@ async def test_pilot_end_to_end_operational_cycle(
 
     assert len(results) == 1
     int_res = results[0]
-    assert int_res.success is True
+    assert int_res.success is True, int_res
     assert int_res.merged is True
     assert int_res.status == "integrated"
 

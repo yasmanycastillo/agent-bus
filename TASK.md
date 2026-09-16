@@ -491,3 +491,20 @@ Validación final: **592 passed**, dos avisos de deprecación WebSocket, en **13
 README, configuración MCP y context.md distinguen comunicación, espera, continuación de conversación y headless. Se retira la promesa de autonomía universal; el alias `codex` de `AgentRunner` sigue invocando Aider y queda declarado expresamente. La skill OpenAI Docs ayudó a contrastar la configuración y reanudación nativas de Codex; los resultados se basan en las ejecuciones registradas.
 
 Matriz, comandos y límites en [docs/acceptance-t13.md](docs/acceptance-t13.md). No se acreditan TUI que se despierta sola, hooks Stop en aplicación viva, navegador ni AGY/Aider/Grok. **Siguiente tarea: T-14**, workers recuperables y adaptadores; después T-15. El hub personal y sus listeners permanecen activos con su versión anterior, y los hubs de aceptación se cerraron al terminar.
+
+
+## T-23 — Coordinación MCP compacta y estabilización (2026-09-15)
+
+- [x] Corregir regresión de credenciales: ocultar token por defecto y añadir `--show-token`.
+- [x] Integrar exclusivamente el SHA evaluado, con base y checkouts estables.
+- [x] Adaptar bootstrap, instrucciones y pendientes a la identidad autenticada.
+- [x] Reservar varios archivos sin adquisiciones parciales y con replay persistente.
+- [x] Handoff atómico con evidencia, auditoría, ACK y liberaciones por token vigente.
+- [x] Verificar concurrencia con conexiones SQLite independientes, rollback,
+  reinicios, sesiones y tokens obsoletos, y dos procesos MCP stdio reales.
+- [x] Documentar contratos, compatibilidad y límites en [coordinación MCP](docs/coordination-workflow.md).
+
+Resultado: **710 pruebas aprobadas**, dos avisos de deprecación WebSocket,
+**177,69 s** (`.venv/bin/python -m pytest -q`). La evaluación inicial había dado
+659 aprobadas y 23 errores de preparación. Cambios locales, sin commit/push;
+no incluye aceptación nueva con aplicaciones/modelos externos ni cuotas T-20.

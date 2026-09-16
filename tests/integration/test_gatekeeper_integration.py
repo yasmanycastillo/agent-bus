@@ -116,7 +116,7 @@ async def test_branch_integrator_require_approval_approve(live_bus_url, tmp_path
             return SAMPLE_CLEAN_DIFF
         return ""
 
-    async def mock_merge(candidate_branch, target_branch):
+    async def mock_merge(candidate_branch, target_branch, **kwargs):
         return (True, "Fast-forward merge successful")
 
     integrator.run_tests = mock_pass_tests
@@ -147,7 +147,7 @@ async def test_branch_integrator_require_approval_approve(live_bus_url, tmp_path
         revs = rev_resp.json()
         assert len(revs) == 1
         assert revs[0]["verdict"] == "approve"
-        assert revs[0]["sha"] == "fedcba9876543210"
+        assert revs[0]["sha"] == "a" * 40
 
 
 @pytest.mark.asyncio
@@ -178,7 +178,7 @@ async def test_branch_integrator_require_approval_changes_requested(live_bus_url
 
     merge_called = False
 
-    async def mock_merge(candidate_branch, target_branch):
+    async def mock_merge(candidate_branch, target_branch, **kwargs):
         nonlocal merge_called
         merge_called = True
         return (True, "Merged")
@@ -243,7 +243,7 @@ async def test_branch_integrator_require_approval_blocked(live_bus_url, tmp_path
 
     merge_called = False
 
-    async def mock_merge(candidate_branch, target_branch):
+    async def mock_merge(candidate_branch, target_branch, **kwargs):
         nonlocal merge_called
         merge_called = True
         return (True, "Merged")
@@ -304,7 +304,7 @@ async def test_branch_integrator_require_approval_false_policy(live_bus_url, tmp
             return SAMPLE_CLEAN_DIFF
         return ""
 
-    async def mock_merge(candidate_branch, target_branch):
+    async def mock_merge(candidate_branch, target_branch, **kwargs):
         return (True, "Merged")
 
     integrator.run_tests = mock_pass_tests
@@ -356,3 +356,15 @@ def test_cli_show_reviews_command(live_bus_url, monkeypatch):
     assert "approve" in result.output
     assert "integrator" in result.output
     assert "98765432" in result.output
+
+
+@pytest.fixture(autouse=True)
+def isolated_git_policy(monkeypatch):
+    # These tests isolate review/retry policy. Real Git races are covered in
+    # test_integrator_exact_sha.py and the operational pilot.
+    async def preflight(*args):
+        return None
+    async def snapshot(*args):
+        return {"sha": "a" * 40, "target_sha": "b" * 40}
+    monkeypatch.setattr(BranchIntegrator, "_preflight", preflight)
+    monkeypatch.setattr(BranchIntegrator, "_snapshot", snapshot)

@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
 import pytest
-from httpx import AsyncClient, ASGITransport
 
 from agent_bus.core.bus import MessageBus
 from agent_bus.core.inbox import InboxManager
 from agent_bus.core.registry import AgentRegistry
 from agent_bus.reputation.database import Database
-from agent_bus.types import AgentInfo
-from agent_bus.worker.integrator import BranchIntegrator, IntegratorResult
+from agent_bus.worker.integrator import BranchIntegrator
 
 
 @pytest.fixture
@@ -93,7 +90,7 @@ async def test_integrator_success_flow(tmp_path):
     async def mock_pass_tests(worktree_dir, test_cmd=None):
         return (True, "All tests passed (10/10)")
 
-    async def mock_clean_merge(candidate_branch, target_branch):
+    async def mock_clean_merge(candidate_branch, target_branch, **kwargs):
         return (True, "Merged 1 commit cleanly.")
 
     async def mock_done(task_id):
@@ -107,3 +104,15 @@ async def test_integrator_success_flow(tmp_path):
     assert res.success is True
     assert res.merged is True
     assert res.status == "integrated"
+
+
+@pytest.fixture(autouse=True)
+def isolated_git_policy(monkeypatch):
+    # These tests isolate review/retry policy. Real Git races are covered in
+    # test_integrator_exact_sha.py and the operational pilot.
+    async def preflight(*args):
+        return None
+    async def snapshot(*args):
+        return {"sha": "a" * 40, "target_sha": "b" * 40}
+    monkeypatch.setattr(BranchIntegrator, "_preflight", preflight)
+    monkeypatch.setattr(BranchIntegrator, "_snapshot", snapshot)

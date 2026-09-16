@@ -175,6 +175,8 @@ class MessageBus:
         self._global_sse_subscribers: set[asyncio.Event] = set()
         self._ws_connections: dict[str, WebSocket] = {}
         self._setup_routes()
+        from agent_bus.core.coordination import setup_coordination_routes
+        setup_coordination_routes(self)
 
     def _setup_routes(self) -> None:
         # Storage owns atomic conflict checks; translate failures consistently.

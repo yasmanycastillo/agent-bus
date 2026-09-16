@@ -28,6 +28,15 @@ CREATE TABLE IF NOT EXISTS inbox (
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS coordination_operations (
+    session_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    PRIMARY KEY (session_id, kind, operation_key)
+);
+
 CREATE TABLE IF NOT EXISTS project_metadata (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     project_id TEXT NOT NULL

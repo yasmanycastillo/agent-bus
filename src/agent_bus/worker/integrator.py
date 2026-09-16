@@ -131,14 +131,23 @@ class BranchIntegrator:
         if preflight_error:
             return IntegratorResult(False, False, "rejected", error=preflight_error, output=preflight_error)
 
-        # 1. Run tests in candidate worktree
+        try:
+            snapshot = await self._snapshot(worktree_dir, candidate_branch, target_branch)
+        except ValueError as exc:
+            return IntegratorResult(False, False, "rejected", error=str(exc))
+
+        # Test and review the same immutable candidate and target baseline.
         tests_passed, test_output = await self.run_tests(worktree_dir, test_cmd)
+        try:
+            after_tests = await self._snapshot(worktree_dir, candidate_branch, target_branch)
+            if after_tests != snapshot:
+                raise ValueError("Candidate or target changed during validation; run validation again.")
+        except ValueError as exc:
+            return IntegratorResult(False, False, "rejected", error=str(exc), output=test_output)
 
         # 2. Retrieve candidate SHA and diff against target branch
-        sha = await self._git_output("rev-parse", "HEAD", cwd=worktree_dir) or "HEAD"
-        diff = await self._git_output("diff", f"{target_branch}...{candidate_branch}", cwd=worktree_dir)
-        if not diff and worktree_dir.exists():
-            diff = await self._git_output("diff", f"{target_branch}...HEAD", cwd=worktree_dir)
+        sha = snapshot["sha"]
+        diff = await self._git_output("diff", f"{snapshot['target_sha']}...{sha}", cwd=worktree_dir)
 
         # 3. Retrieve acceptance criteria if not provided
         if acceptance_criteria is None:
@@ -156,6 +165,9 @@ class BranchIntegrator:
             reviewer_agent_id=self.agent_id,
         )
         decision = self.gatekeeper.evaluate(review_request)
+        if decision.sha != sha:
+            return IntegratorResult(False, False, "blocked", output=test_output,
+                                    error="Gatekeeper reviewed a different commit; integration rejected.")
 
         # 5. Record the review decision in the bus audit trail (POST /reviews)
         await self._record_review(decision)
@@ -213,7 +225,7 @@ class BranchIntegrator:
                 )
 
             # Verdict is APPROVE: proceed with git merge!
-            merge_ok, merge_output = await self._merge_branches(candidate_branch, target_branch)
+            merge_ok, merge_output = await self._merge_branches(sha, target_branch, expected_target_sha=snapshot["target_sha"])
             if not merge_ok:
                 retries = self._retry_counts.get(task_id, 0) + 1
                 self._retry_counts[task_id] = retries
@@ -272,7 +284,7 @@ class BranchIntegrator:
                     metadata={"review": decision.model_dump(mode="json")},
                 )
 
-            merge_ok, merge_output = await self._merge_branches(candidate_branch, target_branch)
+            merge_ok, merge_output = await self._merge_branches(sha, target_branch, expected_target_sha=snapshot["target_sha"])
             if not merge_ok:
                 retries = self._retry_counts.get(task_id, 0) + 1
                 self._retry_counts[task_id] = retries
@@ -297,12 +309,16 @@ class BranchIntegrator:
                 metadata={"review": decision.model_dump(mode="json")},
             )
 
-    async def _merge_branches(self, candidate_branch: str, target_branch: str) -> tuple[bool, str]:
-        """Merges candidate branch to target branch in main repo."""
+    async def _merge_branches(self, candidate_branch: str, target_branch: str, *, expected_target_sha: str) -> tuple[bool, str]:
+        """Merge the reviewed commit ID, never a movable candidate branch."""
         try:
             current = await self._git_output("symbolic-ref", "--short", "HEAD")
             if current != target_branch:
                 return False, f"Target checkout is on '{current or 'detached'}', expected '{target_branch}'."
+            if await self._git_output("rev-parse", "HEAD") != expected_target_sha:
+                return False, "Target changed after validation; run validation again."
+            if await self._git_output("status", "--porcelain"):
+                return False, "Target checkout is dirty; refusing to merge."
             # Check merge possibility
             proc = await asyncio.create_subprocess_exec(
                 "git", "merge", "--no-commit", "--no-ff", candidate_branch,
@@ -318,6 +334,14 @@ class BranchIntegrator:
                 abort = await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(self.repo_dir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                 await abort.communicate()
                 return (False, out + ("\nMerge abort failed." if abort.returncode else ""))
+
+            if await self._git_output("rev-parse", "HEAD") != expected_target_sha:
+                abort = await asyncio.create_subprocess_exec(
+                    "git", "merge", "--abort", cwd=str(self.repo_dir),
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                await abort.communicate()
+                return False, "Target changed during merge; integration rejected."
 
             # Commit merge
             proc_commit = await asyncio.create_subprocess_exec(
@@ -348,7 +372,7 @@ class BranchIntegrator:
     async def _preflight(self, worktree_dir: Path, candidate_branch: str, target_branch: str) -> str | None:
         """Reject ambiguous Git state before tests or mutation."""
         if not (self.repo_dir / ".git").exists():
-            return None
+            return "Integrator requires a Git checkout."
         if candidate_branch == target_branch:
             return "Candidate and target branches must be different."
         status = await self._git_output("status", "--porcelain", cwd=worktree_dir)
@@ -359,6 +383,24 @@ class BranchIntegrator:
         if not await self._git_output("rev-parse", "--verify", f"refs/heads/{target_branch}"):
             return f"Target branch '{target_branch}' does not exist."
         return None
+
+    async def _snapshot(self, worktree_dir: Path, candidate_branch: str, target_branch: str) -> dict[str, str]:
+        """Fail closed on ambiguous checkouts, dirty files, or a different repository."""
+        common = await self._git_output("rev-parse", "--path-format=absolute", "--git-common-dir")
+        candidate_common = await self._git_output("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=worktree_dir)
+        if not common or common != candidate_common:
+            raise ValueError("Candidate and target must belong to the same Git repository.")
+        sha = await self._git_output("rev-parse", "--verify", "HEAD", cwd=worktree_dir)
+        candidate_sha = await self._git_output("rev-parse", "--verify", f"refs/heads/{candidate_branch}")
+        target_sha = await self._git_output("rev-parse", "--verify", f"refs/heads/{target_branch}")
+        if not sha or not target_sha or sha != candidate_sha:
+            raise ValueError("Candidate worktree HEAD must match the candidate branch.")
+        if await self._git_output("symbolic-ref", "--short", "HEAD") != target_branch:
+            raise ValueError("Integrator checkout must be on the target branch.")
+        for directory in (self.repo_dir, worktree_dir):
+            if await self._git_output("status", "--porcelain", cwd=directory):
+                raise ValueError("Git checkout changed or contains uncommitted files; validation rejected.")
+        return {"sha": sha, "target_sha": target_sha}
 
     async def _notify_author_failure(self, task_id: str, author_agent: str, details: str, retry: int) -> None:
         """Sends a high priority feedback message to author on the bus."""
@@ -471,4 +513,3 @@ class BranchIntegrator:
                 )
         except Exception as exc:
             logger.error(f"Failed to notify author {author_agent} of review feedback: {exc}")
-

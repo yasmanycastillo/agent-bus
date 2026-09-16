@@ -16,6 +16,13 @@ Guía de [proyectos y sesiones](docs/projects.md): runtime compartido entre work
 
 ---
 
+## Flujo MCP recomendado
+
+`bootstrap_agent` → `my_pending_items` → `claim_task` → `prepare_edit` → `complete_handoff`.
+
+Reservas de varios archivos con rollback completo, handoffs idempotentes y permisos
+vinculados a la sesión autenticada. [Guía y ejemplos](docs/coordination-workflow.md).
+
 ## 🌟 Características Principales
 
 ```mermaid

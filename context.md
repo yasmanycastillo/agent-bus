@@ -1,6 +1,6 @@
 # Contexto del proyecto agent-bus
 
-Actualizado: 2026-09-06, America/Santo_Domingo.
+Actualizado: 2026-09-15, America/Santo_Domingo.
 
 ## Objetivo
 
@@ -257,3 +257,32 @@ Implementado y validado con **682 pruebas aprobadas** en **163,27 s** (`uv run p
 - Contrato congelado para T-20: `GET /room/api/usage` responde `{available: false, reason: "metrics_unavailable", message, schema_version: 1, data: null}`. La UI muestra "Métricas no disponibles" y ya sabe renderizar `data` (proyecto, agentes, by_task, cost_usd) cuando T-20 ponga `available: true`; no deberá requerir cambios de frontend. El único precedente de presupuesto en memoria es `BudgetBreaker` (`worker/circuit_breaker.py`).
 - Tests: `tests/test_usage_contract.py` congela el shape (200/401/403); `tests/test_console_integration.py` cubre operaciones, pausa, estáticos y escapes de ruta; `tests/test_cli_ux.py` cubre `agent-bus ui` con `webbrowser` simulado. El hub fake de `tests/test_message_workers.py` aprendió la ruta `/workers/bob/paused`.
 - Pendiente de T-21: vista de worktrees, prueba end-to-end de reconexión en navegador real y validación manual del flujo completo. `/room` (War Room) se conserva sin cambios.
+
+
+## T-23: coordinación MCP compacta y estabilización (2026-09-15)
+
+Implementación local autorizada tras comparar `agent-bus` y `agents-mcp-workspace`.
+No se migró ni modificó el proyecto de origen. Contrato y ejemplos en
+[coordinación MCP](docs/coordination-workflow.md).
+
+- Cinco tools nuevas: `bootstrap_agent`, `my_pending_items`, `prepare_edit`,
+  `complete_handoff` y `get_agent_instructions`. Identidad autenticada; bootstrap
+  reutiliza la credencial, muestra tareas libres y pendientes, instrucciones y
+  decisiones. Leer no confirma; mensajes con cursor y tareas propias paginadas.
+- `prepare_edit`: reserva multiarquivo en una transacción, claves persistentes
+  por sesión y rechazo de replay cuando la adquisición ya no está vigente.
+- `complete_handoff`: estado, mensaje con evidencia declarada, auditoría, ACK y
+  liberaciones explícitas en una transacción; replay no duplica efectos ni libera
+  locks sucesores. No transfiere propiedad ni ejecuta pruebas/merge.
+- `auth create`: token oculto por defecto, `--show-token` explícito y `--quiet`
+  compatible. Corrige los 23 errores de preparación reproducidos en la evaluación.
+- Integrador: captura SHA y base antes de tests, verifica estado limpio y estable,
+  comprueba SHA del veredicto y fusiona el commit revisado. Rechaza cambios de base.
+  El piloto temporal incorpora exclusiones de runtime y artefactos Python.
+- Validación final: **710 passed, 2 warnings en 177,69 s**, mediante
+  `.venv/bin/python -m pytest -q`. Ruff de archivos nuevos y rutas modificadas
+  verificadas, y `git diff --check`, limpios. Pruebas con dos procesos MCP stdio,
+  hub HTTP, conexiones SQLite independientes y Git reales en entornos temporales.
+  No se invocaron proveedores/modelos externos ni se acredita autonomía continua.
+- Cambios sin commit/push. T-20 y los pendientes restantes de T-21 se conservan.
+  Las tools requieren actualizar el hub y reconectar el cliente MCP existente.

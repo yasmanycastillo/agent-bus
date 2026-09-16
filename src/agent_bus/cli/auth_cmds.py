@@ -26,7 +26,8 @@ def auth():
 @click.option("--ttl", type=click.IntRange(1, 2592000), default=86400, show_default=True)
 @click.option("--output", type=click.Path(path_type=Path))
 @click.option("--quiet", is_flag=True, help="No imprimir el token en la terminal (solo el archivo)")
-def create(agent: str | None, provider: str | None, role: str, ttl: int, output: Path | None, quiet: bool):
+@click.option("--show-token", is_flag=True, help="Mostrar explícitamente el token para copiarlo a la consola")
+def create(agent: str | None, provider: str | None, role: str, ttl: int, output: Path | None, quiet: bool, show_token: bool):
     """Create a session file (0600); refuses to overwrite existing credentials."""
     try:
         if provider is not None:
@@ -77,7 +78,7 @@ def create(agent: str | None, provider: str | None, role: str, ttl: int, output:
             raise click.ClickException(str(exc)) from None
         raise
     click.echo(f"Session {session['session_id']} created for {agent} ({role})")
-    if quiet:
+    if quiet or not show_token:
         click.echo(f"Credentials: {target}; expires at UNIX {session['expires_at']:.0f}")
     else:
         # El token es el secreto de autenticación: se muestra para copiarlo

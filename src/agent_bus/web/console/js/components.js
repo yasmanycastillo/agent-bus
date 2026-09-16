@@ -29,7 +29,7 @@
     return html`
       <form className="login" onSubmit=${submit}>
         <h1>⚡ agent-bus · Consola</h1>
-        <p className="muted">Introduce el token de sesión administrativa<br />(provisto con <code>agent-bus auth create --role admin</code>)</p>
+        <p className="muted">Introduce el token de sesión administrativa<br />(provisto con <code>agent-bus auth create --agent human --role admin --show-token</code>)</p>
         <input
           type="password"
           placeholder="Bearer token admin"

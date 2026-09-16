@@ -14,6 +14,11 @@ from agent_bus.mcp.server import McpServer
 
 
 TOOL_ARGUMENTS = {
+    "bootstrap_agent": {},
+    "my_pending_items": {},
+    "get_agent_instructions": {},
+    "prepare_edit": {"paths": ["module.py"], "operation_key": "edit-1"},
+    "complete_handoff": {"task_id": "T1", "to_agent": "bob", "summary": "Ready", "operation_key": "handoff-1"},
     "wait_for_updates": {"timeout": 1},
     "post_message": {"to_agent": "bob", "text": "Review", "idempotency_key": "contract-message"},
     "read_messages": {},

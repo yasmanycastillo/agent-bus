@@ -21,9 +21,11 @@ def test_local_provision_and_revoke(tmp_path, monkeypatch):
     path = tmp_path / "credentials/alice.json"
     session = json.loads(path.read_text())
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    # Por defecto el token se muestra para poder copiarlo (login de la consola);
-    # --quiet lo omite para terminales con historia registrada.
-    assert f"Token: {session['token']}" in result.output
+    assert session['token'] not in result.output
+    visible = runner.invoke(auth, ["create", "--agent", "visible-agent", "--show-token"])
+    assert visible.exit_code == 0
+    visible_session = json.loads((tmp_path / "credentials/visible-agent.json").read_text())
+    assert f"Token: {visible_session['token']}" in visible.output
     quiet = runner.invoke(auth, ["create", "--agent", "quiet-agent", "--quiet"])
     assert quiet.exit_code == 0, quiet.output
     quiet_session = json.loads((tmp_path / "credentials/quiet-agent.json").read_text())
@@ -61,7 +63,7 @@ def test_provider_generates_independent_operational_agents(tmp_path, monkeypatch
     for path, session in zip(paths, sessions):
         assert path.stem == session["agent_id"]
         assert session["agent_id"] in output
-        assert f"Token: {session['token']}" in output
+        assert session['token'] not in output
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert runner.invoke(auth, ["create"]).exit_code != 0
     assert runner.invoke(auth, ["create", "--provider", "../invalid"]).exit_code != 0

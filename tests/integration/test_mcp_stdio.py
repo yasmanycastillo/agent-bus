@@ -16,17 +16,17 @@ from agent_bus.core.bus import MessageBus
 from agent_bus.security import async_bus_client
 
 
-def child_parameters(secure_bus):
+def child_parameters(secure_bus, agent_id="bob"):
     # Follow the package under test, including when integration runs this file
     # from a separate worktree. Never silently test the developer's global CLI.
     source = Path(agent_bus.__file__).resolve().parent.parent
     env = os.environ.copy()
-    env.update(PYTHONPATH=str(source), AGENT_BUS_AGENT_ID="bob", AGENT_BUS_ALLOW_UNSIGNED="0",
-               AGENT_BUS_SESSION_FILE=str(secure_bus.paths["bob"]), PYTHONUNBUFFERED="1")
-    args = ["-c", "from agent_bus.cli.main import app; app()", "mcp-server", "--agent", "bob",
+    env.update(PYTHONPATH=str(source), AGENT_BUS_AGENT_ID=agent_id, AGENT_BUS_ALLOW_UNSIGNED="0",
+               AGENT_BUS_SESSION_FILE=str(secure_bus.paths[agent_id]), PYTHONUNBUFFERED="1")
+    args = ["-c", "from agent_bus.cli.main import app; app()", "mcp-server", "--agent", agent_id,
             "--bus-url", secure_bus.url]
     return StdioServerParameters(command=sys.executable, args=args, env=env,
-                                 cwd=str(secure_bus.paths["bob"].parent))
+                                 cwd=str(secure_bus.paths[agent_id].parent))
 
 
 def payload(result):
@@ -309,3 +309,40 @@ async def test_oversized_stdio_frame_stops_child_without_delivery(secure_bus):
             response = await client.get("/inbox/alice")
             response.raise_for_status()
             assert response.json() == []
+
+
+async def test_two_stdio_agents_bootstrap_claim_lock_and_handoff(secure_bus, tmp_path):
+    """Two real MCP subprocesses use the authenticated HTTP hub, no mocked tools."""
+    async with async_bus_client('human', session=secure_bus.sessions['human'], base_url=secure_bus.url) as http:
+        response = await http.post('/tasks', json={'task_id': 'COORD-1', 'title': 'Coordinated change'})
+        response.raise_for_status()
+    async with asyncio.timeout(25):
+        async with Client(stdio_client(child_parameters(secure_bus, 'alice'))) as alice:
+            async with Client(stdio_client(child_parameters(secure_bus, 'bob'))) as bob:
+                for name, client in [('alice', alice), ('bob', bob)]:
+                    state = payload(await client.call_tool('bootstrap_agent', {'display_name': name}))
+                    assert state['agent_id'] == name
+                    assert state['session_id'] == secure_bus.sessions[name]['session_id']
+                claims = await asyncio.gather(
+                    alice.call_tool('claim_task', {'task_id': 'COORD-1'}),
+                    bob.call_tool('claim_task', {'task_id': 'COORD-1'}),
+                )
+                assert sum(not result.is_error for result in claims) == 1
+                owner, reviewer, reviewer_name = (alice, bob, 'bob') if not claims[0].is_error else (bob, alice, 'alice')
+                edit_args = {'paths': [str(tmp_path / 'shared.py')], 'operation_key': 'shared-edit'}
+                edit = payload(await owner.call_tool('prepare_edit', edit_args))
+                assert edit['authorized']
+                conflict = await reviewer.call_tool('prepare_edit', edit_args)
+                assert conflict.is_error and conflict.structured_content['http_status'] == 409
+                lock = edit['locks'][0]
+                delivery = {'task_id': 'COORD-1', 'to_agent': reviewer_name, 'summary': 'Ready for review',
+                            'operation_key': 'shared-handoff',
+                            'release_locks': [{key: lock[key] for key in ('file_path', 'scope', 'acquisition_id')}]}
+                sent = payload(await owner.call_tool('complete_handoff', delivery))
+                replay = payload(await owner.call_tool('complete_handoff', delivery))
+                assert replay['replayed'] and replay['message_id'] == sent['message_id']
+                pending = payload(await reviewer.call_tool('my_pending_items', {}))
+                assert pending['pending_message_count'] == 1
+                assert pending['messages'][0]['body']['summary'] == 'Ready for review'
+                payload(await reviewer.call_tool('ack_messages', {'message_ids': [sent['message_id']]}))
+                assert payload(await reviewer.call_tool('my_pending_items', {}))['pending_message_count'] == 0
