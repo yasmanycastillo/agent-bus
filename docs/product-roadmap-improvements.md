@@ -1,117 +1,175 @@
-# Plan de Mejoras para Comercialización y Casos de Uso Empresariales
+# Roadmap de producto y operación de agent-bus
 
-Este documento define el roadmap para convertir `agent-bus` en un producto de coordinación de agentes desplegable en local, on-premise o SaaS. El producto central es el bus, la identidad, la entrega durable, los worktrees y el gate de integración. El adaptador HTTP `HermesOrchestrator` y la conexión MCP de Hermes Agent están implementados; la aceptación T-18 usa un puente de publicación validado, descrito en [hermes-agent.md](hermes-agent.md). Ninguno es un requisito del núcleo.
+Actualizado: **2026-09-15**. Base publicada: **`433a08a` en `origin/main`**.
 
----
+`agent-bus` combina coordinación MCP, identidad autenticada, entrega durable,
+workers, worktrees y revisión/integración Git. La prioridad de producto es hacer
+ese flujo sencillo de operar, recuperable y medible antes de ampliar el alcance
+comercial. El núcleo es local; on-premise empresarial y SaaS son objetivos futuros.
 
-## 1. Mejoras Técnicas Necesarias por Nivel
+Este documento establece prioridades y criterios de salida. [TASK.md](../TASK.md)
+es el backlog técnico y [context.md](../context.md) resume el estado y su historial.
 
-### Estado actual: core implementado, operación real pendiente de ampliar
-* [x] **T-12: Locks Robustos y Fencing Tokens:**
-  - Scope `checkout` y `project`, canonicalización de rutas y rechazo de escapes de worktree.
-  - Leases por sesión, TTL acotado (300 s default), reclamación de expirados y tokens de adquisición (`acquisition_id`) para evitar colisiones por titulares desfasados.
-* [x] **T-13: Validación con clientes reales:**
-  - Claude Code y Codex CLI validados mediante stdio; AGY y Grok tienen pruebas headless del runner.
-  - La matriz completa y sus límites están en `docs/acceptance-t13.md`.
-* [x] **T-14: Workers recuperables y adaptadores nativos:**
-  - Adaptadores separados para Claude, Codex, Aider, AGY y Grok.
-  - Intentos persistentes y sesiones reanudables; la aceptación de cada proveedor sigue siendo desigual.
-* [x] **T-15: Integración Git automatizada:**
-  - `BranchIntegrator` con verificación de estado previo (preflight), merges protegidos y rollback seguro ante fallos.
-  - Cola `in-review` y comandos CLI del ciclo de vida del integrador (`agent-bus integrator start/status/stop`).
-* [x] **Onboarding y experiencia interactiva:**
-  - `agent-bus onboard` crea el proyecto, credenciales, hub, worktrees y workers con confirmación.
-  - Cada proyecto puede aislar su puerto para no mezclar hubs.
+## 1. Estado comprobado
 
-**Limitación operativa actual:** el flujo local está listo para una prueba controlada, pero todavía hay que medir recuperación, costes y comportamiento de cada proveedor en proyectos reales. El dashboard existente es operativo; no es aún la Team Edition web descrita más adelante.
+La última suite completa del código publicado terminó con **710 pruebas aprobadas**,
+dos avisos de deprecación WebSocket, en **177,69 s**. Se ejecutó antes de publicar
+`433a08a`; la presente revisión documental no constituye una ejecución nueva.
 
----
+| Capacidad | Estado | Evidencia y límites |
+|---|---|---|
+| Identidad y coordinación básica | Implementada | Sesiones Bearer por proyecto, autorización, entregas independientes, ACK, reintentos y cursores durables |
+| Locks T-12 | Implementados | Scopes `checkout`/`project`, TTL y token por adquisición/sesión; protección cooperativa, no intercepta escrituras externas |
+| Clientes externos T-13 | Aceptación histórica | Claude Code y Codex CLI; consultar [matriz](acceptance-t13.md). No extender sus resultados a todos los proveedores |
+| Workers e integración T-14/T-15 | Implementados con pilotos acotados | Adaptadores, worktrees, commit y cola `in_review`; falta medir operación sostenida y recuperación por proveedor |
+| Tareas y DAG T-17 | Implementados | Dependencias, criterios de aceptación, comandos de prueba y desglose idempotente |
+| Hermes T-18 | Adaptador y aceptación histórica | HTTP de inferencia separado de Hermes Agent por MCP; publicación por puente HTTP, sin worker Hermes ni tool MCP de desglose |
+| Gatekeeper T-19 | Implementado | Evaluación por reglas y evidencia de tests; no equivale a revisión semántica independiente de todos los criterios |
+| Consola T-21 | Implementada parcialmente | React local, API admin, eventos SSE, tareas, mensajes, reasignación y pausa/reanudación; faltan worktrees y aceptación completa en navegador |
+| Coordinación compacta T-23 | Implementada y publicada | Cinco tools nuevas, reservas multiarquivo y handoff transaccional; pruebas con dos procesos MCP reales y conexiones SQLite independientes |
+| Cuotas y métricas T-20 | Pendientes | `/room/api/usage` conserva `available=false`; un contrato y un presupuesto en memoria no son control persistente de gasto |
+| Enterprise T-22 | Propuesto | Integraciones SDLC, SSO/RBAC, auditoría exportable y operación aislada todavía no acreditadas |
 
-### Nivel 2: Orquestación estructurada (siguiente prioridad)
-* [x] **Contrato de inferencia y `HermesOrchestrator` HTTP:**
-  - Soporte para endpoints compatibles con OpenAI / vLLM / Ollama / OpenRouter para conectar instancias de Hermes (ej. `Hermes-3-Llama-3.1-70B` / `Hermes-3-8B`).
-  - Solicitud de Structured Outputs y validación local de JSON Schema y DAG antes de publicar; una respuesta inválida se rechaza. Evidencia automatizada con inferencia simulada en TASK.md.
-* [x] **Desglose mediante inferencia HTTP:**
-  - `breakdown` / `orchestrate` convierten un objetivo textual en un DAG validado y publican tareas en lote con `operation_key`.
-* [x] **Conexión y aceptación real de Hermes Agent (T-18):**
-  - Hermes Agent v0.21.0 / gpt-5.6-sol conectado por MCP con identidad propia; mensajes, ACK, reanudación y desglose idempotente verificados. Publicación mediante puente Python al batch HTTP; no se implementó un worker Hermes ni una herramienta MCP de creación.
-* [x] **Gatekeeper de integración (T-19):**
-  - `CodeReviewGatekeeper` evalúa diff y resultados de tests mediante reglas; `BranchIntegrator` aplica la política `--require-approval` y registra el veredicto. La implementación actual no utiliza Hermes como revisor.
+**Conclusión de madurez:** base técnica y coordinación local utilizables en pilotos
+supervisados. La suite automatizada no demuestra autonomía continua, recuperación
+sin intervención ni preparación comercial de todas las capacidades.
 
+## 2. Entrega reciente: coordinación compacta T-23
 
----
+Se adaptó el flujo útil de `agents-mcp-workspace` a las garantías de `agent-bus`,
+sin importar su base ni crear otro estado de coordinación:
 
-### Nivel 3: Team Edition y control operativo
-* [ ] **Dashboard Web Interactivo Moderno (React / WebSockets):**
-  - Visualización en tiempo real de agentes activos, roles, archivos bloqueados (locks), tareas en progreso y flujo de mensajes.
-  - Interfaz gráfica para que los desarrolladores humanos puedan pausar agentes, reasignar tareas o inyectar feedback humano en el bucle (*Human-in-the-Loop*).
-* [ ] **Gateway de Cuotas y Costes (Budget Control):**
-  - Límite de gasto por tarea, sprint o agente para evitar que un agente en bucle consuma créditos excesivos de APIs comerciales.
-  - Métricas de consumo de tokens y tiempo de resolución por modelo y por agente.
-* [x] **CLI simplificado inicial (`agent-bus onboard`):** prepara un proyecto con preguntas y confirmaciones.
-* [ ] **Evolución del onboarding:** detectar puertos ocupados, validar autenticación de proveedor y ofrecer recuperación guiada.
+- `bootstrap_agent`: instrucciones, sesión existente, agentes, decisiones, tareas
+  libres y pendientes propios en una llamada.
+- `my_pending_items`: mensajes y tareas propias paginados; leer no confirma.
+- `prepare_edit`: todos los archivos o ninguno, tokens de adquisición y claves
+  persistentes por sesión; rechaza reintentos de reservas que dejaron de estar vigentes.
+- `complete_handoff`: estado de tarea, mensaje, evidencia declarada, auditoría,
+  ACK y liberaciones explícitas en una transacción; replay sin duplicar efectos.
+- `get_agent_instructions`: protocolo de uso sin cambiar estado.
 
----
+También se corrigió la regresión de credenciales (`--show-token` explícito) y se
+reforzó el integrador: candidato/base capturados antes de tests, estado estable y
+limpio, veredicto ligado al SHA y merge del commit revisado, no de una rama mutable.
 
-### Nivel 4: Nivel Enterprise (On-Premise / Seguridad / SDLC)
-* [ ] **Integración Bidireccional con Jira / GitHub Issues / GitLab:**
-  - Sincronización automática: un nuevo ticket en Jira crea una tarea en el bus; el cierre exitoso por el agente actualiza el estado del ticket con el link al PR.
-* [ ] **Auditoría Inmutable y Compliance (SOC2 / ISO27001):**
-  - Registro de auditoría persistente y exportable que detalle cada cambio de código, decisión de arquitectura y modelo utilizado.
-* [ ] **Autenticación Empresarial (SSO / RBAC):**
-  - Roles de acceso (Administrador, Desarrollador, Solo Lectura, Auditor) integrados con Okta / Google Workspace / Azure AD.
-* [ ] **Soporte Air-Gapped / Multi-Model 100% Local:**
-  - Pipeline probado usando únicamente modelos locales de código abierto:
-    - **Orquestador / PM:** Hermes 3 (70B / 8B)
-    - **Coders Especializados:** DeepSeek-Coder-V2 / Qwen2.5-Coder (32B / 7B)
-    - **Revisores / Testers:** Llama-3.3 / StarCoder2
+[Guía del flujo y sus límites](coordination-workflow.md). El handoff no ejecuta
+comandos de validación ni fusiona código. Las pruebas nuevas usan dos servidores
+MCP stdio como procesos reales; no son una aceptación nueva con aplicaciones o
+modelos externos. Para usar las tools hay que actualizar el hub y reconectar MCP.
 
----
+## 3. Próximas prioridades y criterios de salida
 
-## 2. Plan ejecutable y criterios de salida
+### Prioridad 1 — T-20: cuotas, presupuesto y consumo persistente
 
-| Fase | Objetivo | Dependencias | Criterio de salida |
-| :--- | :--- | :--- | :--- |
-| P0. Operación real | Completar una tarea con worker e integrador en un repositorio de prueba | Core actual | `submit → commit → in_review → tests → merge → done` reproducible |
-| P1. Contrato de tareas | Añadir dependencias, criterios de aceptación, comando de pruebas y DAG persistente | P0 | Hermes crea tareas idempotentes y el bus rechaza ciclos |
-| P2. Orquestador | Adaptador OpenAI-compatible/vLLM/Ollama con JSON Schema | P1 | Un desglose válido produce tareas trazables y asignables |
-| P3. Control operativo | Dashboard web, cuotas, costes, pausas y feedback humano | P0, P1 | Un operador detiene, reasigna y audita sin editar SQLite |
-| P4. Enterprise | Integraciones SDLC, SSO, auditoría exportable y air-gapped | P1–P3 | Instalación y recuperación documentadas y probadas |
+El control de consumo debe preceder a una oferta de ejecución autónoma comercial.
 
-Cada entrega debe medir: tareas que llegan a `done`, tiempo hasta `in_review`, reintentos, conflictos de merge, bloqueos, coste por tarea, tiempo de resolución y recuperación tras reinicio. No se debe cerrar una fase por tener sólo clases o mocks.
+- [ ] Registrar proveedor, modelo, tokens, duración y coste por agente, tarea y proyecto.
+- [ ] Persistir límites y consumo para que sobrevivan al reinicio del hub/worker.
+- [ ] Definir cómo tratar proveedores sin métricas: mostrar desconocido, no cero ficticio.
+- [ ] Detener nuevas ejecuciones al alcanzar un límite y mostrar una causa accionable.
+- [ ] Publicar métricas reales respetando el contrato existente de `/room/api/usage`.
+- [ ] Probar límites con ejecuciones concurrentes, reintentos y reinicios sin doble conteo.
 
-## 3. Decisiones de producto
+**Salida:** el operador puede consultar gasto/consumo, fijar límites y comprobar
+que se respetan tras fallos y reanudaciones, sin editar SQLite.
 
-El primer mercado recomendado es mantenimiento de deuda técnica y migraciones: tareas acotadas, ramas aisladas, pruebas automatizadas y resultado verificable. Data engineering, SRE y documentación viva quedan como verticales posteriores.
+### Prioridad 2 — Recuperación guiada y aceptación operativa
 
-Hermes debe ser un adaptador intercambiable. El contrato del bus no debe depender de un modelo concreto; se selecciona por capacidad, coste, latencia, ventana de contexto, despliegue y calidad de salida estructurada.
+`agent-bus onboard` ya existe. Su evolución debe reducir los pasos manuales que
+siguen apareciendo al operar con proveedores y proyectos reales.
 
-El gateway de cuotas y costes debe preceder a la ejecución autónoma comercial: limita por agente, tarea y proyecto, registra tokens y tiempo, y detiene trabajo con estado visible.
+- [ ] Diagnosticar puerto ocupado, hub de otro proyecto y credencial vencida o revocada.
+- [ ] Guiar renovación de credenciales y reconexión MCP sin mostrar secretos por defecto.
+- [ ] Validar permisos del CLI/proveedor, dependencias y entorno del worktree antes de ejecutar.
+- [ ] Reproducir caída de worker, interrupción del integrador y respuesta perdida tras una mutación.
+- [ ] Aplicar el flujo T-23 con aplicaciones externas; registrar versiones y límites por proveedor.
+- [ ] Definir conservación, respaldo y limpieza de registros de idempotencia sin reabrir efectos antiguos.
 
-## 4. Modelos de Coding Recomendados por Rol
+**Salida:** otra persona reproduce instalación, tarea, fallo y recuperación con
+una guía; quedan medidas las intervenciones humanas y la ausencia de entregas,
+ACK o integraciones duplicadas. No prometer exactamente una vez para efectos
+externos que el bus no controla.
 
-| Rol | Modelo Recomendado | Despliegue / Ubicación | Justificación |
-| :--- | :--- | :--- | :--- |
-| **Orquestador / Tech Lead** | **Hermes 3 (Llama-3.1-70B / 8B)** | Local (vLLM) / OpenRouter | Excelente razonamiento en asignación de tareas, bajo coste continuo y llamadas a funciones robustas. |
-| **Arquitecto / Heavy Refactor** | **Claude 3.7 Sonnet / DeepSeek-V3** | API Cloud / Local | Máxima precisión en refactorizaciones de múltiples archivos y diseño de sistemas complejos. |
-| **Implementador / Fast Coder** | **Qwen2.5-Coder-32B / DeepSeek-Coder** | Local (vLLM / Ollama) | Muy rápido, eficiente en tareas atómicas y edición directa de funciones con cero coste de API externa. |
-| **Generador de Tests / QA** | **Aider + Qwen2.5-Coder-7B** | Local | Enfoque quirúrgico en cobertura de pruebas unitarias y verificación de regresiones. |
+### Prioridad 3 — Completar T-21 y la experiencia de supervisión
 
----
+La consola React está disponible en `/console`; no se plantea reconstruirla.
 
-## 5. Otras Posibilidades de Uso y Mercados Verticales
+- [x] Arranque local con `agent-bus ui`, sin SaaS.
+- [x] Tareas, agentes, locks, mensajes y eventos SSE sobre API autenticada.
+- [x] Creación/reasignación de tareas y pausa/reanudación de workers.
+- [ ] Vista de worktrees y relación entre tarea, rama, revisión y commit integrado.
+- [ ] Prueba end-to-end de desconexión/reconexión en navegador real.
+- [ ] Validación manual del flujo completo y de estados de error/credencial vencida.
+- [ ] Mostrar consumo real cuando T-20 lo suministre; mantener estado explícito de datos no disponibles.
 
-Más allá del desarrollo de software convencional, esta arquitectura de bus coordinado con Hermes abre varios casos de uso adicionales de alto valor:
+**Salida:** un operador crea y sigue trabajo, pausa, reasigna y recupera la vista
+tras desconexión desde el navegador. Distingue evidencia declarada de validación
+ejecutada y puede identificar qué commit se revisó e integró.
 
-### A. "Virtual Data Engineering Team" (Pipelines y Calidad de Datos)
-* **Caso de uso:** Equipos de datos donde un agente escribe consultas SQL/dbt, otro genera esquemas de validación y Hermes valida que los pipelines no rompan dependencias ni generen sobrecostes en BigQuery/Snowflake.
+### Prioridad 4 — T-22: capacidades empresariales
 
-### B. Mantenimiento Autónomo de Deuda Técnica y Migraciones
-* **Caso de uso:** Tareas continuas de fondo (migrar de Python 3.10 a 3.12, actualizar dependencias con vulnerabilidades CVE, refactorizar tests a `pytest`).
-* El orquestador toma tickets de seguridad del repositorio, asigna branches aisladas a los agentes y sólo genera PRs cuando todos los tests y análisis estáticos pasan.
+Después de cerrar los controles operativos anteriores:
 
-### C. Soporte y Resolución Rápida de Incidentes (SRE / DevOps)
-* **Caso de uso:** Un agente analiza logs de fallos en producción, otro localiza la línea causante en el repositorio, un tercero redacta el hotfix y Hermes coordina la validación antes de alertar al ingeniero de guardia.
+- [ ] Sincronización de tickets y PRs con GitHub/GitLab/Jira, con reglas de propiedad e idempotencia.
+- [ ] SSO y roles empresariales; los roles locales agente/admin no sustituyen ese modelo.
+- [ ] Auditoría exportable, retención y respaldo/restauración probados. El log SQLite
+  actual no acredita inmutabilidad ni certificación SOC 2/ISO 27001.
+- [ ] Instalación on-premise y ejecución sin acceso exterior verificadas con proveedores locales.
+- [ ] Definir aislamiento entre organizaciones antes de ofrecer una modalidad SaaS.
 
-### D. Creación de Contenido Técnico y Documentación Viva
-* **Caso de uso:** Enjambre que audita el código en cada commit y sincroniza automáticamente la documentación de API (OpenAPI, Markdown, tutoriales) manteniendo el contexto actualizado sin intervención humana.
+**Salida:** instalación, operación, respaldo y recuperación documentados y probados
+en el entorno de destino, con responsabilidades de soporte y permisos explícitos.
+
+## 4. Fases del producto
+
+Las fases conservan su identificador original; el estado evita volver a planificar
+como inexistentes piezas que ya se implementaron.
+
+| Fase | Estado al publicar T-23 | Trabajo para cerrar la fase operativa |
+|---|---|---|
+| P0 — Operación real | Ciclo worker/integrador y pilotos acotados existentes | Repetir con proveedores reales, fallos y recuperación guiada |
+| P1 — Contrato de tareas | DAG y contrato T-17 implementados | Medir calidad de planes, asignaciones y criterios en los pilotos |
+| P2 — Orquestación | Adaptador HTTP y conexión Hermes Agent existentes | Ampliar aceptación; cualquier worker Hermes/tool de desglose requiere alcance propio |
+| P3 — Control operativo | Consola parcial y coordinación T-23; cuotas pendientes | T-20, worktrees visibles y aceptación del navegador |
+| P4 — Enterprise | Propuesto | Depende del cierre operativo de P0–P3 y de requisitos del despliegue objetivo |
+
+Medir en cada piloto: tareas terminadas, tiempo hasta `in_review`, reintentos,
+conflictos de merge, esperas de locks, recuperación tras reinicio, intervención
+humana, consumo y coste por tarea. Hasta T-20, declarar qué datos se midieron
+externamente y cuáles siguen desconocidos.
+
+## 5. Decisiones de producto y proveedores
+
+El primer caso comercial propuesto sigue siendo deuda técnica y migraciones:
+trabajo acotado, ramas aisladas y aceptación verificable. Una experiencia simple
+para los agentes debe convivir con garantías de identidad, reintentos y locks.
+
+Mantener una sola fuente de estado en el hub. Extender las operaciones compactas
+de T-23 con evidencia de uso; no duplicar almacenamiento ni sustituir las leases
+por identidades declaradas libremente. Mantener modelos y aplicaciones como
+adaptadores intercambiables.
+
+La tabla anterior de modelos concretos era una propuesta histórica, no un
+benchmark vigente. La selección debe basarse en pruebas del proyecto:
+
+| Rol | Qué evaluar antes de elegir proveedor/modelo |
+|---|---|
+| Planificación | Validez de JSON Schema/DAG, criterios verificables y coste del desglose |
+| Implementación | Calidad del cambio, permisos, reanudación, pruebas aprobadas y coste por tarea terminada |
+| Revisión | Capacidad de detectar defectos, independencia y vínculo de la evidencia con el SHA |
+| QA | Regresiones útiles y reproducibles, sin depender sólo de pruebas que imiten la implementación |
+
+Distinguir aplicación, modelo y endpoint: Hermes Agent es una aplicación cliente;
+`HermesOrchestrator` es un adaptador HTTP; Aider es una aplicación, no un modelo.
+La compatibilidad declarada no sustituye la aceptación del proveedor elegido.
+
+## 6. Verticales posteriores
+
+Son hipótesis de producto, no funcionalidades entregadas:
+
+- **Data engineering:** cambios SQL/dbt y validación de calidad/coste de pipelines.
+- **SRE/DevOps:** diagnóstico y propuestas de hotfix con aprobación humana para acciones operativas.
+- **Documentación técnica:** propuestas de actualización ligadas a cambios de código y revisión.
+
+Cada vertical necesita su contrato de tareas, límites de permisos, entorno de
+validación y métricas de aceptación antes de considerarse parte de la oferta.

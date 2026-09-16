@@ -4,7 +4,7 @@ Actualizado: 2026-09-15, America/Santo_Domingo.
 
 ## Objetivo
 
-Convertir agent-bus en un MCP confiable para comunicar y coordinar agentes que trabajan en un mismo proyecto. El servidor MCP ya existe; el objetivo inmediato es estabilizar sus garantías y demostrar interoperabilidad real.
+Consolidar agent-bus como un producto local de coordinación y ejecución de agentes sobre proyectos de desarrollo. El núcleo MCP autenticado, la entrega durable y el flujo de coordinación compacto están implementados. La prioridad siguiente es medir y controlar la operación sostenida: cuotas, recuperación guiada y aceptación con proveedores y navegador reales.
 
 ## Lectura al iniciar una sesión
 
@@ -14,7 +14,94 @@ Convertir agent-bus en un MCP confiable para comunicar y coordinar agentes que t
 4. Consultar [evaluación MCP](docs/evaluacion-mcp.md) para causas y evidencia inicial.
 5. Usar [arquitectura original](docs/autonomous_multi_agent_architecture.md), [configuración MCP](docs/mcp-setup.md) y [README](README.md) como documentación existente, contrastando sus afirmaciones con el código.
 
-## Estado conocido
+## Estado actual y publicación
+
+Base de esta actualización: **`433a08a`**, publicada en **`origin/main`**.
+La última ejecución completa, previa a publicar ese commit, terminó con
+**710 pruebas aprobadas**, dos avisos de deprecación WebSocket, en **177,69 s**
+(`.venv/bin/python -m pytest -q`). Para la guía MCP posterior se ejecutó de nuevo
+la suite completa: **719 pruebas aprobadas**, dos avisos de deprecación WebSocket,
+en **175,58 s** (`uv run pytest -q`).
+
+| Área | Estado actual | Alcance pendiente |
+|---|---|---|
+| Identidad, mensajes y locks | Sesiones Bearer, entregas durables, ACK, cursores, leases por sesión/adquisición | Medir recuperación sostenida y simplificar renovación de credenciales |
+| T-14/T-15/T-19: ejecución e integración | Workers, worktrees, revisión por reglas e integración del SHA validado | Aceptación operativa ampliada por proveedor y recuperación guiada |
+| T-17: tareas y DAG | Dependencias, criterios de aceptación y desglose idempotente | Validar planes y asignaciones en pilotos prolongados |
+| T-18: Hermes | Adaptador HTTP y aceptación histórica de Hermes Agent por MCP | No existe worker Hermes ni tool MCP para publicar desgloses; se usa el puente HTTP documentado |
+| T-21: consola local | React en `/console`, tareas, mensajes, eventos SSE, reasignación y pausa/reanudación | Vista de worktrees, reconexión en navegador real y validación manual completa |
+| T-23: coordinación compacta | Cinco tools nuevas, reservas multiarquivo y handoff transaccional; publicado | Aceptación del flujo nuevo con aplicaciones/modelos externos |
+| T-20: cuotas y consumo | Contrato de API/UI preparado; `available=false` | Persistencia, medición y detención efectiva por presupuesto |
+| T-22: enterprise | Roadmap | Integraciones SDLC, SSO/RBAC, auditoría exportable y despliegue aislado |
+
+Flujo recomendado: `bootstrap_agent → my_pending_items → claim_task → prepare_edit → complete_handoff`.
+`get_agent_instructions` expone el protocolo sin modificar estado.
+[Contrato y ejemplos](docs/coordination-workflow.md).
+
+### Garantías y límites que deben preservarse
+
+- La sesión autentica identidad y proyecto; el modelo no elige el actor de las nuevas tools.
+- `prepare_edit` reserva todos los archivos o ninguno. Un replay no renueva el TTL
+  ni devuelve autorización si alguna adquisición dejó de estar vigente.
+- `complete_handoff` guarda estado, mensaje, evidencia declarada, auditoría, ACK y
+  liberaciones explícitas en una transacción. No ejecuta pruebas, no transfiere
+  propiedad y no libera adquisiciones posteriores al repetir la petición.
+- El integrador captura candidato y base antes de tests, comprueba estabilidad,
+  valida el SHA del veredicto y fusiona ese commit. Los locks siguen siendo cooperativos.
+- `auth create` oculta el token por defecto; `--show-token` lo muestra explícitamente.
+- Las 710 pruebas incluyen dos procesos MCP stdio, HTTP, SQLite y Git reales en
+  entornos temporales. No equivalen a una nueva aceptación con modelos externos,
+  navegador completo, cuotas funcionales o autonomía continua.
+
+### Guía automática al conectar MCP
+
+Implementada después de `433a08a` y preparada para publicación junto con esta documentación.
+
+- El SDK entrega `instructions` al conectar, antes de ejecutar tools. Indica
+  `bootstrap_agent({})` como primera llamada, pendientes, locks y handoff.
+- Las 17 tools incluyen requisitos y próximos pasos. Los errores de herramienta
+  añaden `guidance` estática según operación/código HTTP, sin exponer cuerpos del
+  backend; se conservan los códigos, `isError` y los errores JSON-RPC existentes.
+- El modo legacy explica cómo provisionar una credencial y reconectar. La conexión
+  no ejecuta bootstrap automáticamente ni añade una barrera a clientes existentes;
+  la aplicación debe transmitir las instrucciones al modelo y éste debe seguirlas.
+- Validación dirigida: **91 pruebas aprobadas**, dos avisos de deprecación WebSocket,
+  en **30,75 s**. Incluye contratos MCP, servidor, coordinación y procesos stdio
+  reales con negociación legacy y cliente SDK. La validación completa posterior
+  aprobó **719 pruebas**, como se registra arriba.
+- Ruff de los cinco archivos Python modificados y `git diff --check`, limpios.
+  Reconectar los procesos MCP tras actualizar para recibir la nueva guía.
+
+### Próximo trabajo recomendado
+
+1. **T-20:** persistir consumo y límites por agente/tarea/proyecto, mostrar datos reales
+   en API/consola y detener trabajo al alcanzar un límite, también tras reinicios.
+2. **Recuperación operativa:** diagnosticar credenciales vencidas, puertos, permisos
+   de proveedor y entornos de worktree; ofrecer recuperación guiada y reproducible.
+3. **Cerrar T-21:** worktrees visibles y prueba de reconexión/operación en navegador real.
+4. **Ampliar aceptación:** usar el flujo T-23 con clientes externos, desconexiones,
+   conflictos y reanudación; medir intervención humana, coste y tasa de finalización.
+
+Prioridades y criterios de salida: [roadmap de producto](docs/product-roadmap-improvements.md).
+`TASK.md` conserva el backlog técnico y las evidencias por entrega.
+
+### Operación local registrada al publicar T-23
+
+Se actualizó el hub iniciado durante esa implementación y se verificaron
+`bootstrap` y `pending` con la sesión de trabajo, sin locks propios activos al
+cerrar. Se dejó un listener en modo observación (`--dry-run`). Es una fotografía
+de esa sesión, no una garantía de que esos procesos sigan vivos. Los clientes MCP
+que ya estaban abiertos deben reconectarse para descubrir las cinco tools nuevas.
+
+## Historial de implementación
+
+Las secciones siguientes conservan diagnósticos, cifras y pendientes **de cada
+momento**. Para decidir qué está disponible ahora, usar el resumen anterior y
+el cierre de T-23; no interpretar las referencias antiguas a tareas pendientes
+como el estado actual. Las autorizaciones operativas históricas tampoco
+constituyen instrucciones nuevas para sesiones posteriores.
+
+### Diagnóstico inicial
 
 - Paquete Python `agent-bus`, versión declarada 0.1.0; Python >=3.12.
 - Hub FastAPI, persistencia SQLite/aiosqlite, avisos SSE y endpoint WebSocket.
@@ -261,7 +348,8 @@ Implementado y validado con **682 pruebas aprobadas** en **163,27 s** (`uv run p
 
 ## T-23: coordinación MCP compacta y estabilización (2026-09-15)
 
-Implementación local autorizada tras comparar `agent-bus` y `agents-mcp-workspace`.
+Implementado y publicado en `origin/main` mediante `433a08a`, tras comparar
+`agent-bus` y `agents-mcp-workspace`.
 No se migró ni modificó el proyecto de origen. Contrato y ejemplos en
 [coordinación MCP](docs/coordination-workflow.md).
 
@@ -284,5 +372,7 @@ No se migró ni modificó el proyecto de origen. Contrato y ejemplos en
   verificadas, y `git diff --check`, limpios. Pruebas con dos procesos MCP stdio,
   hub HTTP, conexiones SQLite independientes y Git reales en entornos temporales.
   No se invocaron proveedores/modelos externos ni se acredita autonomía continua.
-- Cambios sin commit/push. T-20 y los pendientes restantes de T-21 se conservan.
-  Las tools requieren actualizar el hub y reconectar el cliente MCP existente.
+- Publicación confirmada: `433a08ac42a1d9d83c641194d4509812130dd2fc` en `origin/main`.
+  El hub local de esa sesión se actualizó y se verificaron bootstrap/pendientes.
+  Reconectar los clientes MCP existentes para descubrir las nuevas tools.
+  T-20 y los pendientes restantes de T-21 se conservan.

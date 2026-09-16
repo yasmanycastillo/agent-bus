@@ -61,6 +61,42 @@ async def test_secure_tool_catalog_has_no_actor_input_and_forbids_extra_fields(b
         assert not {"agent_id", "from_agent", "decided_by"} & set(schema.get("required", []))
 
 
+async def test_connection_teaches_onboarding_before_any_tool_call(bound_server, monkeypatch):
+    calls = []
+    async def execute(*args):
+        calls.append(args)
+        return {}
+    monkeypatch.setattr(bound_server, "execute_tool", execute)
+    async with Client(bound_server.sdk_server()) as client:
+        assert "primera llamada debe ser bootstrap_agent({})" in client.instructions
+        assert "my_pending_items" in client.instructions
+        assert "prepare_edit" in client.instructions
+        assert "complete_handoff" in client.instructions
+        assert "private-session-token" not in client.instructions
+        assert calls == []
+
+
+async def test_legacy_connection_explains_provisioning(monkeypatch):
+    monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "1")
+    monkeypatch.delenv("AGENT_BUS_SESSION_FILE", raising=False)
+    async with Client(McpServer().sdk_server()) as client:
+        assert "modo legacy" in client.instructions
+        assert "credencial propia" in client.instructions
+        assert "Reconecta MCP" in client.instructions
+
+
+async def test_discovered_tools_explain_preconditions_and_next_steps(bound_server):
+    async with Client(bound_server.sdk_server()) as client:
+        tools = {tool.name: tool.description for tool in (await client.list_tools()).tools}
+    assert "Primera llamada" in tools["bootstrap_agent"]
+    assert "Requiere tarea libre" in tools["claim_task"]
+    assert "prepare_edit" in tools["claim_task"]
+    assert "authorized=true" in tools["prepare_edit"]
+    assert "complete_handoff" in tools["prepare_edit"]
+    assert "tokens vigentes" in tools["complete_handoff"]
+    assert "detén la edición" in tools["renew_lock"]
+
+
 async def test_unknown_tool_is_protocol_error_and_connection_remains_usable(bound_server):
     async with Client(bound_server.sdk_server()) as client:
         with pytest.raises(MCPError) as error:
@@ -132,6 +168,7 @@ async def test_backend_http_errors_are_sanitized_tool_results(bound_server, monk
     value = payload(result)
     assert value["code"] == "hub_error"
     assert value["http_status"] == status
+    assert value["guidance"]
     assert "private-session-token" not in result.content[0].text
     assert "stack trace" not in result.content[0].text
 
@@ -150,6 +187,7 @@ async def test_internal_exception_is_not_leaked_and_next_tool_succeeds(bound_ser
         succeeded = await client.call_tool("read_messages", {})
     assert failed.is_error
     assert payload(failed)["code"] == "internal_error"
+    assert "claves" in payload(failed)["guidance"]
     assert "private" not in failed.content[0].text
     assert not succeeded.is_error
     assert payload(succeeded) == {"messages": [], "next_cursor": None}
@@ -164,3 +202,28 @@ async def test_wait_business_error_sets_tool_error_flag(bound_server, monkeypatc
     assert result.is_error
     assert payload(result)["code"] == "cursor_expired"
     assert payload(result)["event_cursor"] == "fresh"
+    assert "read_messages" in payload(result)["guidance"]
+
+
+@pytest.mark.parametrize("name,arguments,status,expected", [
+    ("prepare_edit", {"paths": ["a.py"], "operation_key": "edit"}, 409, "Detén la edición"),
+    ("complete_handoff", {"task_id": "T1", "to_agent": "bob", "summary": "Ready", "operation_key": "handoff"}, 409, "resultado anterior"),
+    ("claim_task", {"task_id": "T1"}, 409, "dependencias"),
+    ("bootstrap_agent", {}, 401, "credencial vigente"),
+    ("bootstrap_agent", {}, 404, "hub incluya estas herramientas"),
+    ("prepare_edit", {"paths": ["a.py"], "operation_key": "edit"}, 503, "misma clave"),
+])
+async def test_recovery_guidance_is_actionable_without_leaking_backend(bound_server, monkeypatch, name, arguments, status, expected):
+    @asynccontextmanager
+    async def backend():
+        async with httpx.AsyncClient(base_url="http://test", transport=httpx.MockTransport(
+            lambda request: httpx.Response(status, json={"error": "private-session-token private traceback"}),
+        )) as client:
+            yield client
+    monkeypatch.setattr(bound_server, "_client", backend)
+    async with Client(bound_server.sdk_server()) as client:
+        result = await client.call_tool(name, arguments)
+    assert result.is_error
+    value = payload(result)
+    assert expected in value["guidance"]
+    assert "private" not in json.dumps(value)

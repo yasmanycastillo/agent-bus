@@ -8,9 +8,24 @@ del otro proyecto.
 
 ## Entrada y pendientes
 
+Al conectar, el servidor MCP entrega instrucciones mediante el campo estándar
+`instructions` del SDK, antes de llamar a herramientas. La guía indica que la
+primera llamada sea `bootstrap_agent({})`, cómo atender pendientes y cómo reservar
+y entregar trabajo. Las descripciones de las tools también indican requisitos y
+siguientes pasos, para clientes que sólo muestren herramientas descubiertas.
+
 1. Provisiona la credencial y configura el MCP según [autenticación](authentication.md).
-2. Llama `bootstrap_agent({"display_name":"Codex","limit":20})`.
+2. Sigue la guía recibida y llama `bootstrap_agent({})`; opcionalmente indica
+   `display_name` y `limit`.
 3. Usa `my_pending_items` para consultar mensajes pendientes y tareas propias.
+
+La conexión entrega la guía; no ejecuta el bootstrap por cuenta del agente. El
+cliente debe presentar esas instrucciones al modelo y éste debe seguirlas. El
+orden recomendado no añade un bloqueo nuevo a clientes existentes; los permisos,
+estados y tokens siguen comprobándose en el hub. En modo legacy sin credencial,
+la guía explica cómo provisionar la sesión y reconectar antes de usar las tools
+compactas. Un fallo de credenciales al arrancar el proceso todavía requiere
+corregir la configuración antes de establecer la conexión MCP.
 
 El bootstrap reutiliza la sesión autenticada, registra/actualiza presencia y
 entrega instrucciones, vencimiento, agentes, decisiones recientes, tareas libres
@@ -33,6 +48,21 @@ Continúa las páginas de mensajes hasta `next_cursor=null`. Confirma únicament
 mensajes procesados con `ack_messages` o como parte del handoff. Los errores de
 cursor mantienen el contrato del inbox existente. Los snapshots de bootstrap y
 pendientes son lecturas compuestas, no una transacción global de todos los datos.
+
+### Errores orientativos
+
+Los errores de herramienta conservan `isError`, `code` y, cuando corresponde,
+`http_status`, y añaden `guidance` con un siguiente paso. Por ejemplo:
+
+- Credencial inválida: obtener una sesión vigente del operador y reconectar.
+- Conflicto de tarea: consultar propietario, dependencias y estado antes de reclamar.
+- Conflicto de lock: detener la edición y verificar ruta, scope, sesión y token vigente.
+- Hub no disponible/ocupado: esperar de forma acotada y conservar clave y contenido al reintentar.
+- Cursor vencido/inválido: recuperar pendientes y usar un cursor de eventos válido.
+
+La orientación es estática: no copia cuerpos privados del backend ni secretos,
+no concede permisos adicionales y no afirma conocer la causa exacta de un 409.
+Errores JSON-RPC, como una herramienta inexistente, conservan su contrato propio.
 
 ## Preparar edición
 

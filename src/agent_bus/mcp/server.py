@@ -190,6 +190,8 @@ class McpServer:
             self.session = load_session(agent_id)
         self.agent_id = self.session["agent_id"] if self.session else agent_id
         self.tools = copy.deepcopy(TOOLS_DEFINITIONS + coordination.TOOLS)
+        for tool in self.tools:
+            tool["description"] += " " + coordination.TOOL_GUIDANCE[tool["name"]]
         if self.session:
             for tool in self.tools:
                 schema = tool["inputSchema"]
@@ -209,6 +211,7 @@ class McpServer:
         """Keep application contracts while the SDK owns RPC, negotiation and cancellation."""
         return Server(
             SERVER_NAME, version=SERVER_VERSION,
+            instructions=coordination.connection_instructions(self.session is not None),
             on_list_tools=self._list_tools, on_call_tool=self._call_tool,
         )
 
@@ -236,6 +239,10 @@ class McpServer:
             # validation to the application. Validate BEFORE binding identity.
             validator.validate(arguments)
             result = await self.execute_tool(params.name, arguments)
+            if result.get("status") == "error":
+                result = {**result, "guidance": coordination.recovery_hint(
+                    params.name, result.get("code", "internal_error"), result.get("http_status"),
+                )}
             return self._tool_result(result, error=result.get("status") == "error")
         except SchemaValidationError as exc:
             failure = {"code": "invalid_arguments", "error": exc.message}
@@ -254,6 +261,7 @@ class McpServer:
             failure = {"code": "internal_error", "error": "Internal tool error"}
         # Cancellation is a BaseException and deliberately propagates to the SDK.
         logger.warning("Tool %s failed: %s", params.name, failure["code"])
+        failure["guidance"] = coordination.recovery_hint(params.name, failure["code"], failure.get("http_status"))
         return self._tool_result({"status": "error", **failure}, error=True)
 
     def _client(self, timeout: float | None = 30.0):

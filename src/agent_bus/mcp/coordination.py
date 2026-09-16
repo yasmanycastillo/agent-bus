@@ -37,6 +37,73 @@ TOOLS = [{"name": name, "description": DESCRIPTIONS[name], "inputSchema": model.
          for name, model in MODELS.items()]
 
 
+TOOL_GUIDANCE = {
+    "bootstrap_agent": "Primera llamada al conectar: bootstrap_agent({}). Requiere una credencial provisionada. Después atiende my_pending_items.",
+    "get_agent_instructions": "Requiere sesión provisionada. Para incorporarte al proyecto, continúa con bootstrap_agent({}).",
+    "my_pending_items": "Empieza con bootstrap_agent. Después procesa pendientes y usa ack_messages o reply_message según corresponda.",
+    "prepare_edit": "Antes: bootstrap_agent y una tarea propia. Edita sólo tras authorized=true; después renueva con renew_lock o entrega con complete_handoff.",
+    "complete_handoff": "Antes: bootstrap_agent, tarea propia y tokens vigentes de los locks que liberas. Adjunta evidencia real; después consulta pendientes o espera respuesta.",
+    "wait_for_updates": "Antes: bootstrap_agent y my_pending_items. Conserva event_cursor; al recibir trabajo, procésalo antes de confirmar.",
+    "post_message": "Antes: bootstrap_agent. Conserva destinatario, contenido e idempotency_key al reintentar; si pides respuesta, continúa con wait_for_updates.",
+    "read_messages": "Para entrar al proyecto usa bootstrap_agent. Lee todas las páginas; después confirma sólo lo procesado con ack_messages.",
+    "ack_messages": "Requiere IDs de mensajes de tu inbox que ya procesaste. Obtén pendientes con my_pending_items después de bootstrap_agent.",
+    "reply_message": "Requiere un mensaje de tu inbox obtenido con my_pending_items o read_messages. Si acknowledge=true, responde y confirma en una operación.",
+    "claim_task": "Antes: bootstrap_agent y consulta de tareas disponibles. Requiere tarea libre y pendiente; tras reclamar, usa prepare_edit antes de editar.",
+    "complete_task": "Requiere una tarea propia en estado permitido. Para entregar evidencia, mensaje y locks juntos, prefiere complete_handoff; usa in_review si falta revisión.",
+    "acquire_lock": "Antes: bootstrap_agent. Para varios archivos usa prepare_edit; después renueva con renew_lock o libera con release_lock usando el token recibido.",
+    "release_lock": "Requiere el acquisition_id vigente de la misma sesión, ruta y scope. Si falla, consulta get_project_status y no liberes un lock ajeno.",
+    "renew_lock": "Requiere el token vigente de la misma sesión. Si vence o falla la renovación, detén la edición y consulta get_project_status antes de adquirir de nuevo.",
+    "get_project_status": "Para incorporarte al proyecto usa primero bootstrap_agent. Después selecciona una tarea disponible o consulta tus pendientes con my_pending_items.",
+    "record_decision": "Antes: bootstrap_agent y revisión de decisiones recientes. Registra sólo un acuerdo alcanzado; después comunica el resultado si corresponde.",
+}
+
+
+def connection_instructions(authenticated: bool) -> str:
+    if authenticated:
+        return INSTRUCTIONS
+    return (
+        "agent-bus está en modo legacy sin sesión autenticada. Las operaciones compactas "
+        "requieren una credencial propia del proyecto. Solicita al operador provisionarla "
+        "con agent-bus auth create y configura el cliente según docs/authentication.md; "
+        "no inventes identidades ni muestres tokens. Reconecta MCP y ejecuta bootstrap_agent({}) "
+        "como primera llamada. Las herramientas legacy conservan sus argumentos de identidad."
+    )
+
+
+def recovery_hint(name: str, code: str, http_status: int | None = None) -> str:
+    """Static guidance only: never include backend bodies, tokens or tracebacks."""
+    if code in ("cursor_expired", "cursor_invalid"):
+        return ("Recupera pendientes con read_messages sin cursor de paginación. Usa el event_cursor "
+                "de recuperación si se devuelve; si no, obtén uno nuevo con my_pending_items antes de esperar.")
+    if code == "unauthenticated" or http_status == 401:
+        return ("Solicita al operador una credencial vigente del proyecto; configura su archivo "
+                "en el cliente, reconecta MCP y ejecuta bootstrap_agent({}). No muestres el token.")
+    if http_status == 403:
+        return ("La sesión no tiene permiso para esta operación. Comprueba tu identidad/proyecto "
+                "y trabaja sólo sobre recursos autorizados; no suplantes a otro agente.")
+    if code == "bus_unavailable" or http_status == 503:
+        return ("Comprueba que el hub del proyecto esté disponible. Reintenta con espera acotada "
+                "y la misma clave y contenido; una respuesta perdida no demuestra que la operación no ocurrió.")
+    if http_status == 409:
+        if name in ("prepare_edit", "acquire_lock", "release_lock", "renew_lock"):
+            return ("Detén la edición y consulta get_project_status. Verifica ruta, scope, sesión y "
+                    "acquisition_id vigente. Repite exactamente una petición pendiente; una reserva "
+                    "vencida requiere una nueva adquisición cuando el recurso esté disponible.")
+        if name == "claim_task":
+            return ("Actualiza las tareas con get_project_status: puede tener propietario o dependencias "
+                    "pendientes. Reclama sólo trabajo disponible y autorizado.")
+        return ("Consulta my_pending_items y get_project_status para verificar propietario, estado y "
+                "resultado anterior. Conserva la clave y contenido de la operación original; no fuerces cambios.")
+    if http_status == 404:
+        return ("Comprueba que el hub incluya estas herramientas y que el recurso exista en este proyecto. "
+                "Tras actualizar/reconectar, empieza con bootstrap_agent({}) y consulta get_project_status.")
+    if code == "invalid_arguments" or http_status == 422:
+        return ("Revisa el esquema y los requisitos de la herramienta; consulta get_agent_instructions({}). "
+                "Usa bootstrap_agent({}) al entrar y conserva los IDs y tokens devueltos por el servidor.")
+    return ("Consulta get_agent_instructions({}) y verifica el estado del hub antes de reintentar. "
+            "Conserva claves y contenido; no declares completada una operación cuyo resultado desconoces.")
+
+
 async def execute(server, name, args):
     if not server.session:
         raise AuthenticationError("Coordination workflows require a provisioned MCP session")

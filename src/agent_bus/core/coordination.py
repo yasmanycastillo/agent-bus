@@ -58,15 +58,24 @@ class HandoffRequest(BaseModel):
     acknowledge_message_ids: list[Key] = Field(default_factory=list, max_length=100)
 
 
-INSTRUCTIONS = """La identidad y el proyecto provienen de tu sesión autenticada.
-1. Usa bootstrap_agent al entrar y my_pending_items para consultar pendientes.
-2. Conserva next_cursor para paginar mensajes; leer no confirma. Confirma sólo lo procesado.
-3. Reclama una tarea libre con claim_task antes de trabajar.
-4. Usa prepare_edit con una operation_key estable y conserva cada acquisition_id y expires_at.
-5. Renueva locks antes de vencer; si falla, deja de editar y adquiere una reserva nueva.
-6. Entrega con complete_handoff (in_review por defecto), resumen y evidencia de validación.
+INSTRUCTIONS = """agent-bus coordina agentes que trabajan en el mismo proyecto.
+Al conectar, tu primera llamada debe ser bootstrap_agent({}); los argumentos son opcionales.
+No necesitas un mensaje adicional del usuario para consultar tu contexto de coordinación.
+La identidad y el proyecto provienen de tu sesión autenticada: no inventes agent_id,
+no compartas credenciales ni cambies de proyecto mediante argumentos de las herramientas.
+1. Lee las instrucciones y el estado devueltos por bootstrap_agent. Si necesitas releer
+   este protocolo sin cambiar estado, usa get_agent_instructions({}).
+2. Usa my_pending_items({}) para atender mensajes y tareas propios antes de editar.
+3. Conserva next_cursor para paginar mensajes; leer no confirma. Confirma sólo lo procesado.
+4. Reclama una tarea libre con claim_task antes de trabajar; get_project_status permite
+   consultar tareas y locks del proyecto. Respeta el trabajo autorizado por el usuario.
+5. Usa prepare_edit con una operation_key estable y conserva cada acquisition_id y expires_at.
+6. Renueva locks antes de vencer; si falla, deja de editar y adquiere una reserva nueva.
+7. Entrega con complete_handoff (in_review por defecto), resumen y evidencia de validación.
    Conserva la misma operation_key y argumentos al reintentar. Sólo libera los tokens indicados.
-7. Si esperas respuesta, usa wait_for_updates con event_cursor. No despierta una TUI cerrada.
+8. Si esperas respuesta, usa wait_for_updates con event_cursor. No despierta una TUI cerrada.
+Si una petición falla o se pierde su respuesta, conserva la clave y el contenido original
+al reintentar; no confirmes mensajes ni declares trabajo completado sin verificar el resultado.
 Los locks son cooperativos; el handoff registra evidencia declarada y no ejecuta pruebas ni merge.
 """
 

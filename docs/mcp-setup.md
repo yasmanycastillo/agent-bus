@@ -44,6 +44,15 @@ Implementado en `src/agent_bus/mcp/server.py` con el SDK oficial Python `mcp==2.
 
 Flujo recomendado y garantías de las nuevas operaciones: [coordinación MCP](coordination-workflow.md).
 
+El servidor incluye instrucciones de uso al establecer la conexión MCP, mediante
+`instructions` del SDK: empezar por `bootstrap_agent({})`, atender pendientes,
+reservar archivos y entregar trabajo. No hace falta un comentario adicional para
+recibir la guía. Cada tool expone requisitos y siguientes pasos; los errores de
+herramienta incluyen `guidance` sin revelar cuerpos del backend. El cliente debe
+poner las instrucciones a disposición del modelo; recibirlas no equivale a haber
+ejecutado bootstrap ni garantiza que una aplicación las siga. Reconectar MCP
+después de actualizar para cargar instrucciones y descripciones nuevas.
+
 En T-08, `read_messages` devuelve `{messages, next_cursor}`. `post_message` y
 `reply_message` requieren una clave de idempotencia que se conserva al reintentar.
 Leer no confirma; usar `ack_messages` o `reply_message(..., acknowledge=true)`

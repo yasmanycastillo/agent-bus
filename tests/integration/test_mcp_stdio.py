@@ -151,6 +151,8 @@ async def test_official_sdk_discovers_lists_and_calls_actual_cli(secure_bus, tmp
             async with Client(stdio_client(parameters, errlog=errlog)) as client:
                 assert client.protocol_version == "2026-07-28"
                 assert client.server_info.name == "agent-bus"
+                assert "primera llamada debe ser bootstrap_agent({})" in client.instructions
+                assert "my_pending_items" in client.instructions
                 listed = await client.list_tools()
                 tools = {tool.name: tool for tool in listed.tools}
                 assert {"post_message", "read_messages", "ack_messages", "reply_message", "wait_for_updates"} <= tools.keys()
@@ -181,6 +183,7 @@ async def test_legacy_versions_negotiate_without_stdout_noise(secure_bus, versio
     async with raw_peer(secure_bus) as peer:
         initialized = await peer.initialize(version)
         assert initialized["serverInfo"]["name"] == "agent-bus"
+        assert "primera llamada debe ser bootstrap_agent({})" in initialized["instructions"]
         await peer.send("tools/list", request_id=2)
         assert (await peer.receive(2))["result"]["tools"]
         await peer.send("ping", request_id=3)
@@ -320,6 +323,7 @@ async def test_two_stdio_agents_bootstrap_claim_lock_and_handoff(secure_bus, tmp
         async with Client(stdio_client(child_parameters(secure_bus, 'alice'))) as alice:
             async with Client(stdio_client(child_parameters(secure_bus, 'bob'))) as bob:
                 for name, client in [('alice', alice), ('bob', bob)]:
+                    assert 'primera llamada debe ser bootstrap_agent({})' in client.instructions
                     state = payload(await client.call_tool('bootstrap_agent', {'display_name': name}))
                     assert state['agent_id'] == name
                     assert state['session_id'] == secure_bus.sessions[name]['session_id']
