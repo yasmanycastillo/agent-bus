@@ -126,12 +126,12 @@ async def test_console_sirve_html_sin_auth(client):
     assert "agent-bus · Consola" in r.text
     # El HTML debe cargar todas las piezas de la app: vendor, api, components y app.
     for src in ("vendor/react.js", "vendor/react-dom.js", "vendor/htm.js",
-                "js/api.js", "js/components.js", "js/app.js", "styles.css"):
+                "js/api.js", "js/events.js", "js/components.js", "js/app.js", "styles.css"):
         assert f"/console/static/{src}" in r.text, src
 
 
 async def test_console_estaticos_disponibles(client):
-    for rel in ("js/app.js", "js/api.js", "js/components.js", "styles.css",
+    for rel in ("js/app.js", "js/api.js", "js/events.js", "js/components.js", "styles.css",
                 "vendor/react.js", "vendor/react-dom.js", "vendor/htm.js"):
         r = await client.get(f"/console/static/{rel}")
         assert r.status_code == 200, rel
@@ -147,4 +147,47 @@ async def test_console_estatico_rechaza_escape(client):
 async def test_room_sin_regresion(client):
     r = await client.get("/room")
     assert r.status_code == 200
-    assert "War Room" in r.text
+    assert r.text == (await client.get("/console")).text
+
+
+async def test_task_detail_retains_acknowledged_messages_and_paginates(client, bus_app):
+    from agent_bus.types import Envelope, MessageType
+    await client.post('/tasks', json={'task_id': 'DETAIL', 'title': 'detalle',
+                                     'acceptance_criteria': ['se comprueba'], 'test_cmd': ['pytest']})
+    for i in range(51):
+        await bus_app.inbox.deliver(Envelope(from_agent='qa', to_agent='human',
+            message_type=MessageType.INBOX, related_task='DETAIL', body={'text': f'evidencia {i}'}))
+    first = (await client.get('/room/api/tasks/DETAIL')).json()
+    assert first['task']['acceptance_criteria'] == ['se comprueba']
+    assert len(first['messages']) == 50 and first['next_offset'] == 50
+    second = (await client.get('/room/api/tasks/DETAIL?offset=50')).json()
+    assert len(second['messages']) == 1 and second['next_offset'] is None
+    assert not set(m['message_id'] for m in first['messages']) & set(m['message_id'] for m in second['messages'])
+    assert len(await bus_app.inbox.get_inbox('human')) == 51  # read is not ACK
+    acknowledged = first['messages'][0]['message_id']
+    await bus_app.inbox.acknowledgments('human', [acknowledged])
+    assert len(await bus_app.inbox.get_inbox('human')) == 50
+    retained = (await client.get('/room/api/tasks/DETAIL')).json()
+    assert acknowledged in [m['message_id'] for m in retained['messages']]
+    assert (await client.get('/room/api/tasks/missing')).status_code == 404
+    assert (await client.get('/room/api/tasks/DETAIL?offset=-1')).status_code == 422
+
+
+@pytest.mark.parametrize('decision,note', [('delete', ''), ('respond', ''), ('approve', {})])
+async def test_invalid_approval_does_not_ack(client, bus_app, decision, note):
+    from agent_bus.types import Envelope, MessageType
+    message = Envelope(from_agent='qa', to_agent='human', message_type=MessageType.INBOX,
+                       body={'text': 'consulta'}, reply_needed=True)
+    await bus_app.inbox.deliver(message)
+    response = await client.post('/room/api/approve', json={
+        'message_id': message.message_id, 'decision': decision, 'note': note})
+    assert response.status_code == 400
+    assert len(await bus_app.inbox.get_inbox('human')) == 1
+
+
+def test_task_detail_requires_admin(secure_bus):
+    import httpx
+    url = secure_bus.url + '/room/api/tasks/unknown'
+    assert httpx.get(url).status_code == 401
+    assert httpx.get(url, headers={'Authorization': 'Bearer ' + secure_bus.sessions['alice']['token']}).status_code == 403
+    assert httpx.get(url, headers={'Authorization': 'Bearer ' + secure_bus.sessions['human']['token']}).status_code == 404

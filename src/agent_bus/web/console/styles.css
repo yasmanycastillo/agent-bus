@@ -99,3 +99,38 @@ button:disabled { opacity: .5; }
 .row .grow { flex: 1; }
 textarea { width: 100%; min-height: 54px; resize: vertical; }
 .muted { color: var(--muted); }
+
+/* Supervisión: acciones pendientes primero, contenido completo y lectura móvil. */
+.summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+.summary > div { display: flex; flex-direction: column; padding: 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.summary strong { font-size: 1.7rem; color: var(--accent); }
+.summary span { color: var(--muted); font-size: .85rem; }
+.layout { grid-template-columns: minmax(0, 1fr) 320px; }
+.layout > *, .kanban > *, .topbar > * { min-width: 0; }
+.topbar { flex-wrap: wrap; }
+.kanban { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.card label, .approval label { display: block; margin: 10px 0; font-size: .85rem; }
+.card label > input:not([type=checkbox]), .card label > select { display: block; width: 100%; margin-top: 6px; }
+.row { flex-wrap: wrap; }
+.card input, .card select, .card textarea { max-width: 100%; }
+button, summary { cursor: pointer; }
+button:disabled { cursor: wait; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.task, .approval, .lock, .evt, .topbar { overflow-wrap: anywhere; }
+.full-text, .evt p { white-space: pre-wrap; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font: .8rem/1.5 ui-monospace, monospace; background: var(--bg); padding: 10px; border-radius: 6px; }
+.task-detail { margin: 10px 0; }
+.task-detail small { display: block; margin-top: 5px; color: var(--muted); }
+.task-detail h4 { margin-bottom: 6px; }
+summary { padding: 8px 0; }
+.error { color: var(--danger); }
+.notice { border: 1px solid var(--danger); padding: 12px; margin-bottom: 14px; border-radius: 8px; }
+.evt { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.lock { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: .85rem; }
+@media (max-width: 1100px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 600px) { #root { padding: 10px; } .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kanban { grid-template-columns: minmax(0, 1fr); } }
+dialog.task-detail { width: min(780px, 94vw); max-height: 85vh; margin: auto; padding: 24px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); color: var(--text); }
+dialog::backdrop { background: rgba(0, 0, 0, .72); }
+.detail-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.detail-header h3 { margin: 0; }
+.approval > details > summary { padding: 10px 4px; }

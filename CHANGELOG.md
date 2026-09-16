@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Consola única en `/console` y `/room`: detalle/historial de tareas, solicitudes
+  completas, filtros, reservas y recuperación de conexión.
+- Protección frente a respuestas de sesiones anteriores y cancelación del stream
+  al cerrar sesión; prueba reproducible en Chromium.
+
 - Asistente `onboard --mcp-only`: provisión local, verificación del hub y sesiones,
   y snippets JSON por agente sin iniciar workers ni integración automática.
 - Plan de lanzamiento por etapas y guía de primer uso.

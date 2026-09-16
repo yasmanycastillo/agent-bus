@@ -14,7 +14,7 @@ comparte tareas, reserva archivos y entrega resultados con trazabilidad mediante
 | Etapa | Entrega | Criterio de salida | Estado |
 |---|---|---|---|
 | 1. Primer uso | `onboard --mcp-only`, configuración por identidad, licencia y guía | Instalación del wheel fuera del checkout; hub autenticado; dos conexiones MCP; repetición sin rotar credenciales; conflictos diagnosticados | Implementado y validado localmente |
-| 2. Consola única | Resumen de intervención, detalle de tarea, aprobaciones completas, actividad filtrable | Prueba real de navegador: login, tarea, aprobación, desconexión y reconexión; conservar cursores y protección de sesión; luego migrar `/room` | Pendiente |
+| 2. Consola única | Resumen de intervención, detalle de tarea, aprobaciones completas, actividad filtrable | Prueba real de navegador: login, tarea, aprobación, desconexión y reconexión; conservar cursores y protección de sesión; luego migrar `/room` | Implementado localmente |
 | 3. Demo | Dos agentes sobre un repositorio pequeño: reserva, conflicto, entrega y revisión | Ejecución repetible; distinguir actores simulados de modelos reales; medir duración, intervenciones y coste cuando sea conocido | Pendiente |
 | 4. Preparar release | README, changelog, paquete, metadatos Registry, video de 60–90 s | Versión instalable desde máquina limpia; enlaces válidos; licencia incluida; video muestra la versión real | Pendiente |
 | 5. Piloto externo | Usuarios nuevos realizan el recorrido sin ayuda | Registrar problemas y porcentaje de primeros usos completados; corregir bloqueos antes de atraer más tráfico | Pendiente externo |
@@ -55,9 +55,28 @@ marketplaces antes de comprobar uso recurrente.
 - Pruebas del checkout con Python 3.12; tokens ausentes de la salida, credenciales
   conservadas al repetir, sesión revocada rechazada y puerto ajeno detectado antes
   de crear el marcador del proyecto. Licencia y consola incluidas en el wheel.
-- Ruff y comprobación de espacios del diff limpios. No se repitió la suite completa.
+- Ruff y comprobación de espacios del diff limpios; suite completa posterior registrada abajo.
 - Esto valida entornos temporales locales, no una máquina externa limpia ni el
   comportamiento de modelos comerciales. Configuración automática por cliente,
   acceso visual guiado y medición del tiempo de primer uso siguen pendientes.
 - Validación completa antes de publicar esta etapa: **731 pruebas aprobadas**,
   dos avisos de deprecación WebSocket, en 183,65 s (`uv run pytest -q`).
+
+## Evidencia de consola única
+
+- `/room` sirve la consola existente; eliminado el HTML duplicado.
+- Historial de tareas paginado, incluyendo mensajes confirmados conservados; leer
+  no confirma entregas. API de detalle reservada al administrador.
+- Solicitudes desplegables con contexto completo y decisión explícita; mensajes
+  con clave de idempotencia conservada al reintentar el mismo contenido.
+- Cancelación al salir, aislamiento de respuestas tardías, cursor de reconexión
+  y recuperación de frames completos, checkpoint y cursor vencido.
+- Prueba real de Chromium con hub temporal y capturas revisadas en escritorio y
+  móvil. Guía reproducible en [console.md](console.md).
+- Persisten pendientes la relación worktree/rama/commit, cuotas y proveedores reales.
+
+Validación final de esta etapa: **736 pruebas aprobadas**, dos avisos existentes
+de deprecación WebSocket, en **187,82 s** (`uv run pytest -q`). La prueba Chromium
+adicional aprobó creación/reasignación, seis solicitudes completas, respuesta real,
+replay tras corte, filtro, móvil y aislamiento de sesiones. La etapa de consola
+es posterior a `e7f654a` y está preparada para publicación.

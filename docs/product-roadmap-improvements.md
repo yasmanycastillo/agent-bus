@@ -99,13 +99,15 @@ externos que el bus no controla.
 
 ### Prioridad 3 — Completar T-21 y la experiencia de supervisión
 
-La consola React está disponible en `/console`; no se plantea reconstruirla.
+La consola React unificada está disponible en `/console` y `/room`.
+Ver [comportamiento y aceptación de navegador](console.md).
 
 - [x] Arranque local con `agent-bus ui`, sin SaaS.
 - [x] Tareas, agentes, locks, mensajes y eventos SSE sobre API autenticada.
 - [x] Creación/reasignación de tareas y pausa/reanudación de workers.
 - [ ] Vista de worktrees y relación entre tarea, rama, revisión y commit integrado.
-- [ ] Prueba end-to-end de desconexión/reconexión en navegador real.
+- [x] Prueba end-to-end de desconexión/reconexión en Chromium real, con replay.
+- [x] Detalle de tareas, solicitudes completas, filtros y aislamiento entre sesiones.
 - [ ] Validación manual del flujo completo y de estados de error/credencial vencida.
 - [ ] Mostrar consumo real cuando T-20 lo suministre; mantener estado explícito de datos no disponibles.
 

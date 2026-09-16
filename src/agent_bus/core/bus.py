@@ -736,10 +736,6 @@ class MessageBus:
         # --- War Room endpoints (capa humana) ---
 
         @self.app.get("/room", response_class=HTMLResponse)
-        async def room_ui():
-            html_path = Path(__file__).parent.parent / "web" / "room.html"
-            return HTMLResponse(html_path.read_text())
-
         @self.app.get("/console", response_class=HTMLResponse)
         async def console_ui():
             """Consola React local (T-21); los datos requieren sesión admin."""
@@ -778,6 +774,10 @@ class MessageBus:
             message_id = req.get("message_id", "")
             decision = req.get("decision", "")  # approve | reject | respond
             note = req.get("note", "")
+            if decision not in ("approve", "reject", "respond") or not isinstance(note, str):
+                return JSONResponse({"error": "Invalid decision or note"}, status_code=400)
+            if decision == "respond" and not note.strip():
+                return JSONResponse({"error": "A response requires a note"}, status_code=400)
 
             msg = await self.inbox.get_message("human", message_id)
             if not msg:
@@ -895,6 +895,22 @@ class MessageBus:
                 "schema_version": 1,
                 "data": None,
             }
+
+        @self.app.get("/room/api/tasks/{task_id}")
+        async def room_task_detail(task_id: str, offset: int = Query(default=0, ge=0)):
+            """Read retained task messages, including acknowledged deliveries; never ACK."""
+            task = await self.tasks.get(task_id)
+            if not task:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            rows = await self.db.conn.execute_fetchall(
+                "SELECT message_id, from_agent, to_agent, message_type, body, timestamp "
+                "FROM inbox WHERE related_task = ? "
+                "ORDER BY timestamp DESC, message_id DESC, to_agent DESC LIMIT 51 OFFSET ?",
+                (task_id, offset),
+            )
+            messages = [{**dict(row), "body": json.loads(row["body"] or "{}")} for row in rows[:50]]
+            return {"task": task.model_dump(mode="json"), "messages": messages,
+                    "next_offset": offset + 50 if len(rows) > 50 else None}
 
         @self.app.post("/room/api/tasks")
         async def room_create_task(req: dict, request: Request):

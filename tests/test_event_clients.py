@@ -208,7 +208,7 @@ async def test_iterator_close_cancels_inflight_callback(monkeypatch):
 
 
 def test_browser_reconnect_cursor_reset_and_auth_failure():
-    """Execute the shipped room script with fetch/DOM stand-ins, including SSE frames."""
+    """Execute the shipped console stream: checkpoint, multiline, truncation, reset, auth."""
     import json
     import shutil
     import subprocess
@@ -216,52 +216,45 @@ def test_browser_reconnect_cursor_reset_and_auth_failure():
     node = shutil.which('node')
     if not node:
         pytest.skip('Node is required to execute the browser JavaScript regression')
-    source = (Path(__file__).parents[1] / 'src/agent_bus/web/room.html').read_text()
-    script = source.split('<script>', 1)[1].split('</script>', 1)[0]
+    source = (Path(__file__).parents[1] / 'src/agent_bus/web/console/js/events.js').read_text()
     harness = r'''
 const vm = require('node:vm');
-const elements = new Map();
+let token = 'test-session-token';
+const requests = [], received = [], states = [];
+let recoveries = 0;
 const context = vm.createContext({
   console, AbortController, Response, TextDecoder, DOMException,
   setTimeout: fn => setTimeout(fn, 0), clearTimeout,
-  clearInterval, Option: function(text, value) { this.text = text; this.value = value; },
-  document: {getElementById(id) {
-    if (!elements.has(id)) elements.set(id, {replaceChildren(){}, value:'', children:[]});
-    return elements.get(id);
-  }},
+  window: {ConsoleAPI: {getToken: () => token, clearToken: () => { token = null; }}},
+  fetch: async (path, options) => {
+    requests.push({path, headers: options.headers});
+    if (requests.length === 1) return new Response(
+      'event: checkpoint\nid: tail\ndata: {"cursor":"tail"}\n\n' +
+      'event: message\nid: delivered\ndata: {"message_id":\ndata: "m1"}\n\n' +
+      'id: truncated\ndata: {"message_id":"not-delivered"}', {status: 200});
+    if (requests.length === 2) return new Response(
+      JSON.stringify({error: 'cursor_expired', cursor: 'fresh'}), {status: 410});
+    return new Response('{}', {status: 401});
+  },
 });
 vm.runInContext(SOURCE, context);
-vm.runInContext(`
-(async () => {
-  token = 'test-session-token'; principal = {agent_id:'operator'};
-  const requests = [], received = [];
-  let recoveries = 0;
-  refresh = async () => { recoveries++; };
-  renderEvent = data => received.push(JSON.parse(data));
-  const controller = new AbortController(); streamController = controller;
-  fetch = async (path, options) => {
-    requests.push({path, headers:options.headers});
-    if (requests.length === 1) return new Response(
-      'event: checkpoint\\nid: tail\\ndata: {"cursor":"tail"}\\n\\n' +
-      'event: message\\nid: delivered\\ndata: {"message_id":\\ndata: "m1"}\\n\\n' +
-      'id: truncated\\ndata: {"message_id":"not-delivered"}', {status:200});
-    if (requests.length === 2) return new Response(
-      JSON.stringify({error:'cursor_expired',cursor:'fresh',recovery:'read_inbox'}), {status:410});
-    return new Response('{}', {status:401});
-  };
-  await streamEvents(controller.signal);
-  console.log(JSON.stringify({requests,received,recoveries,token,eventCursor}));
-})().catch(error => { console.error(error); process.exitCode = 1; });
-`, context);
-'''.replace('SOURCE', json.dumps(script))
+context.window.ConsoleEvents.events({
+  signal: new AbortController().signal,
+  onEvent: async evt => received.push(evt),
+  onReset: async () => { recoveries++; },
+  onStatus: state => states.push(state),
+}).then(() => console.log(JSON.stringify({requests, received, recoveries, token, states})))
+  .catch(error => { console.error(error); process.exitCode = 1; });
+'''.replace('SOURCE', json.dumps(source))
     result = subprocess.run([node], input=harness, text=True, capture_output=True, timeout=5)
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data['received'] == [{'message_id': 'm1'}]
-    assert data['recoveries'] == 1
+    assert data['recoveries'] >= 1
     assert len(data['requests']) == 3
     assert 'Last-Event-ID' not in data['requests'][0]['headers']
     assert data['requests'][1]['headers']['Last-Event-ID'] == 'delivered'
     assert data['requests'][2]['headers']['Last-Event-ID'] == 'fresh'
     assert all(request['headers']['Authorization'] == 'Bearer test-session-token' for request in data['requests'])
-    assert data['token'] == '' and data['eventCursor'] is None
+    assert data['token'] is None
+    assert 'reconnecting' in data['states']

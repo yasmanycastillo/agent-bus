@@ -246,20 +246,18 @@ uv run agent-bus run-team --agents "claude,antigravity,codex" --base-ref main
 
 ---
 
-## 🖥️ War Room Web (Panel Humano)
+## 🖥️ Consola de supervisión
 
-El hub sirve una interfaz web para supervisar y dirigir al equipo. Los datos y acciones requieren una sesión administrativa; el formulario conserva el token únicamente en memoria:
+`agent-bus ui` abre `/console`. `/room` conserva compatibilidad y sirve la misma
+interfaz. La sesión administrativa mantiene su token únicamente en memoria.
 
-```
-http://localhost:8420/room
-```
+- Resumen de intervención: solicitudes, bloqueos y revisiones pendientes.
+- Tareas con detalle, criterios e historial de mensajes conservados.
+- Solicitudes desplegables con contexto completo y observaciones.
+- Actividad filtrable, reservas con vencimiento y recuperación tras desconexión.
+- Creación/reasignación, pausa de workers y mensajes con respuesta opcional.
 
-* **Kanban de tareas** por estado con reasignación en un clic (notifica al agente).
-* **Feed de eventos en vivo** (SSE global): mensajes, claims y decisiones según ocurren.
-* **Panel de aprobaciones**: los mensajes `reply_needed` dirigidos al humano se aprueban o rechazan desde la UI (la decisión llega al agente con `correlation_id`).
-* **Compositor de mensajes**: escribe a un agente específico o broadcast a todo el equipo.
-
-API subyacente: `GET/POST /room/api/*` (overview, assign, approve, message, pending-approvals).
+[Guía y prueba de navegador](docs/console.md). API compatible: `/room/api/*`.
 
 ---
 

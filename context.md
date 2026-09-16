@@ -6,6 +6,18 @@ Actualizado: 2026-09-15, America/Santo_Domingo.
 
 Consolidar agent-bus como un producto local de coordinación y ejecución de agentes sobre proyectos de desarrollo. El núcleo MCP autenticado, la entrega durable y el flujo de coordinación compacto están implementados. La prioridad siguiente es medir y controlar la operación sostenida: cuotas, recuperación guiada y aceptación con proveedores y navegador reales.
 
+## Consola única
+
+Primera etapa publicada en `e7f654a` (731 pruebas). La segunda etapa unifica
+`/room` y `/console`, elimina el HTML duplicado y añade detalle/historial de tareas,
+solicitudes completas con observaciones, reservas, filtros y recuperación SSE.
+Incluye cancelación al salir y descarte de respuestas de sesiones anteriores.
+[Guía y prueba reproducible](docs/console.md). No incluye vista de worktrees,
+cuotas ni validación con modelos externos. Validación: **736 pruebas aprobadas**
+(dos avisos WebSocket, 187,82 s) y aceptación adicional en Chromium real con
+creación/reasignación, respuesta, replay, móvil y aislamiento de sesiones.
+Etapa validada y preparada para publicación junto con esta documentación.
+
 ## Lectura al iniciar una sesión
 
 Plan activo de primera versión pública: [launch-plan.md](docs/launch-plan.md).
