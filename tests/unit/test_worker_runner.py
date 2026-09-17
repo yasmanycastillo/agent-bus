@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 import pytest
 
 from agent_bus.worker.runner import AgentRunner, RunnerResult

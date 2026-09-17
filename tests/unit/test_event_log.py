@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from agent_bus.core.events import CursorExpired, CursorInvalid, EventLog, append_event
+from agent_bus.core.events import CursorExpired, CursorInvalid, EventLog
 from agent_bus.core.inbox import IdempotencyConflict, InboxManager
 from agent_bus.reputation.database import Database, INBOX_SCHEMA
 from agent_bus.types import Envelope, MessageType

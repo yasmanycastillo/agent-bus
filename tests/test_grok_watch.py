@@ -121,7 +121,8 @@ def test_status_uses_lock_not_surviving_pid_file(tmp_path):
         assert watcher_status('bob', path)['state'] == 'auth_error'
         assert not watcher_status('bob', path)['can_dispatch']
         record_status(path, 'grok', 'waiting')
-        value = json.loads(path.read_text()); value['updated_at'] -= 60
+        value = json.loads(path.read_text())
+        value['updated_at'] -= 60
         path.write_text(json.dumps(value))
         assert watcher_status('bob', path)['state'] == 'unknown'
     assert watcher_status('bob', path)['state'] == 'stopped'
@@ -136,7 +137,8 @@ async def test_expired_session_recovers_after_replacement(secure_bus, monkeypatc
         sent = await c.post('/messages', json={'to_agent': 'bob', 'body': {'text': 'Answer'}, 'reply_needed': True})
         sent.raise_for_status()
     original = secure_bus.paths['bob'].read_text()
-    expired = json.loads(original); expired['expires_at'] = time.time() - 1
+    expired = json.loads(original)
+    expired['expires_at'] = time.time() - 1
     secure_bus.paths['bob'].write_text(json.dumps(expired))
     invoked = []
     async def run(*a, **kw):

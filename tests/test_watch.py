@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import httpx
 
@@ -84,7 +83,6 @@ async def test_run_turn_dry_run(tmp_path):
 async def test_run_turn_registra_session_del_cli(tmp_path, monkeypatch, watch_bus):
     """El session_id que devuelve el CLI se guarda en el mapping del thread."""
     import agent_bus.cli.watch_cmds as wc
-    import shutil as shutil_mod
 
     msg = {
         "from_agent": "agy",
