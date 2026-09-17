@@ -2,25 +2,18 @@
 
 ## Unreleased
 
-- Demo aislada `agent-bus demo`: dos actores programados con MCP real, conflicto
-  de archivos, pruebas ejecutadas, revisión y aprobación/rechazo desde terminal.
-- Informe JSON opcional sin secretos y aprobación simulada explícita para CI.
-
-- Consola única en `/console` y `/room`: detalle/historial de tareas, solicitudes
-  completas, filtros, reservas y recuperación de conexión.
-- Protección frente a respuestas de sesiones anteriores y cancelación del stream
-  al cerrar sesión; prueba reproducible en Chromium.
-
+- Integración nativa de Grok en `watch`, selección del proveedor desde la
+  credencial y lanzadores por identidad generados durante onboarding.
+- `watch --status` muestra el estado del ejecutor local. Las respuestas preparadas
+  sobreviven a un reinicio y pueden reenviarse sin otra consulta al modelo.
+- Demo aislada con dos actores programados y MCP real: reservas, conflicto,
+  revisión, pruebas y aprobación o rechazo desde la terminal.
+- Informe JSON opcional de la demo, con aprobación simulada explícita para CI.
+- Consola en `/console`, también accesible desde `/room`: historial de tareas,
+  solicitudes completas, filtros, reservas y recuperación de conexión.
 - Asistente `onboard --mcp-only`: provisión local, verificación del hub y sesiones,
-  y snippets JSON por agente sin iniciar workers ni integración automática.
-- Plan de lanzamiento por etapas y guía de primer uso.
-- Archivo de licencia MIT, coherente con la licencia anunciada en el README.
-
-## Historial previo a la primera release pública
-
-- `9fb8191`: instrucciones al conectar MCP, recuperación orientada por herramienta,
-  actualización del contexto y roadmap; 719 pruebas aprobadas.
-- `433a08a`: coordinación compacta, reservas multiarquivo, handoff transaccional y
-  validación del SHA exacto al integrar; 710 pruebas aprobadas.
-
-Estos identificadores son commits del repositorio, no releases publicadas en PyPI.
+  y configuraciones por agente sin iniciar workers ni integración automática.
+- Instrucciones al conectar MCP y orientación para resolver errores de herramientas.
+- Reservas multiarquivo y handoff transaccional con evidencia declarada y ACK.
+- Integración Git limitada al commit que pasó las pruebas y la revisión.
+- Documentación organizada por uso, sin bitácoras internas de tareas ni planes antiguos.

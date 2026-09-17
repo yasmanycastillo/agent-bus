@@ -66,7 +66,7 @@ El asistente prepara MCP y muestra un `watch/<agente>/start.sh` por cada proveed
 compatible (Claude, Codex y Grok). No inicia modelos ni listeners automáticamente.
 Con el CLI del proveedor instalado y autenticado, ejecutar el lanzador impreso
 en otra terminal y dejarlo activo. Conserva directorio, intérprete, identidad y
-rutas de credenciales sin incluir tokens. No depende del lanzador del piloto.
+rutas de credenciales sin incluir tokens.
 
 ```sh
 /ruta/mi-proyecto/.agent-bus/runtime/watch/grok/start.sh
@@ -121,9 +121,8 @@ de efectos externos; el modo Grok de consulta no permite herramientas.
 - Variables `AGENT_BUS_*` de otro entorno: abrir una terminal limpia y seleccionar
   el proyecto mediante `--project`; se rechazan overrides ambiguos.
 - Consola: abrir la URL `/console` que imprime el asistente. La sesión admin se
-  guarda con permisos 0600; el token no se imprime. El acceso visual guiado forma
-  parte de la siguiente etapa, no de la comprobación MCP del asistente.
+  guarda con permisos 0600; el token no se imprime. Consulta [la guía de la consola](console.md) para iniciar sesión y supervisar el proyecto.
 - Detener el hub propio: `agent-bus --project /ruta/mi-proyecto serve --stop`.
 
 No versionar `.agent-bus/runtime/`: contiene credenciales y datos operativos.
-Ver [plan de lanzamiento](launch-plan.md) para los criterios pendientes.
+Consulta el [índice de documentación](README.md) para las guías de operación e integración.

@@ -71,10 +71,3 @@ salida distinto de cero y no producen un informe de éxito.
 - La duración local con dependencias instaladas no mide instalación fría, descarga,
   conexión de aplicaciones externas ni tiempo de respuesta de modelos comerciales.
 - `model_calls` vale cero; el coste de modelos no se presenta como una estimación.
-
-## Siguiente prueba con proveedores reales
-
-Repetir el escenario con dos aplicaciones/modelos conectados mediante el onboarding,
-sin indicarles la implementación de la corrección. Registrar versiones, instrucciones,
-resultado, consumo disponible y todas las intervenciones. Mantener esa evidencia
-separada de la demo determinista antes de presentar comparaciones comerciales.

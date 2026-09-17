@@ -19,7 +19,7 @@ uv run agent-bus auth create --agent bob --role agent
 uv run agent-bus serve --host 127.0.0.1
 ```
 
-Usar las mismas variables al provisionar y al arrancar el hub. Cada proyecto debe usar su propia base y directorio de configuración: la base completa queda vinculada persistentemente a un proyecto (T-11). El directorio `.agent-bus/` está excluido de Git. La provisión guarda el token en `credentials/<agente>.json` y no lo imprime por defecto. Para copiarlo al login de `/console`, solicita explícitamente `--show-token` al provisionar. `--quiet` sigue disponible y prevalece sobre `--show-token`.
+Usar las mismas variables al provisionar y al arrancar el hub. Cada proyecto debe usar su propia base y directorio de configuración: la base completa queda vinculada persistentemente a un proyecto. El directorio `.agent-bus/` está excluido de Git. La provisión guarda el token en `credentials/<agente>.json` y no lo imprime por defecto. Para copiarlo al login de `/console`, solicita explícitamente `--show-token` al provisionar. `--quiet` sigue disponible y prevalece sobre `--show-token`.
 
 La configuración también admite `database_path` y `bus.project_id` en YAML. Las variables de entorno tienen precedencia. Si existe una base del formato antiguo en la raíz del directorio de configuración y no existe la base predeterminada de `data/`, se conserva aquella ubicación. Una ruta explícita elimina cualquier ambigüedad.
 
@@ -36,7 +36,7 @@ export AGENT_BUS_AGENT_ID="alice"
 export AGENT_BUS_SESSION_FILE="$AGENT_BUS_CONFIG_DIR/credentials/alice.json"
 
 uv run agent-bus work check
-uv run agent-bus work msg bob "Revisa la tarea T1"
+uv run agent-bus work msg bob "Revisa la tarea stock-summary"
 ```
 
 Si no se indica `AGENT_BUS_SESSION_FILE`, el cliente busca `credentials/<agent_id>.json` dentro del directorio de configuración. Una identidad explícita que no coincide con la sesión es rechazada. Los workers necesitan su propia sesión de agente; la sesión administrativa del proceso que los lanza no debe convertirse en la identidad de sus runners.
@@ -66,7 +66,7 @@ Ejemplo de configuración stdio:
 
 La instancia MCP fija su identidad al arrancar. Sus herramientas seguras no ofrecen al modelo campos para elegir el remitente o autor. Los argumentos antiguos de identidad solo se admiten si coinciden con esa sesión; no otorgan autoridad.
 
-T-10 incorpora el SDK MCP y pruebas stdio; la interoperabilidad con las aplicaciones externas anunciadas continúa en T-13. Ver [TASK.md](../TASK.md).
+Para conectar un cliente y consultar las herramientas disponibles, sigue [configuración MCP](mcp-setup.md).
 
 ## Permisos
 
@@ -100,13 +100,13 @@ uv run agent-bus auth revoke --session ID_DE_SESION
 
 La sesión revocada deja de autorizar requests. SSE y WebSocket revalidan la sesión mientras permanecen conectados. Para renovar, provisionar una nueva sesión y configurar su archivo en el cliente; usar `auth create --output /ruta/nueva.json` para conservar el archivo anterior durante la transición. El comando no sobrescribe archivos existentes; `--ttl` indica segundos (hasta 30 días). Reiniciar el cliente MCP para cargar su nueva sesión.
 
-El token es una credencial reutilizable hasta su vencimiento o revocación. No demuestra posesión de una clave privada por cada operación ni impide repetir solicitudes válidas. La idempotencia de mensajes/efectos sigue siendo responsabilidad de T-08. No se mantiene la garantía de anti-replay de solicitudes firmadas porque ese mecanismo no se utiliza para autenticación HTTP.
+El token es una credencial reutilizable hasta su vencimiento o revocación. No demuestra posesión de una clave privada por cada operación ni impide repetir solicitudes válidas. La [mensajería](messaging.md) utiliza claves de idempotencia para reconocer reintentos. No se mantiene la garantía de anti-replay de solicitudes firmadas porque ese mecanismo no se utiliza para autenticación HTTP.
 
 ## Compatibilidad y migración
 
 - Proveer sesiones antes de activar el nuevo servidor y actualizar los clientes conjuntamente.
 - Las claves `.pub` anteriores no se convierten automáticamente en sesiones confiables.
-- Los mensajes, tareas y locks existentes se conservan. Las tareas conservan propietario `agent_id`; T-12 vincula los locks a sesión y token de adquisición, con vencimiento y renovación. Ver [migración de locks](locks.md).
+- Los mensajes, tareas y locks existentes se conservan. Las tareas conservan propietario `agent_id`; el sistema vincula los locks a sesión y token de adquisición, con vencimiento y renovación. Ver [migración de locks](locks.md).
 - `AGENT_BUS_ALLOW_UNSIGNED=1` habilita explícitamente compatibilidad sin autenticación para desarrollo y pruebas. No es el modo seguro. No usarlo para dar por aprobadas pruebas de autorización.
 - La suite mantiene pruebas legacy aisladas en ese modo y añade pruebas estrictas con sesiones y servicios efímeros.
 

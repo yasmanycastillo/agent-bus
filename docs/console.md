@@ -51,5 +51,5 @@ Cubre rol admin, más de cinco solicitudes completas, creación y reasignación,
 historial sin ACK, respuesta, corte/replay, filtros, pantalla de 390 px, salida y
 respuesta tardía de una sesión anterior. Los actores son de prueba, no modelos IA.
 
-Pendiente: vista de worktrees/commits integrados, consumo real y pilotos con modelos
-externos. Esta entrega no completa todas las capacidades de T-21/T-20.
+La consola todavía no muestra worktrees ni commits integrados, y no dispone de
+métricas completas de consumo.

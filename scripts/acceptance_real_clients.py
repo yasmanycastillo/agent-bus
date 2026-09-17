@@ -171,11 +171,11 @@ class Acceptance:
                     for table in ("inbox", "inbox_delivery_state", "message_idempotency", "tasks", "locks")}
 
     async def scenario(self):
-        self.http.post('/tasks', json={'task_id': 'T13-RACE', 'title': 'Acceptance contention'}).raise_for_status()
+        self.http.post('/tasks', json={'task_id': 'acceptance-race', 'title': 'Acceptance contention'}).raise_for_status()
         challenge = 'challenge-' + uuid.uuid4().hex[:12]
         markers = {actor: actor + '-memory-' + uuid.uuid4().hex[:12] for actor in ('claude', 'codex')}
         race = (
-            'Use only agent_bus MCP tools. First claim_task T13-RACE once; a conflict is expected for one participant. '
+            'Use only agent_bus MCP tools. First claim_task acceptance-race once; a conflict is expected for one participant. '
             'Then acquire_lock file_path="shared.txt", scope="project", ttl_seconds=600 once. '
             'Do not release the lock or complete the task in this turn. Continue even if either conflicts. '
         )
@@ -210,14 +210,14 @@ class Acceptance:
             'ACK the reply with ack_messages. Then post_message to claude with text equal to the private conversation '
             'marker you were told to remember in your previous turn, idempotency_key="codex-resumed", reply_needed=true. '
             'If you acquired shared.txt previously, release it using the original acquisition_id and scope project. '
-            'If you own T13-RACE, complete it. Do not wait or read again; stop.', resume=first_codex['session_id'])
+            'If you own acceptance-race, complete it. Do not wait or read again; stop.', resume=first_codex['session_id'])
         before_claude_resume = self.snapshot()
         resumed_claude = await self.turn('claude', 'resume',
             'Use only agent_bus MCP tools. This is the same conversation, resumed after disconnect. Read pending messages. '
             'Reply to the new codex message using reply_message, with text equal to your own private conversation marker '
             'from your first turn, idempotency_key="claude-resumed", acknowledge=true. '
             'If you acquired shared.txt previously, release it using the original acquisition_id and scope project. '
-            'If you own T13-RACE, complete it. Then stop.', resume=first_claude['session_id'])
+            'If you own acceptance-race, complete it. Then stop.', resume=first_claude['session_id'])
         final = self.snapshot()
         (self.output / 'snapshots.json').write_text(json.dumps({
             'before_codex_resume': before_resume, 'before_claude_resume': before_claude_resume,
@@ -308,8 +308,8 @@ def verify_artifacts(output: Path) -> dict:
     checks['both_agents_acknowledged'] = {row['to_agent'] for row in deliveries if row['archived']} == {'claude', 'codex'}
     checks['four_persisted_idempotency_keys'] = len(operations) == 4
     checks['http_contention_has_one_winner'] = (
-        log.count('POST /tasks/T13-RACE/claim HTTP/1.1" 200') == 1
-        and log.count('POST /tasks/T13-RACE/claim HTTP/1.1" 409') == 1
+        log.count('POST /tasks/acceptance-race/claim HTTP/1.1" 200') == 1
+        and log.count('POST /tasks/acceptance-race/claim HTTP/1.1" 409') == 1
         and log.count('POST /locks/acquire HTTP/1.1" 200') == 1
         and log.count('POST /locks/acquire HTTP/1.1" 409') == 1
     )

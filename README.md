@@ -1,316 +1,90 @@
-# agent-bus ⚡
+# agent-bus
 
-[![Tests](https://img.shields.io/badge/tests-pytest-brightgreen.svg)](TASK.md)
-[![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com)
-[![MCP](https://img.shields.io/badge/MCP_Python_SDK-2.1.1-orange.svg)](https://modelcontextprotocol.io)
-[![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
+Coordina agentes de distintas herramientas sobre un mismo proyecto: comparte
+mensajes y tareas, reserva archivos y entrega resultados para revisión mediante MCP.
 
-**Coordina agentes de distintas herramientas sobre un mismo proyecto: comparte tareas, reserva archivos y entrega resultados con trazabilidad mediante MCP.**
+El hub conserva los pendientes en SQLite. Cada agente tiene una identidad propia;
+puede trabajar desde su cliente MCP o responder consultas mediante un listener.
+La consola permite supervisar tareas, solicitudes humanas y reservas.
 
-## Probar la coordinación
+## Empezar
 
-```sh
-# Con el paquete instalado:
-agent-bus demo
-# Desde el checkout:
-uv run agent-bus demo
-```
+Requisitos: Linux, Python 3.12+ y uv. Para usar modelos reales necesitas, además,
+el cliente del proveedor instalado y autenticado.
 
-Dos actores programados usan MCP real para reservar un archivo, detectar un
-conflicto, revisar una entrega y pedir una decisión humana. No requiere claves
-de modelos ni modifica tu proyecto. [Recorrido y evidencia](docs/demo.md).
-
-## Primer uso
-
-Preparar únicamente MCP, sin workers ni integración automática:
+Desde este repositorio:
 
 ```sh
-# Desde este checkout, con uv instalado:
 uv tool install .
 agent-bus --project /ruta/mi-proyecto onboard --mcp-only
 ```
 
-El asistente provisiona sesiones, comprueba el hub y genera configuraciones JSON
-por agente. [Guía de instalación y conexión](docs/first-run.md).
-Todavía no se anuncia una release pública verificada en PyPI ni una instalación
-en dos minutos. [Plan y criterios de lanzamiento](docs/launch-plan.md).
+El asistente prepara un hub local, credenciales y configuraciones MCP para dos
+agentes. Copia la configuración indicada a cada cliente, reconecta y pide
+`bootstrap_agent({})`. No inicia modelos, workers ni merges automáticamente.
 
-`agent-bus` permite que varios agentes intercambien mensajes, reclamen tareas y coordinen archivos dentro de un proyecto. El hub conserva las entregas mientras los clientes están desconectados; cada aplicación necesita consultar o mantener una espera activa para procesarlas.
+Sigue la [guía de primer uso](docs/first-run.md) para conectar los clientes,
+iniciar listeners y resolver problemas. La instalación documentada es desde este
+repositorio; no presupone que haya un paquete público disponible en PyPI.
 
-> Estado y evidencias: [TASK.md](TASK.md) y [aceptación con clientes reales](docs/acceptance-t13.md). T-14 y T-15 están implementadas; la validación operativa con proyectos reales y proveedores adicionales continúa.
+## Probar sin modelos
 
-Guía de [proyectos y sesiones](docs/projects.md): runtime compartido entre worktrees, hubs separados por proyecto e identidades independientes por sesión de proveedor.
+```sh
+agent-bus demo
+```
 
----
+Dos actores programados usan MCP real para reservar un archivo, detectar un
+conflicto, revisar una entrega y pedir una decisión humana. No consume modelos
+comerciales ni modifica tu proyecto. [Recorrido de la demo](docs/demo.md).
 
-## Flujo MCP recomendado
+## Respuestas automáticas
+
+El asistente genera lanzadores para Claude, Codex y Grok con el entorno de cada
+identidad. Ejecuta el lanzador que imprime en otra terminal y déjalo activo.
+También puedes iniciar y consultar un listener desde el proyecto:
+
+```sh
+agent-bus watch --agent grok --cli grok
+agent-bus watch --agent grok --status
+```
+
+Un mensaje con `reply_needed=true` inicia un turno headless. El listener publica
+la respuesta y confirma el mensaje después del éxito. No despierta una TUI
+existente; `--dry-run` solo observa. Grok responde consultas de texto sin herramientas
+ni ediciones. [Estados y recuperación](docs/first-run.md#listeners-para-responder-automáticamente).
+
+## Coordinar trabajo
+
+El flujo MCP recomendado es:
 
 `bootstrap_agent` → `my_pending_items` → `claim_task` → `prepare_edit` → `complete_handoff`.
 
-Reservas de varios archivos con rollback completo, handoffs idempotentes y permisos
-vinculados a la sesión autenticada. [Guía y ejemplos](docs/coordination-workflow.md).
+Las reservas multiarquivo se adquieren juntas o ninguna. La entrega conserva
+resumen, evidencia declarada, estado, mensaje y liberaciones explícitas en una
+transacción. [Guía de coordinación](docs/coordination-workflow.md).
 
-## 🌟 Características Principales
+Para supervisar el proyecto, abre `agent-bus ui` e inicia sesión con una credencial
+administrativa. [Guía de la consola](docs/console.md).
 
-```mermaid
-flowchart TD
-    Human["👤 Humano / Web UI"] -->|"agent-bus quickstart / submit"| Bus["⚡ agent-bus Hub (FastAPI + SSE Pub/Sub + SQLite)"]
+## Alcance y límites
 
-    subgraph "Clientes Interactivos (MCP Hooks)"
-        MCP1["💻 Claude Code (MCP Server)"]
-        MCP2["💻 Codex CLI (cliente MCP)"]
-    end
+- La configuración está orientada a proyectos locales en Linux. Cada proyecto
+  necesita su propio hub, base y credenciales.
+- Leer un mensaje no lo confirma. La entrega durable no sustituye a un cliente
+  que consulte pendientes o a un listener activo.
+- Las reservas son cooperativas: un editor que ignore el protocolo puede escribir.
+- Los workers y el integrador requieren configuración explícita; el handoff MCP
+  no ejecuta pruebas ni fusiona código por sí mismo.
+- No hay medición central completa de costes ni cuotas comerciales persistentes.
+- La compatibilidad de herramientas no garantiza autonomía continua ni que todos
+  los modelos respondan igual. Revisa el resultado de cada tarea.
 
-    subgraph "Aislamiento por Git Worktrees"
-        WT1[".worktrees/claude (rama agent/claude)"]
-        WT2[".worktrees/antigravity (rama agent/antigravity)"]
-    end
+## Documentación y desarrollo
 
-    subgraph "Workers Autónomos Headless"
-        D1["🤖 WorkerDaemon (Claude Runner)"]
-        D2["🤖 WorkerDaemon (Antigravity Runner)"]
-    end
+- [Índice de documentación](docs/README.md)
+- [Instalación y operación](docs/first-run.md)
+- [Conexión MCP](docs/mcp-setup.md)
+- [Desarrollo y pruebas](docs/development.md)
+- [Cambios del producto](CHANGELOG.md)
 
-    Bus <-->|"JSON-RPC stdio / wait_for_updates"| MCP1
-    Bus <-->|"JSON-RPC stdio / wait_for_updates"| MCP2
-
-    Bus -->|"SSE Push Instantáneo"| D1
-    Bus -->|"SSE Push Instantáneo"| D2
-
-    D1 -->|"Reclama tarea y adquiere locks"| Bus
-    D2 -->|"Reclama tarea y adquiere locks"| Bus
-
-    D1 -->|"Commits locales"| WT1
-    D2 -->|"Commits locales"| WT2
-
-    WT1 -->|"Tests & Merge"| Integrator["BranchIntegrator: gate de integración"]
-    WT2 -->|"Tests & Merge"| Integrator
-
-    Integrator -->|"Tests verdes -> Merge limpio"| Main["🌿 Rama main"]
-    Integrator -->|"Tests fallan -> Feedback al autor"| Bus
-```
-
-1. **Integración Nativa MCP (Model Context Protocol)**:
-   * Servidor MCP integrado sobre JSON-RPC 2.0 `stdio` con la herramienta bloqueante `wait_for_updates`.
-   * Claude Code y Codex CLI pueden consultar y procesar el bus mediante sus herramientas MCP. Consultar la matriz de T-13 para las versiones, modelos y mecanismos ejercitados.
-2. **Recepción de eventos y ejecución headless**:
-   * Los agentes reciben asignaciones de tareas y consultas urgentes vía push por **Server-Sent Events (SSE Pub/Sub)**.
-   * Los clientes admiten ejecución sin TUI. Reanudar un proceso requiere una nueva invocación explícita; un evento SSE no inicia por sí mismo un cliente terminado.
-3. **Aislamiento en Git Worktrees**:
-   * Cada agente puede trabajar en `.worktrees/<agent_id>` y `agent/<agent_id>`. Los archivos físicos quedan separados; recursos compartidos, merges y editores externos siguen requiriendo coordinación.
-4. **Integrador Autónomo (Rol Tech Lead)**:
-   * [`BranchIntegrator`](src/agent_bus/worker/integrator.py) valida automáticamente la suite de tests en la rama del agente antes de fusionar.
-   * Si los tests pasan, ejecuta el merge a `main`. Si fallan o hay conflictos, envía feedback detallado al autor con hasta 2 reintentos antes de alertar al humano.
-5. **Soporte Multi-Modelo y Multi-CLI**:
-   * Los clientes MCP externos son independientes de `AgentRunner`. El runner incluye adaptadores separados para Claude, AGY, Aider, Codex y Grok; la aceptación real de cada proveedor tiene distinto alcance.
-6. **Sesiones locales y autorización**:
-   * Credenciales Bearer persistentes por agente/proyecto, con expiración y revocación, y permisos verificados en HTTP, SSE y WebSocket. Provisión por operador local; ver [identidad y migración](docs/authentication.md).
-7. **Resiliencia & Circuit Breakers**:
-   * Hay límites de turnos, presupuesto y detección de conflictos. La aplicación comercial de cuotas, costes y métricas por proyecto sigue en el roadmap; las leases verificadas están documentadas en [locks.md](docs/locks.md).
-8. **Dashboard TUI en Tiempo Real (`top`)**:
-   * Monitor interactivo de terminal construido con Rich Live para observar a los agentes, tareas, locks y decisiones en vivo.
-
----
-
-## 🔌 Servidor MCP Nativo (Model Context Protocol)
-
-`agent-bus` usa el SDK oficial Python `mcp==2.1.1` para exponer el bus por stdio, con solicitudes concurrentes y cancelación. Los contratos y el alcance comprobado están en [mcp-setup.md](docs/mcp-setup.md).
-
-### Herramientas MCP Disponibles
-
-| Herramienta | Descripción |
-| :--- | :--- |
-| `bootstrap_agent()` | Primera llamada: identidad, proyecto y orientación inicial |
-| `my_pending_items()` | Resumen de pendientes de la sesión |
-| `prepare_edit(...)` | Reserva atómica de varios archivos antes de editar |
-| `complete_handoff(...)` | Entrega con evidencia declarada, mensaje y liberaciones explícitas |
-| `get_agent_instructions()` | Protocolo de uso sin modificar estado |
-| `wait_for_updates(timeout, event_cursor?)` | Devuelve pendientes o espera eventos recuperables con plazo total de 1–120 s; [cursores y recuperación](docs/events.md) |
-| `post_message(to_agent, text, idempotency_key, ...)` | Envía mensajes directos o respuestas a otros agentes |
-| `read_messages(cursor, limit)` | Consulta una página pendiente sin confirmar su lectura |
-| `ack_messages(message_ids)` | Confirma explícitamente entregas procesadas |
-| `reply_message(message_id, text, idempotency_key, ...)` | Responde conservando conversación y correlación; confirmación opcional atómica |
-| `claim_task(task_id)` | Reclama una tarea disponible en el backlog |
-| `complete_task(task_id)` | Marca una tarea como finalizada |
-| `acquire_lock(file_path, reason?, scope?, ttl_seconds?)` | Bloquea un archivo antes de editarlo para evitar colisiones |
-| `renew_lock(file_path, acquisition_id, scope?, ttl_seconds?)` | Renueva una adquisición vigente |
-| `release_lock(file_path, acquisition_id, scope?)` | Libera el bloqueo de un archivo |
-| `get_project_status()` | Consulta el estado global del servidor, agentes y tareas |
-| `record_decision(title, what)` | Registra una decisión de arquitectura compartida (ADR) |
-
-El ciclo de envío, respuesta y confirmación, incluyendo los cambios de contrato MCP, se explica en [messaging.md](docs/messaging.md).
-
-La identidad de estas herramientas proviene de la sesión configurada al iniciar MCP. El modelo no elige remitente ni autor.
-
-### Cómo Conectar tu Entorno al Servidor MCP
-
-Primero [provisiona una sesión](docs/authentication.md) y configura `AGENT_BUS_CONFIG_DIR`, `AGENT_BUS_PROJECT_ID`, `AGENT_BUS_AGENT_ID` y `AGENT_BUS_SESSION_FILE` en el entorno del proceso MCP.
-
-#### 1. Claude Code
-Agrega el servidor MCP ejecutando en tu terminal:
-```bash
-claude mcp add agent-bus -- uv run agent-bus mcp-server
-```
-
-#### 2. Claude Desktop / Cursor / Antigravity / Zed
-Agrega la siguiente configuración a tu archivo `mcp.json` o `claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "agent-bus": {
-      "command": "uv",
-      "args": ["--project", "/ruta/agent-bus", "run", "agent-bus", "mcp-server"],
-      "env": {
-        "AGENT_BUS_CONFIG_DIR": "/ruta/proyecto/.agent-bus/runtime",
-        "AGENT_BUS_PROJECT_ID": "mi-proyecto",
-        "AGENT_BUS_AGENT_ID": "claude",
-        "AGENT_BUS_SESSION_FILE": "/ruta/proyecto/.agent-bus/runtime/credentials/claude.json"
-      }
-    }
-  }
-}
-```
-
----
-
-## 🚀 Inicio local
-
-Antes de `quickstart`, el operador debe provisionar una sesión por cada agente del equipo y una sesión administrativa para gestionar el panel y las reasignaciones. Consulta los [pasos de provisión y migración](docs/authentication.md). `quickstart` no concede confianza automáticamente. Ejecutarlo con el proyecto configurado y las credenciales de cada agente disponibles en el directorio de configuración:
-
-```bash
-uv run agent-bus quickstart
-```
-
-Esto ejecuta automáticamente:
-1. Inicialización del proyecto (`.agent-bus/`).
-2. Arranque del hub HTTP loopback configurado, incluido su puerto; un destino remoto debe estar iniciado.
-3. Registro de agentes (`claude`, `antigravity`).
-4. Creación de Git Worktrees aislados y arranque de los daemons de ejecución.
-
----
-
-## 🕹️ Flujo de Trabajo y Comandos
-
-### 1. Monitoreo en Vivo (TUI Dashboard)
-Abre un dashboard interactivo en tiempo real con refresco automático:
-
-```bash
-uv run agent-bus top
-```
-
-### 2. Enviar Objetivos al Equipo Autónomo
-Envía un requerimiento para que el equipo lo descomponga, reclame tareas y lo implemente:
-
-```bash
-uv run agent-bus submit "Implementar autenticación JWT y tests de integración"
-```
-
-### 3. Gestión de Workers en Background
-Controla los procesos daemon de cada agente:
-
-```bash
-uv run agent-bus worker status               # Ver estado de los daemons activos
-uv run agent-bus worker start --agent claude # Iniciar daemon para un agente
-uv run agent-bus worker stop --agent claude  # Detener daemon
-```
-
-### 4. Watcher que inicia procesos headless (`watch`)
-El watcher escucha solicitudes `reply_needed` y lanza turnos headless de Claude,
-Codex o Grok, conservando la sesión por conversación. Ese proceso es independiente
-de cualquier TUI abierta. Usa el proveedor de la credencial, o `--cli` explícito:
-
-```bash
-uv run agent-bus watch --agent claude --cli claude
-uv run agent-bus watch --agent grok --cli grok
-uv run agent-bus watch --agent grok --status
-```
-
-`onboard --mcp-only --agents grok:grok,qa:codex` prepara lanzadores con el entorno
-de cada identidad. `--status` distingue un ejecutor activo, detenido o bloqueado;
-no inicia modelos. [Configuración y recuperación](docs/first-run.md#listeners-para-responder-automáticamente).
-
-Para esperar dentro de la ejecución actual de un cliente MCP, usar
-`wait_for_updates` — ver [docs/mcp-setup.md](docs/mcp-setup.md).
-
-### 5. Lanzar Equipo con Configuración Personalizada
-```bash
-# Lanzar equipo con agentes específicos y worktrees sobre la rama main
-uv run agent-bus run-team --agents "claude,antigravity,codex" --base-ref main
-```
-
----
-
-## 🛠️ Operaciones Diarias y CLI
-
-| Comando | Descripción |
-| :--- | :--- |
-| `agent-bus quickstart` | Inicializa bus, agentes y workers con sesiones previamente provisionadas |
-| `agent-bus top` | Dashboard TUI interactivo en tiempo real con Rich Live |
-| `agent-bus mcp-server` | Inicia el servidor MCP nativo sobre stdio (JSON-RPC 2.0) |
-| `agent-bus run-team` | Inicializa worktrees y arranca daemons de fondo |
-| `agent-bus submit "<meta>"` | Envía un objetivo global al equipo |
-| `agent-bus watch` | Inicia turnos headless ante mensajes reply_needed; `--status` consulta el ejecutor local |
-| `agent-bus serve --daemon` | Inicia el servidor FastAPI como servicio de fondo |
-| `agent-bus serve --stop` | Detiene el servidor |
-| `agent-bus show` | Visualiza el dashboard del estado actual |
-| `agent-bus show tasks` | Lista las tareas y sus responsables |
-| `agent-bus show locks` | Muestra los archivos actualmente bloqueados |
-| `agent-bus show agents` | Muestra el estado y capacidades de los agentes |
-| `agent-bus work claim <id>` | Reclama una tarea disponible |
-| `agent-bus work done <id>` | Marca una tarea como completada |
-| `agent-bus work reassign <id> <agente>` | Reasigna el responsable de una tarea |
-| `agent-bus work lock <archivo>` | Bloquea un archivo para edición concurrente segura |
-| `agent-bus work unlock <archivo> --acquisition-id <token>` | Libera el bloqueo de un archivo |
-| `agent-bus work msg <agente> "<texto>"` | Envía un mensaje directo al inbox de otro agente |
-| `agent-bus work decide "<titulo>" "<desc>"` | Registra un registro de decisión arquitectónica (ADR) |
-
----
-
-## 🖥️ Consola de supervisión
-
-`agent-bus ui` abre `/console`. `/room` conserva compatibilidad y sirve la misma
-interfaz. La sesión administrativa mantiene su token únicamente en memoria.
-
-- Resumen de intervención: solicitudes, bloqueos y revisiones pendientes.
-- Tareas con detalle, criterios e historial de mensajes conservados.
-- Solicitudes desplegables con contexto completo y observaciones.
-- Actividad filtrable, reservas con vencimiento y recuperación tras desconexión.
-- Creación/reasignación, pausa de workers y mensajes con respuesta opcional.
-
-[Guía y prueba de navegador](docs/console.md). API compatible: `/room/api/*`.
-
----
-
-## 💻 Desarrollo Multi-Terminal
-
-Si tienes varias terminales abiertas (por ejemplo, una con **Claude Code** y otra con **Antigravity** o un humano), selecciona en cada terminal su identidad y credencial previamente provisionada. Cambiar solo el nombre no concede permisos:
-
-```bash
-# Terminal 1 (Claude)
-export AGENT_BUS_AGENT_ID=claude
-
-# Terminal 2 (Antigravity)
-export AGENT_BUS_AGENT_ID=antigravity
-```
-
----
-
-## 🧪 Suite de Pruebas
-
-La suite usa bases, credenciales y hubs efímeros. La evidencia por tanda está en [TASK.md](TASK.md). La aceptación optativa con modelos y clientes externos tiene sus propios [pasos y resultados](docs/acceptance-t13.md):
-
-```bash
-uv run pytest
-```
-
----
-
-## 📖 Arquitectura Detallada
-
-Para consultar el diseño original, diagramas y componentes de consenso, consulta el documento histórico siguiente. La autenticación vigente se describe en [authentication.md](docs/authentication.md):
-👉 **[`docs/autonomous_multi_agent_architecture.md`](docs/autonomous_multi_agent_architecture.md)**
-
-Para conectar tu CLI al bus vía MCP: 👉 **[`docs/mcp-setup.md`](docs/mcp-setup.md)**
-
-Los locks de edición son leases cooperativas por sesión: ver [alcance, renovación y migración](docs/locks.md).
+Licencia [MIT](LICENSE).

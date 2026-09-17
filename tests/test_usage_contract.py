@@ -1,4 +1,4 @@
-"""Contrato congelado de presupuesto/consumo (T-21 → T-20): GET /room/api/usage."""
+"""Contrato congelado de presupuesto/consumo: GET /room/api/usage."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ async def test_usage_stub_shape_congelado(secured_bus):
     assert r.json() == {
         "available": False,
         "reason": "metrics_unavailable",
-        "message": "Presupuesto/consumo (T-20) aún no implementado",
+        "message": "Las métricas de presupuesto y consumo aún no están disponibles",
         "schema_version": 1,
         "data": None,
     }

@@ -1,4 +1,4 @@
-# Mensajes, respuestas y confirmaciones (T-08)
+# Mensajes, respuestas y confirmaciones
 
 El ciclo de mensajes usa sesiones autenticadas y una base SQLite por proyecto, según [authentication.md](authentication.md). Leer un mensaje no lo confirma. La confirmación retira una entrega del inbox pendiente; no afecta las entregas del mismo broadcast a otros agentes.
 
@@ -12,7 +12,7 @@ El ciclo de mensajes usa sesiones autenticadas y una base SQLite por proyecto, s
 
 El servidor guarda el resultado y todas las entregas de un envío en una transacción. Un reintento con la misma clave devuelve el ID original y `replayed: true`. En broadcasts conserva también los destinatarios originales: no incorpora agentes registrados después ni vuelve a abrir entregas ya confirmadas. Las claves persisten entre conexiones y reinicios; renovar una sesión del mismo agente no cambia su alcance.
 
-Los avisos SSE/WebSocket se emiten después del commit, únicamente para el primer envío con clave. Si se pierde el aviso, el mensaje sigue en el inbox. T-09 guarda el evento con la entrega y permite [reanudar SSE](events.md); no se afirma entrega exactamente una vez de eventos ni de efectos producidos por el runner.
+Los avisos SSE/WebSocket se emiten después del commit, únicamente para el primer envío con clave. Si se pierde el aviso, el mensaje sigue en el inbox. El hub guarda el evento con la entrega y permite [reanudar SSE](events.md); no se afirma entrega exactamente una vez de eventos ni de efectos producidos por el runner.
 
 ## API HTTP
 
@@ -48,23 +48,23 @@ Reutilizar un cursor de otro inbox, alterar su contenido o cambiar el filtro pro
 Las herramientas usan la identidad fijada al arrancar el proceso MCP:
 
 ```text
-post_message(to_agent="bob", text="Revisa T08", idempotency_key="T08-review-1", reply_needed=true)
+post_message(to_agent="bob", text="Revisa stock-summary", idempotency_key="stock-summary-review-1", reply_needed=true)
 read_messages(limit=20)
-reply_message(message_id="ID_RECIBIDO", text="Revisado", idempotency_key="T08-answer-1", acknowledge=true)
+reply_message(message_id="ID_RECIBIDO", text="Revisado", idempotency_key="stock-summary-answer-1", acknowledge=true)
 ack_messages(message_ids=["OTRO_ID_RECIBIDO"])
 ```
 
 Guardar la clave de la operación antes de llamar a `post_message` o `reply_message` y conservarla si se pierde la respuesta. Generar otra clave en cada reintento crea otra operación.
 
-**Cambio de contrato:** `read_messages` devuelve un objeto con `messages` y `next_cursor`, en lugar de una lista. Las claves son obligatorias en las herramientas MCP de envío/respuesta. `wait_for_updates` devuelve como máximo cinco mensajes pendientes y el cursor correspondiente; los confirmados dejan de aparecer como pendientes. La espera tiene un plazo total de 1 a 120 segundos y un event_cursor separado; T-10 incorpora el SDK y la cancelación por stdio. Cancelar no revierte una mutación ya guardada: conservar su clave de idempotencia al reintentar.
+`read_messages` devuelve un objeto con `messages` y `next_cursor`. Las claves son obligatorias en las herramientas MCP de envío/respuesta. `wait_for_updates` devuelve como máximo cinco mensajes pendientes y el cursor correspondiente; los confirmados dejan de aparecer como pendientes. La espera tiene un plazo total de 1 a 120 segundos y un event_cursor separado; El SDK permite cancelar solicitudes por stdio. Cancelar no revierte una mutación ya guardada: conservar su clave de idempotencia al reintentar.
 
 ## CLI
 
 ```bash
-uv run agent-bus work msg bob "Revisa T08" --reply-needed --idempotency-key T08-review-1
+uv run agent-bus work msg bob "Revisa stock-summary" --reply-needed --idempotency-key stock-summary-review-1
 uv run agent-bus work inbox --limit 20
 uv run agent-bus work inbox --limit 20 --cursor CURSOR_DE_LA_PAGINA
-uv run agent-bus work reply ID_RECIBIDO "Revisado" --idempotency-key T08-answer-1 --ack
+uv run agent-bus work reply ID_RECIBIDO "Revisado" --idempotency-key stock-summary-answer-1 --ack
 uv run agent-bus work ack ID_1 ID_2
 ```
 
@@ -74,11 +74,11 @@ Si no se indica clave en `work msg` o `work reply`, la CLI genera una y la impri
 
 El daemon y el watcher consultan páginas de solicitudes pendientes. SSE solo los despierta: también consultan almacenamiento al arrancar y durante el polling, para recuperar mensajes que llegaron mientras estaban desconectados.
 
-Antes de ejecutar, consultan el estado de la entrega. Solicitan al runner una respuesta textual y el wrapper la envía mediante `/reply` con una clave estable y `acknowledge: true`. No piden al runner enviar además otra respuesta por CLI. Un resultado fallido, una excepción o un fallo al guardar la respuesta conserva la entrega pendiente y registra el error cuando el hub está disponible. Los reintentos tienen espera local para evitar un bucle inmediato de fallos.
+Antes de ejecutar, consultan el estado de la entrega. Solicitan al runner una respuesta textual y el wrapper la envía mediante `/reply` con una clave estable y `acknowledge: true`. No piden al runner enviar además otra respuesta por CLI. Un resultado fallido, una excepción o un fallo al guardar la respuesta conserva la entrega pendiente y registra el error cuando el hub está disponible. Los reintentos tienen espera local para evitar un bucle inmediato de fallos. El watcher conserva el texto final antes del envío para recuperar una entrega fallida sin repetir la consulta al modelo; ver [operación del listener](first-run.md#listeners-para-responder-automáticamente).
 
 La cancelación termina y recoge el subproceso directo. Los errores estructurados de Claude con salida cero tampoco se consideran éxito. Una respuesta HTTP perdida después del commit no obliga a repetir el runner en la siguiente consulta: el original ya está confirmado.
 
-T-11 excluye ejecutores automáticos locales del mismo agente mediante un guard compartido por worker/watch. Las conexiones MCP del mismo agente comparten inbox y deben coordinar el procesamiento. No hay recuperación exactamente una vez de efectos externos; los intentos persistentes y el bloqueo configurable del worker evitan bucles silenciosos. Ver [proyectos y sesiones](projects.md).
+El sistema excluye ejecutores automáticos locales del mismo agente mediante un guard compartido por worker/watch. Las conexiones MCP del mismo agente comparten inbox y deben coordinar el procesamiento. No hay recuperación exactamente una vez de efectos externos; los intentos persistentes y el bloqueo configurable del worker evitan bucles silenciosos. Ver [proyectos y sesiones](projects.md).
 
 ## Migración y retención
 
@@ -86,4 +86,4 @@ La migración conserva las columnas históricas, el archivo y los índices del i
 
 Los registros de idempotencia y de secuencias sobreviven a la limpieza de entregas confirmadas, para no volver a entregar un envío antiguo. Esa conservación incluye el resultado del envío; no constituye una política de eliminación completa de datos. Si la limpieza ya eliminó el mensaje padre de una respuesta, `/reply` devuelve `404`, incluso al intentar repetir esa respuesta. La retención de eventos está definida en [events.md](events.md); la política integral de datos sigue pendiente.
 
-Las pruebas usan bases y hubs efímeros, sesiones provisionadas, clientes MCP en proceso y runners controlados. No equivalen todavía a la aceptación de dos clientes MCP externos por stdio (T-13).
+Para pruebas locales y con clientes externos, consulta [desarrollo y pruebas](development.md).

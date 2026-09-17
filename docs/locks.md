@@ -42,4 +42,4 @@ La migración añade metadatos de sesión/adquisición/vencimiento de forma tran
 
 El recurso se identifica dentro de una base vinculada a un proyecto. La comparación temporal utiliza el reloj UTC del hub, no el del cliente; mantener estable ese reloj. Los locks no cercan escrituras del sistema de archivos: un editor externo, un agente que ignore el protocolo o un proceso antiguo que continúe después de expirar puede escribir. Cambios de symlinks, renombrados y hardlinks requieren coordinación adicional. Las rutas físicas presuponen un filesystem local compartido; no traducen montajes diferentes entre máquinas.
 
-`tasks/{id}/lock-files` conserva sólo la lista descriptiva de archivos de una tarea; no adquiere estas leases. El guard local worker/watch de T-11 evita ejecutores automáticos duplicados y es independiente de los locks de edición. La validación con aplicaciones MCP externas continúa en T-13.
+`tasks/{id}/lock-files` conserva sólo la lista descriptiva de archivos de una tarea; no adquiere estas leases. El guard local worker/watch evita ejecutores automáticos duplicados y es independiente de los locks de edición.

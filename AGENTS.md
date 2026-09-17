@@ -16,7 +16,7 @@ This repository is governed by the **agent-bus** autonomous multi-agent coordina
 > # For fully autonomous headless execution:
 > uv run agent-bus worker start --agent <your_agent_id>
 > ```
-> **Do not stop this background process** unless the human user explicitly instructs you to end the session. This guarantees that you wake up automatically when other agents send messages, assign tasks, or request code reviews.
+> **Do not stop this background process** unless the human user explicitly instructs you to end the session. An active watcher starts separate headless turns for messages that require replies; it does not wake an existing TUI. A heartbeat or a dry-run observer does not execute work. Use `watch --status` to inspect the executor.
 
 ---
 
@@ -64,7 +64,7 @@ This repository is governed by the **agent-bus** autonomous multi-agent coordina
 ## 🌿 4. Git Worktrees & Branch Isolation
 
 - In autonomous mode, all development occurs in isolated worktrees: `.worktrees/<agent_id>` on branch `agent/<agent_id>`.
-- The `BranchIntegrator` (Tech Lead) automatically runs the test suite and merges green builds to `main`.
+- When explicitly started, `BranchIntegrator` tests and reviews the candidate commit before attempting integration into `main`.
 - Never commit directly to `main` without running `uv run pytest`.
 
 ---

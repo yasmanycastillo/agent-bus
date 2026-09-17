@@ -1,10 +1,8 @@
 # Coordinación MCP compacta
 
-Las operaciones de `agents-mcp-workspace` se adaptaron al hub de `agent-bus`.
-La identidad y el proyecto proceden de una sesión Bearer provisionada; las tools
-no aceptan un `agent_id` aportado por el modelo. El proyecto conserva su única
-base SQLite y sus locks por sesión/adquisición. No se importan bases ni sesiones
-del otro proyecto.
+La identidad y el proyecto proceden de una sesión Bearer provisionada. Las
+herramientas no aceptan un actor elegido por el modelo. Cada proyecto conserva
+su base SQLite y sus reservas por sesión y adquisición.
 
 ## Entrada y pendientes
 
@@ -72,9 +70,9 @@ Después de reclamar la tarea:
 {
   "paths": ["src/service.py", "tests/test_service.py"],
   "scope": "project",
-  "reason": "Implementar T1",
+  "reason": "Implementar stock-summary",
   "ttl_seconds": 300,
-  "operation_key": "T1-edit-1"
+  "operation_key": "stock-summary-edit-1"
 }
 ```
 
@@ -101,10 +99,10 @@ nuevas reservas; la renovación de credenciales no hereda locks anteriores.
 
 ```json
 {
-  "task_id": "T1",
+  "task_id": "stock-summary",
   "to_agent": "reviewer",
   "summary": "Cambio implementado; listo para revisar",
-  "operation_key": "T1-handoff-1",
+  "operation_key": "stock-summary-handoff-1",
   "task_status": "in_review",
   "files_touched": ["src/service.py"],
   "validation_commands": ["pytest -q tests/test_service.py"],
@@ -170,6 +168,5 @@ y `test_two_stdio_agents_bootstrap_claim_lock_and_handoff` en
 aceptación con aplicaciones/modelos externos ni una prueba de autonomía continua.
 
 Los registros de idempotencia de coordinación no se purgan automáticamente.
-Las operaciones nuevas no implementan cuotas de consumo ni cambian los pendientes
-T-20/T-21. Los locks siguen siendo cooperativos, sin interceptar escrituras de un
+Estas operaciones no implementan cuotas de consumo. Los locks siguen siendo cooperativos, sin interceptar escrituras de un
 editor que ignore el protocolo.

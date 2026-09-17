@@ -738,7 +738,7 @@ class MessageBus:
         @self.app.get("/room", response_class=HTMLResponse)
         @self.app.get("/console", response_class=HTMLResponse)
         async def console_ui():
-            """Consola React local (T-21); los datos requieren sesión admin."""
+            """Consola React local; los datos requieren sesión admin."""
             html_path = Path(__file__).parent.parent / "web" / "console" / "index.html"
             return HTMLResponse(html_path.read_text())
 
@@ -877,10 +877,9 @@ class MessageBus:
         async def room_usage():
             """Contrato congelado (schema_version 1) de presupuesto/consumo.
 
-            Mientras T-20 no esté implementado, responde ``available: false``
-            con ``reason: metrics_unavailable`` y ``data: null``. Cuando T-20
-            aterrice, este endpoint cambia únicamente a ``available: true`` y
-            rellena ``data`` con USAGE_SCHEMA_V1:
+            Sin métricas disponibles, responde ``available: false``
+            con ``reason: metrics_unavailable`` y ``data: null``. El esquema
+            reservado para métricas disponibles es USAGE_SCHEMA_V1:
             ``{"project": {budget_tokens, spent_tokens, cost_usd,
             window_start, window_end}, "agents": [{agent_id, quota_tokens,
             spent_tokens, cost_usd, requests, by_task: [{task_id,
@@ -891,7 +890,7 @@ class MessageBus:
             return {
                 "available": False,
                 "reason": "metrics_unavailable",
-                "message": "Presupuesto/consumo (T-20) aún no implementado",
+                "message": "Las métricas de presupuesto y consumo aún no están disponibles",
                 "schema_version": 1,
                 "data": None,
             }

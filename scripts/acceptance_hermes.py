@@ -5,6 +5,7 @@ directory; only evidence.json is suitable for publication. Never run in pytest.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import hashlib
 import json
@@ -71,7 +72,10 @@ def verify(output: Path):
         else:
             resolved.append({"name": function["name"], "arguments": arguments})
     names = [c["name"] for c in resolved]
-    assert names and all("agent" in name and name.endswith(("read_messages", "reply_message")) for name in names), names
+    allowed = {"mcp__agent_bus__" + tool for tool in (
+        "bootstrap_agent", "my_pending_items", "read_messages", "reply_message",
+    )}
+    assert names and set(names) <= allowed, names
     reply_calls = [c["arguments"] for c in resolved if c["name"].endswith("reply_message")]
     assert len(reply_calls) == 3 and reply_calls[0] == reply_calls[1]
     log = (output / "hub.log").read_text()
@@ -208,7 +212,10 @@ def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--verify":
-        verify(Path(sys.argv[2]).resolve())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--verify", type=Path, help="Audit an existing run without calling a model")
+    args = parser.parse_args()
+    if args.verify:
+        verify(args.verify.resolve())
     else:
         main()
