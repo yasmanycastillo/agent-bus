@@ -76,6 +76,13 @@ Para responder sin intervención del usuario, inicia un listener `watch` con su
 propia identidad. Es un proceso headless separado de cualquier TUI abierta.
 Consulta [listeners y estados](first-run.md#listeners-para-responder-automáticamente).
 
+El repositorio no activa hooks de Claude por defecto. Si deseas habilitarlos,
+usa [el ejemplo de configuración](../examples/claude/settings.json): incorpora su
+entrada `hooks.Stop` a tu `.claude/settings.json` local, preservando las entradas
+que ya tengas. El ejemplo supone que ejecutas Claude desde la raíz de este
+repositorio. Para otro proyecto, usa la ruta absoluta del script y configura
+`AGENT_BUS_PACKAGE_DIR` si no hay un `agent-bus` instalado en PATH.
+
 El hook opcional [stop-check-inbox.sh](../hooks/stop-check-inbox.sh) consulta
 pendientes al finalizar un turno. Si hay una solicitud de respuesta, pide al
 cliente que continúe. No es un listener permanente. Si el bus o la credencial

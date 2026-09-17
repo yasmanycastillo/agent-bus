@@ -5,6 +5,36 @@ workers ni el integrador. La versión inicial se valida en Linux con Python 3.12
 El paquete aún no tiene una release pública verificada en PyPI: no asumir que
 `uvx agent-bus` descarga este proyecto.
 
+## Sistemas operativos
+
+| Entorno | Estado actual |
+|---|---|
+| Linux | Validado con pruebas automatizadas y clientes reales |
+| macOS | Puede probarse en un entorno Unix, pero instalación, permisos y procesos aún no están validados aquí |
+| Windows con Python nativo desde PowerShell o CMD | No soportado actualmente: el código importa `fcntl` y utiliza permisos y procesos Unix |
+| Windows con WSL2 | Alternativa para ejecutar la versión Linux; no equivale a soporte nativo ni a una prueba específica ya completada en WSL2 |
+
+El bloqueo de Windows no se limita a la sintaxis de los comandos. El paquete
+importa [`fcntl`, disponible en Unix](https://docs.python.org/3/library/fcntl.html),
+y también utiliza `os.getuid`, permisos de archivos Unix y lanzadores `sh`.
+Cambiar PowerShell por Git Bash conservando Python de Windows no elimina esas
+dependencias. La compatibilidad de macOS debe confirmarse en un equipo macOS;
+no basta con que ambos sistemas sean Unix.
+
+Para la alternativa WSL2, sigue la [instalación oficial de Microsoft](https://learn.microsoft.com/es-es/windows/wsl/install).
+Desde PowerShell con permisos de administrador puedes preparar WSL con:
+
+```powershell
+wsl --install
+```
+
+Después, abre la distribución Linux y realiza allí la instalación de Python,
+uv, agent-bus y los CLIs de proveedores. Para esta primera prueba, conserva
+repositorio, runtime y credenciales dentro del sistema de archivos Linux de WSL.
+Los pasos siguientes se ejecutan en esa terminal Linux. Conectar un cliente
+Windows al servidor stdio dentro de WSL requiere adaptar su comando de inicio;
+no lo cubre la configuración directa de esta guía.
+
 ## Instalar desde el repositorio
 
 Con uv instalado, desde el checkout:

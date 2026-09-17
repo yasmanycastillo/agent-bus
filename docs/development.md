@@ -8,7 +8,8 @@ uv run agent-bus --help
 uv run pytest
 ```
 
-Trabaja con Python 3.12 o posterior en Linux. Lee [AGENTS.md](../AGENTS.md) para
+El entorno validado usa Python 3.12 o posterior en Linux; consulta el
+[estado de otras plataformas](first-run.md#sistemas-operativos). Lee [AGENTS.md](../AGENTS.md) para
 coordinar cambios con otros agentes. Las pruebas usan proyectos, hubs y bases
 temporales; no deben depender de las credenciales o del hub personal del autor.
 

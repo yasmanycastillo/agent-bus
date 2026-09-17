@@ -9,8 +9,13 @@ La consola permite supervisar tareas, solicitudes humanas y reservas.
 
 ## Empezar
 
-Requisitos: Linux, Python 3.12+ y uv. Para usar modelos reales necesitas, además,
-el cliente del proveedor instalado y autenticado.
+Requisitos: Python 3.12+ y uv en un entorno Unix. **Linux es la plataforma validada**;
+macOS todavía no se ha validado. Windows nativo (Python en PowerShell o CMD) no está
+soportado actualmente; para probar desde Windows, utiliza Linux dentro de WSL2,
+un entorno que también requiere validación propia.
+
+Para usar modelos reales necesitas, además, el cliente del proveedor instalado
+y autenticado en el entorno donde se ejecutará. [Detalle por plataforma](docs/first-run.md#sistemas-operativos).
 
 Desde este repositorio:
 
@@ -68,7 +73,7 @@ administrativa. [Guía de la consola](docs/console.md).
 
 ## Alcance y límites
 
-- La configuración está orientada a proyectos locales en Linux. Cada proyecto
+- La configuración está orientada a proyectos locales con un entorno Unix. Cada proyecto
   necesita su propio hub, base y credenciales.
 - Leer un mensaje no lo confirma. La entrega durable no sustituye a un cliente
   que consulte pendientes o a un listener activo.
