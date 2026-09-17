@@ -31,6 +31,8 @@ jobs:
         run: uv sync --locked --all-extras --dev
       - name: Lint
         run: uv run ruff check .
+      - name: Type debt gate
+        run: uv run python scripts/check_mypy_baseline.py
       - name: Test
         run: uv run pytest -q
       - name: Build distributions
