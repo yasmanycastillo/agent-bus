@@ -54,6 +54,64 @@ Conservar el entorno Python usado por los snippets. Una reinstalación que cambi
 su ruta requiere regenerar la configuración. El asistente no sobrescribe un
 snippet diferente ni modifica archivos propios del cliente.
 
+## Listeners para responder automáticamente
+
+Para Grok y Codex:
+
+```sh
+agent-bus --project /ruta/mi-proyecto onboard --mcp-only --agents grok:grok,qa:codex
+```
+
+El asistente prepara MCP y muestra un `watch/<agente>/start.sh` por cada proveedor
+compatible (Claude, Codex y Grok). No inicia modelos ni listeners automáticamente.
+Con el CLI del proveedor instalado y autenticado, ejecutar el lanzador impreso
+en otra terminal y dejarlo activo. Conserva directorio, intérprete, identidad y
+rutas de credenciales sin incluir tokens. No depende del lanzador del piloto.
+
+```sh
+/ruta/mi-proyecto/.agent-bus/runtime/watch/grok/start.sh
+# Desde otra terminal:
+/ruta/mi-proyecto/.agent-bus/runtime/watch/grok/start.sh --status
+```
+
+También se puede ejecutar `agent-bus --project /ruta/mi-proyecto watch --agent grok`:
+el proveedor se obtiene de su credencial. `--cli grok` lo selecciona explícitamente;
+`--model` cambia el modelo Grok (por defecto `grok-4.6`). El adaptador Grok funciona
+como consulta de texto sin herramientas ni ediciones. El watcher publica la
+respuesta y confirma el mensaje. No despierta una TUI ni instala un servicio de
+inicio del sistema. Un heartbeat o `--dry-run` no habilita ejecución automática.
+
+`--status` devuelve JSON con `active`, `state` y `can_dispatch`. Comprueba la reserva
+real del ejecutor en el sistema operativo y la actualidad de su estado; un archivo
+PID antiguo no basta. `can_dispatch=true` significa que el watcher está esperando
+tras consultar correctamente el hub, no que haya validado cuota o acceso al modelo.
+Los procesos de versiones anteriores que no publican estado aparecen como `unknown`.
+
+| Estado | Interpretación / acción |
+|---|---|
+| `waiting` | Esperando solicitudes con respuesta requerida |
+| `running` / `delivering` | Consultando al modelo / enviando su respuesta |
+| `stopped` | Iniciar el lanzador |
+| `auth_error` | Revisar expiración, revocación e identidad de la credencial del bus |
+| `provider_error` | Revisar autenticación del CLI, acceso al modelo y salida fallida |
+| `hub_error` | Recuperar conexión con el hub |
+| `delivery_error` | Respuesta conservada; se reintentará su entrega |
+| `attempt_limit` | Cinco fallos antes de preparar una respuesta; requiere intervención |
+| `unknown` / `other_executor` | Estado antiguo/desconocido o un worker ocupa esa identidad |
+
+El watcher relee las credenciales del bus al consultar. Después de provisionar una
+sesión válida según [autenticación](authentication.md), retoma los pendientes; nunca
+los confirma por una consulta rechazada. No renueva credenciales automáticamente.
+
+Antes del envío, conserva únicamente el texto final y la sesión en un archivo
+privado dentro de `watch/<agente>/outbox/`. Si cae el proceso después de guardarlo,
+el reinicio reenvía la misma respuesta y clave idempotente, sin otra llamada al
+modelo. Si el hub ya confirmó la solicitud, no vuelve a ejecutarla. Una respuesta
+HTTP perdida puede dejar un archivo local pendiente de reconciliación; no se debe
+interpretar su existencia como una nueva solicitud. Una caída antes de guardar el
+texto puede repetir la consulta al modelo. No se promete exactamente una ejecución
+de efectos externos; el modo Grok de consulta no permite herramientas.
+
 ## Operación y recuperación
 
 - Hub ocupado por otro proyecto: para un proyecto nuevo, elegir otro `--port`.

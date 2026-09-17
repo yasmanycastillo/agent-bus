@@ -8,21 +8,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import logging
 import hashlib
 import time
 import shutil
 import subprocess
+
+import httpx
 from pathlib import Path
 from contextlib import nullcontext
 
 import click
 
-from agent_bus.security import async_bus_client
+from agent_bus.security import AuthenticationError, async_bus_client, load_session
 
 from agent_bus.config import DEFAULT_CONFIG_DIR, get_config_dir, get_bus_url
 from agent_bus.worker.client import BusEventClient, worker_environment
 from agent_bus.worker.execution import ExecutionGuard
+from agent_bus.cli.watch_state import record_status, reply_file, watcher_status, write_private_json
 
 logger = logging.getLogger("agent_bus.cli.watch")
 
@@ -136,11 +140,15 @@ async def run_turn(
     dry_run: bool = False,
     sessions_file: Path | None = None,
     bus_url: str | None = None,
+    model: str | None = None,
+    on_state=None,
 ) -> str | None:
     """Send one durable reply and acknowledge only after the CLI succeeds."""
     bus_url = get_bus_url(bus_url)
     sessions_file = sessions_file or _session_file(agent_id)
     message_id = message["message_id"]
+    prepared = reply_file(sessions_file, message_id)
+    state = on_state or (lambda value: None)
     if dry_run:
         click.echo(f"[dry-run] {cli} -p ... (message {message_id[:8]})")
         return None
@@ -150,55 +158,76 @@ async def run_turn(
             response.raise_for_status()
             message = response.json()
             if message.get("acknowledged"):
+                prepared.unlink(missing_ok=True)
+                state("waiting")
                 return None
-            if message.get("attempts", 0) >= 5:
+            if message.get("attempts", 0) >= 5 and not prepared.exists():
                 # Durable count survives watcher restarts. Leave the delivery
                 # visible instead of invoking a broken provider indefinitely.
+                state("attempt_limit")
                 return None
             thread_id = (message.get("conversation_id") or (message.get("metadata") or {}).get("thread_id")
                          or message_id)
             session_id = session_map.get(thread_id)
-            if cli == "codex":
-                from agent_bus.worker.runner import AgentRunner
-                runner = AgentRunner(agent_id, provider="codex", bus_url=bus_url,
-                                     sandbox_mode="read-only")
-                runner.session_map = dict(session_map)
-                turn = await runner.execute_turn(build_prompt(message), thread_id=thread_id,
-                                                 timeout_seconds=300)
-                if not turn.success:
-                    raise RuntimeError(turn.error or "Codex turn failed")
-                result = subprocess.CompletedProcess([], 0, json.dumps({
-                    "result": turn.output, "session_id": turn.session_id,
-                }), "")
+            if prepared.exists():
+                cached = json.loads(prepared.read_text())
+                if cached.get("message_id") != message_id or cached.get("thread_id") != thread_id:
+                    raise ValueError("Prepared reply identity mismatch")
+                reply_text, new_session = cached["text"], cached.get("session_id")
+                if not isinstance(reply_text, str) or not reply_text.strip():
+                    raise ValueError("Invalid prepared reply")
             else:
-                binary = shutil.which(cli)
-                if not binary:
-                    raise RuntimeError(f"CLI '{cli}' not found in PATH")
-                cmd = [binary, "-p", build_prompt(message), "--output-format", "json"]
-                if session_id:
-                    cmd.extend(["--resume", session_id])
-                result = await _run_cli(cmd, agent_id, bus_url=bus_url)
-            if result.returncode != 0:
-                raise RuntimeError(f"CLI turn failed ({result.returncode}): {result.stderr[:200]}")
-            try:
-                output_data = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                output_data = None
-            if cli == "claude" and (
-                not isinstance(output_data, dict)
-                or not isinstance(output_data.get("result"), str)
-                or not output_data["result"].strip()
-            ):
-                raise RuntimeError("Claude CLI returned no successful text result")
-            if isinstance(output_data, dict) and output_data.get("is_error"):
-                raise RuntimeError("CLI returned an error result")
-            new_session = extract_session_id(result.stdout)
+                state("running")
+                if cli == "codex":
+                    from agent_bus.worker.runner import AgentRunner
+                    runner = AgentRunner(agent_id, provider="codex", bus_url=bus_url,
+                                         sandbox_mode="read-only")
+                    runner.session_map = dict(session_map)
+                    turn = await runner.execute_turn(build_prompt(message), thread_id=thread_id,
+                                                     timeout_seconds=300)
+                    if not turn.success:
+                        raise RuntimeError(turn.error or "Codex turn failed")
+                    result = subprocess.CompletedProcess([], 0, json.dumps({
+                        "result": turn.output, "session_id": turn.session_id,
+                    }), "")
+                else:
+                    binary = shutil.which(cli)
+                    if not binary:
+                        raise RuntimeError(f"CLI '{cli}' not found in PATH")
+                    cmd = [binary, "-p", build_prompt(message), "--output-format", "json"]
+                    if cli == "grok":
+                        cmd.extend(["--model", model or "grok-4.6", "--no-subagents",
+                                    "--disable-web-search", "--tools", "",
+                                    "--deny", "*", "--permission-mode", "dontAsk", "--max-turns", "1"])
+                    if session_id:
+                        cmd.extend(["--resume", session_id])
+                    result = await _run_cli(cmd, agent_id, bus_url=bus_url)
+                if result.returncode != 0:
+                    raise RuntimeError(f"CLI turn failed ({result.returncode}): {result.stderr[:200]}")
+                try:
+                    output_data = json.loads(result.stdout)
+                except json.JSONDecodeError:
+                    output_data = None
+                if cli in ("claude", "grok") and (
+                    not isinstance(output_data, dict)
+                    or not isinstance(output_data.get("text" if cli == "grok" else "result"), str)
+                    or not output_data["text" if cli == "grok" else "result"].strip()
+                ):
+                    raise RuntimeError(f"{cli} CLI returned no successful text result")
+                if isinstance(output_data, dict) and output_data.get("is_error"):
+                    raise RuntimeError("CLI returned an error result")
+                if cli == "grok" and output_data.get("stopReason") != "end_turn":
+                    raise RuntimeError("Grok turn incomplete or failed")
+                new_session = extract_session_id(result.stdout)
+                reply_text = extract_response_text(result.stdout)
+                if not reply_text:
+                    raise ValueError("CLI returned no reply text")
+                write_private_json(prepared, {"message_id": message_id, "thread_id": thread_id,
+                                               "session_id": new_session, "text": reply_text})
             if new_session:
                 session_map[thread_id] = new_session
                 save_session_map(session_map, sessions_file)
-            reply_text = extract_response_text(result.stdout)
-            if not reply_text:
-                raise ValueError("CLI returned no reply text")
+            state("delivering")
             key = "watch-reply:" + message_id
             if len(key) > 128:
                 key = "watch-reply:" + hashlib.sha256(message_id.encode()).hexdigest()
@@ -208,6 +237,8 @@ async def run_turn(
                       "reply_needed": False, "acknowledge": True},
             )
             response.raise_for_status()
+            prepared.unlink(missing_ok=True)
+            state("waiting")
             logger.info("Reply delivered and message acknowledged: %s", message_id)
             click.echo(f"Reply delivered and acknowledged: {message_id}")
             return new_session or session_id
@@ -215,6 +246,9 @@ async def run_turn(
             await asyncio.shield(_record_failure(client, agent_id, message_id, "CLI turn cancelled"))
             raise
         except Exception as exc:
+            auth_error = isinstance(exc, AuthenticationError) or (
+                isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403))
+            state("auth_error" if auth_error else "delivery_error" if prepared.exists() else "provider_error")
             await _record_failure(client, agent_id, message_id, str(exc))
             logger.warning("Watcher left message pending: %s", exc)
             return None
@@ -223,9 +257,10 @@ async def run_turn(
 class PendingMessageWatcher:
     """SSE wakes bounded polling; persisted delivery state decides what to execute."""
     def __init__(self, agent_id: str, *, cli: str = "claude", bus_url: str | None = None,
-                 dry_run: bool = False, sessions_file: Path | None = None):
+                 dry_run: bool = False, sessions_file: Path | None = None, model: str | None = None):
         self.agent_id = agent_id
         self.cli = cli
+        self.model = model
         self.bus_url = get_bus_url(bus_url)
         self.dry_run = dry_run
         self.sessions_file = sessions_file or _session_file(agent_id)
@@ -233,6 +268,10 @@ class PendingMessageWatcher:
         self.cursor: str | None = None
         self.retry_after: dict[str, float] = {}
         self.wake = asyncio.Event()
+
+    def status(self, state: str) -> None:
+        if not self.dry_run:
+            record_status(self.sessions_file.parent / "status.json", self.cli, state)
 
     async def on_event(self, event: dict) -> None:
         # Events are hints only; never execute unverified event payloads.
@@ -247,13 +286,16 @@ class PendingMessageWatcher:
             response.raise_for_status()
             page = response.json()
         self.cursor = page.get("next_cursor")
+        if not page["messages"]:
+            self.status("waiting")
         for message in page["messages"]:
             message_id = message["message_id"]
             if time.monotonic() < self.retry_after.get(message_id, 0):
                 continue
             try:
                 await run_turn(self.agent_id, message, self.session_map, cli=self.cli,
-                               dry_run=self.dry_run, sessions_file=self.sessions_file, bus_url=self.bus_url)
+                               dry_run=self.dry_run, sessions_file=self.sessions_file, bus_url=self.bus_url,
+                               model=self.model, on_state=self.status)
             finally:
                 self.retry_after[message_id] = time.monotonic() + 3
         # Retain only unexpired backoff entries; no durable retry ledger is claimed.
@@ -262,7 +304,11 @@ class PendingMessageWatcher:
     async def run(self, *, once: bool = False) -> None:
         guard = nullcontext() if self.dry_run else ExecutionGuard(self.agent_id, kind="watcher")
         with guard:
-            await self._run(once=once)
+            self.status("starting")
+            try:
+                await self._run(once=once)
+            finally:
+                self.status("stopped")
 
     async def _run(self, *, once: bool = False) -> None:
         events = BusEventClient(self.agent_id, bus_url=self.bus_url, on_event=self.on_event)
@@ -273,7 +319,10 @@ class PendingMessageWatcher:
                 try:
                     await self.poll_once(limit=1 if once else 10)
                 except Exception as exc:
-                    logger.warning("Pending inbox unavailable: %s", exc)
+                    auth_error = isinstance(exc, AuthenticationError) or (
+                        isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403))
+                    self.status("auth_error" if auth_error else "hub_error")
+                    logger.warning("Pending inbox unavailable: %s", type(exc).__name__)
                 if once:
                     return
                 try:
@@ -288,11 +337,14 @@ class PendingMessageWatcher:
 
 @click.command(name="watch")
 @click.option("--agent", "agent_id", default=None, help="Agent id (default: agente actual)")
-@click.option("--cli", default="claude", help="CLI a despertar: claude, agy, ...")
+@click.option("--cli", default=None, help="CLI a despertar; por defecto usa el proveedor de la credencial.")
+@click.option("--model", default=None, help="Modelo para Grok (por defecto grok-4.6).")
+@click.option("--status", "show_status", is_flag=True, help="Consultar estado local del ejecutor sin iniciar turnos.")
 @click.option("--bus-url", default=None, help="URL del bus")
 @click.option("--dry-run", is_flag=True, help="Solo mostrar qué se ejecutaría")
 @click.option("--once", is_flag=True, help="Procesar un solo mensaje pendiente y salir")
-def watch(agent_id: str | None, cli: str, bus_url: str | None, dry_run: bool, once: bool):
+def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: bool, once: bool,
+          model: str | None, show_status: bool):
     """Escuchar solicitudes y responder con turnos headless; no inyecta en una TUI."""
     from agent_bus.cli.display import get_current_agent
 
@@ -302,9 +354,20 @@ def watch(agent_id: str | None, cli: str, bus_url: str | None, dry_run: bool, on
             click.echo("No hay agente por defecto. Usa --agent o agent-bus work as <id>")
             raise SystemExit(1)
 
+    if show_status:
+        click.echo(json.dumps(watcher_status(agent_id, _session_file(agent_id).parent / "status.json")))
+        return
+    if cli is None:
+        cli = "claude" if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") == "1" else load_session(agent_id).get("provider")
+        if cli not in ("claude", "codex", "grok", "agy", "aider"):
+            raise click.ClickException("Proveedor sin CLI conocido; indica --cli explícitamente")
+    if model and cli != "grok":
+        raise click.UsageError("--model está disponible para --cli grok")
+    if not dry_run and not shutil.which(cli):
+        raise click.ClickException(f"CLI '{cli}' no instalado o no disponible en PATH")
     # Fail immediately for missing/mismatched credentials, including dry-run.
     worker_environment(agent_id, bus_url=bus_url)
-    watcher = PendingMessageWatcher(agent_id, cli=cli, bus_url=bus_url, dry_run=dry_run)
+    watcher = PendingMessageWatcher(agent_id, cli=cli, bus_url=bus_url, dry_run=dry_run, model=model)
     click.echo(f"👀 Watcheando el bus como '{agent_id}' (CLI: {cli})")
     click.echo("   Consulta persistida y SSE activos. Ctrl+C para salir.")
     try:

@@ -203,8 +203,7 @@ async def test_watcher_restart_recovers_without_sse_and_stale_event_is_ignored(w
     await restarted.on_event(hub.message)
     await restarted.poll_once()
     await watch.run_turn("bob", hub.message, restarted.session_map, sessions_file=tmp_path / "sessions.json")
-    assert len(calls) == 2
-    assert "--resume" in calls[1]
+    assert len(calls) == 1  # delivery retry uses the prepared reply, not another model turn
     assert restarted.session_map["conversation-1"] == "s1"
     assert hub.replies[0]["idempotency_key"] == "watch-reply:source"
     assert hub.message["acknowledged"]

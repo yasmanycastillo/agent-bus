@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -139,7 +140,7 @@ def onboard_mcp(agents: str | None, admin: str, port: int | None, yes: bool, run
             raise click.ClickException(f'El hub rechazó la sesión de {session["agent_id"]}. Comprueba revocación y proyecto; no se regeneran credenciales automáticamente.')
     output = get_config_dir() / 'mcp'
     output.mkdir(parents=True, exist_ok=True)
-    for name, _ in pairs:
+    for name, provider in pairs:
         target = output / f'{name}.json'
         content = json.dumps({'mcpServers': {'agent-bus': client_config(name, get_bus_url())}}, indent=2) + '\n'
         if target.exists() and target.read_text() != content:
@@ -148,6 +149,24 @@ def onboard_mcp(agents: str | None, admin: str, port: int | None, yes: bool, run
             with target.open('x') as stream:
                 stream.write(content)
         click.echo(f'MCP de {name}: {target}')
+        if provider in ('claude', 'codex', 'grok'):
+            # Only paths and project metadata, never credential contents.
+            settings = client_config(name, get_bus_url())
+            launcher = get_config_dir() / 'watch' / name / 'start.sh'
+            command = ['env', *(f'{key}={value}' for key, value in settings['env'].items()),
+                       sys.executable, '-m', 'agent_bus.cli.main', 'watch',
+                       '--agent', name, '--cli', provider]
+            script = ('#!/bin/sh\nset -eu\ncd ' + shlex.quote(str(root)) + '\nexec '
+                      + shlex.join(command) + ' "$@"\n')
+            if launcher.exists() and launcher.read_text() != script:
+                raise click.ClickException(f'Ya existe un lanzador diferente: {launcher}; consérvalo antes de repetir')
+            if not launcher.exists():
+                launcher.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with launcher.open('x') as stream:
+                    stream.write(script)
+                launcher.chmod(0o700)
+            click.echo(f'Iniciar listener de {name} en otra terminal: {shlex.quote(str(launcher))}')
+            click.echo(f'Consultar su estado: {shlex.quote(str(launcher))} --status')
     click.echo(f'Hub y {len(sessions)} sesiones verificados. Consola: {url}/console')
     click.echo('Copia la configuración del agente a tu cliente MCP y reconecta. Primera llamada: bootstrap_agent({}).')
     click.echo('Cada aplicación necesita su propia identidad. No compartas los archivos credentials/.')

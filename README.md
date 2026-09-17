@@ -216,11 +216,19 @@ uv run agent-bus worker stop --agent claude  # Detener daemon
 ```
 
 ### 4. Watcher que inicia procesos headless (`watch`)
-El watcher escucha el bus y puede lanzar un proceso `claude -p`, usando `--resume` cuando conserva una sesión previa. Ese proceso es independiente de cualquier TUI abierta; no inyecta texto ni despierta automáticamente aquella terminal:
+El watcher escucha solicitudes `reply_needed` y lanza turnos headless de Claude,
+Codex o Grok, conservando la sesión por conversación. Ese proceso es independiente
+de cualquier TUI abierta. Usa el proveedor de la credencial, o `--cli` explícito:
 
 ```bash
 uv run agent-bus watch --agent claude --cli claude
+uv run agent-bus watch --agent grok --cli grok
+uv run agent-bus watch --agent grok --status
 ```
+
+`onboard --mcp-only --agents grok:grok,qa:codex` prepara lanzadores con el entorno
+de cada identidad. `--status` distingue un ejecutor activo, detenido o bloqueado;
+no inicia modelos. [Configuración y recuperación](docs/first-run.md#listeners-para-responder-automáticamente).
 
 Para esperar dentro de la ejecución actual de un cliente MCP, usar
 `wait_for_updates` — ver [docs/mcp-setup.md](docs/mcp-setup.md).
@@ -242,7 +250,7 @@ uv run agent-bus run-team --agents "claude,antigravity,codex" --base-ref main
 | `agent-bus mcp-server` | Inicia el servidor MCP nativo sobre stdio (JSON-RPC 2.0) |
 | `agent-bus run-team` | Inicializa worktrees y arranca daemons de fondo |
 | `agent-bus submit "<meta>"` | Envía un objetivo global al equipo |
-| `agent-bus watch` | Despierta tu sesión interactiva ante mensajes reply_needed (thread_id → `--resume`) |
+| `agent-bus watch` | Inicia turnos headless ante mensajes reply_needed; `--status` consulta el ejecutor local |
 | `agent-bus serve --daemon` | Inicia el servidor FastAPI como servicio de fondo |
 | `agent-bus serve --stop` | Detiene el servidor |
 | `agent-bus show` | Visualiza el dashboard del estado actual |

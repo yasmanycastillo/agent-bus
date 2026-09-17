@@ -1,0 +1,41 @@
+{
+  "result": "passed",
+  "provider": "grok",
+  "model": "grok-4.6",
+  "cli_version": "1.0.34",
+  "watch_command": [
+    "agent-bus",
+    "watch",
+    "--agent",
+    "grok-native"
+  ],
+  "provider_from_credential": true,
+  "auxiliary_wrapper": false,
+  "request_to_reply_seconds": 11.761577,
+  "deliveries": [
+    {
+      "message_id": "fe7ffbb4-7653-45bc-9b9d-dbafc944dd43",
+      "from_agent": "codex",
+      "to_agent": "grok-native",
+      "body": "{\"text\":\"Responde exactamente NATIVO-8467. Esta es una prueba de consulta, sin herramientas.\"}",
+      "timestamp": "2026-09-17T04:07:46.602896+00:00",
+      "archived": 1
+    },
+    {
+      "message_id": "7c7593f8-33d1-41a0-adb1-3555278c529e",
+      "from_agent": "grok-native",
+      "to_agent": "codex",
+      "body": "{\"text\":\"NATIVO-8467\"}",
+      "timestamp": "2026-09-17T04:07:58.364473+00:00",
+      "archived": 0
+    }
+  ],
+  "scope": "Real provider, automatic headless query turn without tools; no TUI injection",
+  "operator_interventions": [
+    "Provision isolated grok-native identity",
+    "Start listener before sending request",
+    "Send controlled request",
+    "Read persisted deliveries and status"
+  ],
+  "recovery_validation": "Separate automated tests, not provider fault injection"
+}

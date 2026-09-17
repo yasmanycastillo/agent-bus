@@ -57,7 +57,7 @@ def test_mcp_onboarding_real_hub_repeat_and_revocation(tmp_path):
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
-    args = ['onboard', '--mcp-only', '--yes', '--port', str(port)]
+    args = ['onboard', '--mcp-only', '--yes', '--port', str(port), '--agents', 'backend:grok,qa:codex']
     runtime = tmp_path / '.agent-bus' / 'runtime'
     try:
         first = invoke(tmp_path, env, *args)
@@ -69,9 +69,19 @@ def test_mcp_onboarding_real_hub_repeat_and_revocation(tmp_path):
         assert len(credentials) == 3
         assert not (tmp_path / '.worktrees').exists()
         assert not (runtime / 'workers').exists()
-        second = invoke(tmp_path, env, 'onboard', '--mcp-only', '--yes')
+        launcher = runtime / 'watch' / 'backend' / 'start.sh'
+        assert launcher.stat().st_mode & 0o777 == 0o700
+        script = launcher.read_text()
+        assert '--cli grok' in script
+        assert all(json.loads(raw)['token'] not in script for raw in credentials.values())
+        status = subprocess.run([str(launcher), '--status'], cwd='/', env=env,
+                                text=True, capture_output=True, timeout=10)
+        assert status.returncode == 0, status.stderr
+        assert json.loads(status.stdout)['state'] == 'stopped'
+        second = invoke(tmp_path, env, 'onboard', '--mcp-only', '--yes', '--agents', 'backend:grok,qa:codex')
         assert second.returncode == 0, second.stdout + second.stderr
         assert credentials == {p.name: p.read_bytes() for p in (runtime / 'credentials').glob('*.json')}
+        assert launcher.read_text() == script
 
         async def bootstrap_both():
             for name in ('backend', 'qa'):

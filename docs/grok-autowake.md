@@ -11,6 +11,10 @@ de sesiones persistía. La [evidencia sanitizada](evidence/grok-autowake.json)
 incluye identificadores y tiempos del intercambio. El estado de la respuesta
 en ese archivo corresponde a la captura anterior a su ACK por Codex.
 
+La integración posterior permite `watch --cli grok` sin el lanzador de este
+piloto. Ver [primer uso](first-run.md#listeners-para-responder-automáticamente).
+Los siguientes datos describen la corrida histórica.
+
 ## Configuración reproducible
 
 Requisitos: Grok CLI autenticado, identidad agent-bus provisionada, entorno del

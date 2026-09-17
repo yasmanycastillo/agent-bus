@@ -61,3 +61,27 @@ class ExecutionGuard:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             finally:
                 os.close(fd)
+
+    def inspect(self) -> dict:
+        """Observe the OS lock, never treat a surviving PID file as liveness."""
+        try:
+            fd = os.open(self.path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return {"active": False}
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+                raise RuntimeError("Unsafe executor lock")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                try:
+                    owner = json.loads(os.read(fd, 4096))
+                except (ValueError, UnicodeError):
+                    owner = {}
+                return {"active": True, "pid": owner.get("pid"), "kind": owner.get("kind")}
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return {"active": False}
+        finally:
+            os.close(fd)
