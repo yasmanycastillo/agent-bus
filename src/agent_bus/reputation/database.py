@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import aiosqlite
 import asyncio
+import os
 import secrets
 import re
 import sqlite3
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 
 INBOX_SCHEMA = """
@@ -217,33 +219,151 @@ class Database:
             f"file:agent-bus-{secrets.token_hex(16)}?mode=memory&cache=shared"
             if db_path in ("", ":memory:") else db_path
         )
+        self._file_path: Path | None = None
+        self._uri_parameters: list[tuple[str, str]] = []
+        self._uri_mode = "rwc"
         if self.db_path.startswith("file:"):
             uri = urlsplit(self.db_path)
+            if uri.netloc:
+                raise ValueError("SQLite file URI authority is not supported")
             parameters = parse_qsl(uri.query, keep_blank_values=True)
-            if unquote(uri.path) == ":memory:" or ("mode", "memory") in parameters:
+            modes = [value for key, value in parameters if key == "mode"]
+            if len(modes) > 1 or (modes and modes[0] not in {"memory", "ro", "rw", "rwc"}):
+                raise ValueError("Unsupported or duplicate SQLite file URI mode")
+            decoded_path = unquote(uri.path)
+            if decoded_path == ":memory:" or modes == ["memory"]:
                 caches = [value for key, value in parameters if key == "cache"]
                 if any(value != "shared" for value in caches):
                     raise ValueError("In-memory transactions require cache=shared; cache=private is unsupported")
                 if not caches:
                     base, marker, fragment = self.db_path.partition("#")
                     self.db_path = base + ("&" if "?" in base else "?") + "cache=shared" + marker + fragment
+            else:
+                self._file_path = Path(decoded_path).absolute()
+                self._uri_parameters = parameters
+                self._uri_mode = modes[0] if modes else "rwc"
+        else:
+            self._file_path = Path(self.db_path).absolute()
         self.project_id = project_id
         self._connection: aiosqlite.Connection | None = None
         self._workers: set[asyncio.Task] = set()
         self._closing = False
         self._close_task: asyncio.Task | None = None
+        self._anchor_fd: int | None = None
+        self._connect_path = self.db_path
+        self._expected_identity: tuple[int, int] | None = None
+        self._initialize_lock = asyncio.Lock()
+
+    @staticmethod
+    def _open_parent_directory(parent: Path) -> int:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(parent.anchor or "/", flags)
+        opened = [os.fstat(descriptor)]
+        try:
+            for component in parent.parts[1:]:
+                child = os.open(component, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+                opened.append(os.fstat(descriptor))
+            current_uid = os.geteuid()
+            private_barrier = any(
+                item.st_uid == current_uid and item.st_mode & 0o077 == 0 for item in opened
+            )
+            writable_component = any(
+                item.st_mode & 0o022 and not item.st_mode & stat.S_ISVTX for item in opened
+            )
+            final = opened[-1]
+            final_is_sticky_writable = bool(final.st_mode & stat.S_ISVTX and final.st_mode & 0o022)
+            final_is_controlled = final.st_uid == current_uid
+            if (not final_is_controlled or final_is_sticky_writable
+                    or (writable_component and not private_barrier)):
+                raise PermissionError("Database parent directory is writable by other users")
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _path_has_identity(path: Path, expected: tuple[int, int]) -> bool:
+        try:
+            current = path.lstat()
+        except OSError:
+            return False
+        return stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == expected
 
     async def initialize(self) -> None:
+        if self._closing and (self._close_task is None or not self._close_task.done()):
+            raise RuntimeError("Database is closing")
+        async with self._initialize_lock:
+            await self._initialize()
+
+    async def _initialize(self) -> None:
         if self._closing:
             if self._close_task is None or not self._close_task.done():
                 raise RuntimeError("Database is closing")
             self._close_task.result()
             self._close_task = None
             self._closing = False
-        if not self.db_path.startswith("file:"):
-            self.db_path = str(Path(self.db_path).absolute())
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._connection = await aiosqlite.connect(self.db_path, uri=True)
+        if self._connection is not None:
+            raise RuntimeError("Database is already initialized")
+        descriptor: int | None = None
+        parent_descriptor: int | None = None
+        connect_path = self.db_path
+        expected_identity: tuple[int, int] | None = None
+        if self._file_path is not None:
+            if not self.db_path.startswith("file:"):
+                self.db_path = str(self._file_path)
+            parent = self._file_path.parent
+            parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            if self._uri_mode == "ro":
+                raise ValueError("Read-only SQLite databases cannot run writable migrations")
+            parent_descriptor = self._open_parent_directory(parent)
+            flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            if self._uri_mode == "rwc":
+                flags |= os.O_CREAT
+            try:
+                descriptor = os.open(self._file_path.name, flags, 0o600, dir_fd=parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
+                parent_descriptor = None
+            try:
+                opened = os.fstat(descriptor)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise ValueError("Database path must be a regular file")
+                os.fchmod(descriptor, 0o600)
+                expected_identity = (opened.st_dev, opened.st_ino)
+                fd_root = next((root for root in (Path("/proc/self/fd"), Path("/dev/fd"))
+                                if root.is_dir()), None)
+                if fd_root is None:
+                    raise RuntimeError("Secure SQLite file opening requires /proc/self/fd or /dev/fd")
+                parameters = [(key, value) for key, value in self._uri_parameters if key != "mode"]
+                parameters.append(("mode", "rw"))
+                connect_path = f"file:{fd_root / str(descriptor)}?{urlencode(parameters)}"
+            except BaseException:
+                os.close(descriptor)
+                raise
+        try:
+            try:
+                self._connection = await aiosqlite.connect(connect_path, uri=True)
+            except BaseException as exc:
+                if (self._file_path is not None and expected_identity is not None
+                        and not self._path_has_identity(self._file_path, expected_identity)):
+                    raise RuntimeError("Database path changed during secure open") from exc
+                raise
+            if self._file_path is not None and expected_identity is not None:
+                if not self._path_has_identity(self._file_path, expected_identity):
+                    await self._connection.close()
+                    self._connection = None
+                    raise RuntimeError("Database path changed during secure open")
+            self._anchor_fd = descriptor
+            self._connect_path = connect_path
+            self._expected_identity = expected_identity
+            descriptor = None
+        finally:
+            if parent_descriptor is not None:
+                os.close(parent_descriptor)
+            if descriptor is not None:
+                os.close(descriptor)
         self._connection.row_factory = aiosqlite.Row
         try:
             await self._connection.executescript(SCHEMA)
@@ -255,7 +375,7 @@ class Database:
             await self._migrate_reviews()
             await self._migrate_worker_control()
         except BaseException:
-            await self.close()
+            await self._close_locked()
             raise
 
     async def bind_project(self, project_id: str) -> None:
@@ -483,13 +603,17 @@ class Database:
         if self._closing:
             raise RuntimeError("Database is closing or closed")
         self.conn  # Require an initialized database (including its memory anchor).
+        if (self._file_path is not None and self._expected_identity is not None
+                and not self._path_has_identity(self._file_path, self._expected_identity)):
+            raise RuntimeError("Database path changed after initialization")
+        connect_path = self._connect_path
 
         def runner():
             deadline = time.monotonic() + 5
             while True:
                 # Own the busy wait here: SQLite's per-statement timeout would
                 # otherwise add another five seconds at each attempt/stage.
-                connection = sqlite3.connect(self.db_path, uri=True, timeout=0)
+                connection = sqlite3.connect(connect_path, uri=True, timeout=0)
                 connection.row_factory = sqlite3.Row
                 try:
                     if not write:
@@ -530,6 +654,13 @@ class Database:
         return self._connection
 
     async def close(self) -> None:
+        # Close admission before waiting for initialize(), so new work cannot
+        # overtake a scheduled close while the lifecycle lock is contended.
+        self._closing = True
+        async with self._initialize_lock:
+            await self._close_locked()
+
+    async def _close_locked(self) -> None:
         if self._close_task is None:
             # Admission and worker registration contain no await, so close
             # cannot miss a transaction accepted on this event loop.
@@ -541,6 +672,9 @@ class Database:
                 if self._connection:
                     await self._connection.close()
                     self._connection = None
+                if self._anchor_fd is not None:
+                    os.close(self._anchor_fd)
+                    self._anchor_fd = None
 
             self._close_task = asyncio.create_task(finish())
         await self._wait_for_worker(self._close_task)

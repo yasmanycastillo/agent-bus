@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
+import tempfile
 import threading
 import time
 from contextlib import closing
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +20,255 @@ import agent_bus.reputation.database as database_module
 from agent_bus.reputation.database import Database
 from agent_bus.types import Envelope, MessageType
 from agent_bus.worker.gatekeeper import ReviewDecision, Verdict
+
+
+@pytest.mark.asyncio
+async def test_file_database_is_private_without_changing_existing_parent(tmp_path):
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o755)
+    parent.chmod(0o755)
+    path = parent / "bus.db"
+    database = Database(str(path))
+    await database.initialize()
+    try:
+        assert os.stat(parent).st_mode & 0o777 == 0o755
+        assert os.stat(path).st_mode & 0o777 == 0o600
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_file_database_is_private_before_sqlite_opens_it(tmp_path, monkeypatch):
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o755)
+    path = parent / "bus.db"
+    real_connect = database_module.aiosqlite.connect
+    observed_modes = []
+
+    def observed_connect(db_path, *args, **kwargs):
+        observed_modes.append(os.stat(path).st_mode & 0o777)
+        return real_connect(db_path, *args, **kwargs)
+
+    monkeypatch.setattr(database_module.aiosqlite, "connect", observed_connect)
+    database = Database(str(path))
+    await database.initialize()
+    try:
+        assert observed_modes == [0o600]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_file_database_allows_shared_parent_below_private_ancestor(tmp_path):
+    parent = tmp_path / "team-runtime"
+    parent.mkdir(mode=0o775)
+    parent.chmod(0o775)
+    database = Database(str(parent / "bus.db"))
+    await database.initialize()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_file_database_rejects_reachable_world_writable_parent():
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        parent = Path(directory)
+        parent.chmod(0o777)
+        database = Database(str(parent / "bus.db"))
+        with pytest.raises(PermissionError, match="writable by other users"):
+            await database.initialize()
+
+
+@pytest.mark.asyncio
+async def test_file_uri_mode_rw_does_not_create_missing_database(tmp_path):
+    path = tmp_path / "missing.db"
+    database = Database(f"file:{path}?mode=rw")
+    with pytest.raises(FileNotFoundError):
+        await database.initialize()
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_path_swapped_for_symlink_before_sqlite_open(tmp_path, monkeypatch):
+    path = tmp_path / "bus.db"
+    target = tmp_path / "target.db"
+    with closing(sqlite3.connect(target)) as connection:
+        connection.execute("CREATE TABLE sentinel(value TEXT)")
+        connection.commit()
+    real_connect = database_module.aiosqlite.connect
+
+    orphan = tmp_path / "orphan.db"
+
+    def swap_path_before_connect(db_path, *args, **kwargs):
+        path.rename(orphan)
+        path.symlink_to(target)
+        return real_connect(db_path, *args, **kwargs)
+
+    monkeypatch.setattr(database_module.aiosqlite, "connect", swap_path_before_connect)
+    database = Database(str(path))
+    with pytest.raises(RuntimeError, match="changed during secure open"):
+        await database.initialize()
+    with closing(sqlite3.connect(target)) as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+    assert tables == {"sentinel"}
+
+
+@pytest.mark.asyncio
+async def test_transaction_rejects_path_swapped_for_symlink_after_initialize(tmp_path):
+    path = tmp_path / "bus.db"
+    original = tmp_path / "original.db"
+    target = tmp_path / "target.db"
+    with closing(sqlite3.connect(target)) as connection:
+        connection.execute("CREATE TABLE sentinel(value TEXT)")
+        connection.commit()
+    database = Database(str(path))
+    await database.initialize()
+    path.rename(original)
+    path.symlink_to(target)
+    try:
+        with pytest.raises(RuntimeError, match="changed after initialization"):
+            await database.transaction(lambda connection: connection.execute(
+                "CREATE TABLE redirected(value TEXT)"
+            ))
+    finally:
+        await database.close()
+    with closing(sqlite3.connect(target)) as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+    assert tables == {"sentinel"}
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_symlinked_ancestor(tmp_path):
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real_parent, target_is_directory=True)
+    database = Database(str(alias / "bus.db"))
+    with pytest.raises(OSError):
+        await database.initialize()
+    assert not (real_parent / "bus.db").exists()
+
+
+def test_database_rejects_file_uri_authority():
+    with pytest.raises(ValueError, match="authority"):
+        Database("file://evil.invalid/tmp/authority.db?mode=rw")
+
+
+@pytest.mark.parametrize("uri", [
+    "file:named?mode=memory&mode=rw",
+    "file:named?mode=rw&mode=memory",
+])
+def test_database_rejects_duplicate_uri_modes(uri):
+    with pytest.raises(ValueError, match="mode"):
+        Database(uri)
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_second_initialize_while_active(tmp_path):
+    database = Database(str(tmp_path / "bus.db"))
+    await database.initialize()
+    try:
+        with pytest.raises(RuntimeError, match="already initialized"):
+            await database.initialize()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_database_serializes_concurrent_initialize(tmp_path, monkeypatch):
+    real_connect = database_module.aiosqlite.connect
+
+    async def delayed_connect(*args, **kwargs):
+        await asyncio.sleep(0.01)
+        return await real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(database_module.aiosqlite, "connect", delayed_connect)
+    database = Database(str(tmp_path / "bus.db"))
+    results = await asyncio.gather(database.initialize(), database.initialize(), return_exceptions=True)
+    assert sum(result is None for result in results) == 1
+    errors = [result for result in results if isinstance(result, BaseException)]
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert "already initialized" in str(errors[0])
+    descriptor = database._anchor_fd
+    assert descriptor is not None
+    await database.close()
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+
+
+@pytest.mark.asyncio
+async def test_close_waits_for_inflight_initialize_and_releases_resources(tmp_path, monkeypatch):
+    real_connect = database_module.aiosqlite.connect
+    entered_connect = asyncio.Event()
+    release_connect = asyncio.Event()
+
+    async def delayed_connect(*args, **kwargs):
+        entered_connect.set()
+        await release_connect.wait()
+        return await real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(database_module.aiosqlite, "connect", delayed_connect)
+    database = Database(str(tmp_path / "bus.db"))
+    initializing = asyncio.create_task(database.initialize())
+    await entered_connect.wait()
+    closing = asyncio.create_task(database.close())
+    await asyncio.sleep(0)
+    assert not closing.done()
+    release_connect.set()
+    await initializing
+    descriptor = database._anchor_fd
+    assert descriptor is not None
+    await closing
+    assert database._connection is None
+    assert database._anchor_fd is None
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_direct_sticky_world_writable_parent():
+    descriptor, raw_path = tempfile.mkstemp(prefix="agent-bus-permissions-", suffix=".db", dir="/tmp")
+    os.close(descriptor)
+    path = Path(raw_path)
+    path.unlink()
+    try:
+        database = Database(str(path))
+        with pytest.raises(PermissionError, match="writable by other users"):
+            await database.initialize()
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_file_database_creates_private_parent_directory(tmp_path):
+    parent = tmp_path / "private"
+    path = parent / "bus.db"
+    database = Database(str(path))
+    await database.initialize()
+    try:
+        assert os.stat(parent).st_mode & 0o777 == 0o700
+        assert os.stat(path).st_mode & 0o777 == 0o600
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_file_uri_database_is_private_without_changing_existing_parent(tmp_path):
+    parent = tmp_path / "uri-shared"
+    parent.mkdir(mode=0o755)
+    parent.chmod(0o755)
+    path = parent / "bus.db"
+    database = Database(f"file:{path}?mode=rwc")
+    await database.initialize()
+    try:
+        assert os.stat(parent).st_mode & 0o777 == 0o755
+        assert os.stat(path).st_mode & 0o777 == 0o600
+    finally:
+        await database.close()
 
 
 @pytest.fixture(params=['file', 'memory', 'temporary', 'uri', 'anonymous_uri', 'named_uri', 'encoded_uri',

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
-
+import pytest
 import yaml
 
+import agent_bus.project as project_module
 from agent_bus.project import (
     create_agent_config,
     create_plan,
@@ -63,10 +63,23 @@ def test_create_agent_config(tmp_path):
 
 
 def test_create_agent_config_without_init(tmp_path):
-    import pytest
-
     with pytest.raises(FileNotFoundError):
         create_agent_config("claude", {}, cwd=tmp_path)
+
+
+@pytest.mark.parametrize("agent_id", ["../escaped", "../../../outside", "a/b", "", ".hidden"])
+def test_agent_paths_reject_invalid_identity_before_writing(tmp_path, agent_id):
+    init_project(cwd=tmp_path)
+    with pytest.raises(ValueError, match="Invalid identity"):
+        create_agent_config(agent_id, {}, cwd=tmp_path)
+    with pytest.raises(ValueError, match="Invalid identity"):
+        generate_agent_protocol(agent_id, cwd=tmp_path)
+    assert not (tmp_path.parent / "escaped.yaml").exists()
+    assert not (tmp_path.parent / "ESCAPED.md").exists()
+
+
+def test_project_uses_dependency_neutral_identity_validation():
+    assert project_module.validate_id.__module__ == "agent_bus.validation"
 
 
 def test_create_and_get_plan(tmp_path):

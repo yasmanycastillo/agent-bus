@@ -9,10 +9,17 @@ from rich.console import Console
 
 from agent_bus.cli.display import set_current_agent
 from agent_bus.config import get_config_dir
-from agent_bus.security import load_session, sync_bus_client
+from agent_bus.security import load_session, sync_bus_client, validate_id
 from agent_bus.project import create_agent_config, create_plan, find_project_dir, get_agents_dir
 
 console = Console()
+
+
+def _validated_agent_ids(raw: str) -> list[str]:
+    agent_ids = list(dict.fromkeys(item.strip() for item in raw.split(",") if item.strip()))
+    for agent_id in agent_ids:
+        validate_id(agent_id)
+    return agent_ids
 
 
 def _read_readme(base: Path) -> str:
@@ -89,7 +96,7 @@ def run_setup(client, cwd: Path | None = None) -> None:
         console.print("[dim]plan.md ya existe, usando su contenido[/dim]")
         goal = ""
     elif readme_content:
-        console.print(f"[dim]README encontrado, usando como base del plan[/dim]")
+        console.print("[dim]README encontrado, usando como base del plan[/dim]")
         create_plan(f"# {base.name}\n\n{readme_content}", cwd=base)
         console.print("  [green]ok[/green] plan.md creado desde README")
         goal = readme_content[:200]
@@ -115,7 +122,7 @@ def run_setup(client, cwd: Path | None = None) -> None:
         console.print("\n[bold]2. Agentes participantes[/bold]")
         agents_input = click.prompt("  IDs separados por coma", default="claude,codex")
 
-    agent_ids = [a.strip() for a in agents_input.split(",") if a.strip()]
+    agent_ids = _validated_agent_ids(agents_input)
 
     agent_info = []
     for agent_id in agent_ids:
@@ -138,7 +145,7 @@ def run_setup(client, cwd: Path | None = None) -> None:
             }, cwd=base)
 
         # Ensure global profile
-        global_path = _create_global_profile(agent_id)
+        _create_global_profile(agent_id)
 
         # Register on bus
         payload = {"agent_id": agent_id, "display_name": display_name, "capabilities": caps}
@@ -151,9 +158,9 @@ def run_setup(client, cwd: Path | None = None) -> None:
         if resp.status_code != 409:
             resp.raise_for_status()
         if resp.status_code == 201:
-            console.print(f"    [green]ok[/green] registrado")
+            console.print("    [green]ok[/green] registrado")
         elif resp.status_code == 409:
-            console.print(f"    [yellow]ya existe[/yellow]")
+            console.print("    [yellow]ya existe[/yellow]")
 
         agent_info.append({"id": agent_id, "name": display_name})
 
@@ -190,8 +197,8 @@ def run_setup(client, cwd: Path | None = None) -> None:
         f"\n[bold green]Setup completo:[/bold green] "
         f"{len(agent_info)} agentes en {base.name}"
     )
-    console.print(f"  Proyecto:    [cyan].agent-bus/[/cyan]")
-    console.print(f"  Perfiles:    [cyan]~/.agent-bus/profiles/[/cyan]")
+    console.print("  Proyecto:    [cyan].agent-bus/[/cyan]")
+    console.print("  Perfiles:    [cyan]~/.agent-bus/profiles/[/cyan]")
     console.print(f"  Protocolos:  [cyan]{', '.join(a.upper() + '.md' for a in agent_ids)}[/cyan]")
-    console.print(f"  Comandos:    [cyan]agent-bus work task[/cyan], [cyan]agent-bus show[/cyan]")
-    console.print(f"  Handoff:     [cyan]agent-bus work handoff T1 codex[/cyan]\n")
+    console.print("  Comandos:    [cyan]agent-bus work task[/cyan], [cyan]agent-bus show[/cyan]")
+    console.print("  Handoff:     [cyan]agent-bus work handoff T1 codex[/cyan]\n")
