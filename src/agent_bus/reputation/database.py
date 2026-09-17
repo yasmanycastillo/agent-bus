@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import aiosqlite
+import asyncio
 import secrets
 import re
+import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 
 INBOX_SCHEMA = """
@@ -28,15 +32,6 @@ CREATE TABLE IF NOT EXISTS inbox (
 
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS coordination_operations (
-    session_id TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    operation_key TEXT NOT NULL,
-    fingerprint TEXT NOT NULL,
-    result_json TEXT NOT NULL,
-    PRIMARY KEY (session_id, kind, operation_key)
-);
-
 CREATE TABLE IF NOT EXISTS project_metadata (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     project_id TEXT NOT NULL
@@ -207,13 +202,39 @@ class ProjectMismatchError(ValueError):
 
 class Database:
     def __init__(self, db_path: str, project_id: str | None = None) -> None:
-        self.db_path = db_path
+        # Keep an anchor connection alive for temporary databases, so every
+        # independent transaction sees the same schema and committed data.
+        self.db_path = (
+            f"file:agent-bus-{secrets.token_hex(16)}?mode=memory&cache=shared"
+            if db_path in ("", ":memory:") else db_path
+        )
+        if self.db_path.startswith("file:"):
+            uri = urlsplit(self.db_path)
+            parameters = parse_qsl(uri.query, keep_blank_values=True)
+            if unquote(uri.path) == ":memory:" or ("mode", "memory") in parameters:
+                caches = [value for key, value in parameters if key == "cache"]
+                if any(value != "shared" for value in caches):
+                    raise ValueError("In-memory transactions require cache=shared; cache=private is unsupported")
+                if not caches:
+                    base, marker, fragment = self.db_path.partition("#")
+                    self.db_path = base + ("&" if "?" in base else "?") + "cache=shared" + marker + fragment
         self.project_id = project_id
         self._connection: aiosqlite.Connection | None = None
+        self._workers: set[asyncio.Task] = set()
+        self._closing = False
+        self._close_task: asyncio.Task | None = None
 
     async def initialize(self) -> None:
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._connection = await aiosqlite.connect(self.db_path)
+        if self._closing:
+            if self._close_task is None or not self._close_task.done():
+                raise RuntimeError("Database is closing")
+            self._close_task.result()
+            self._close_task = None
+            self._closing = False
+        if not self.db_path.startswith("file:"):
+            self.db_path = str(Path(self.db_path).absolute())
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._connection = await aiosqlite.connect(self.db_path, uri=True)
         self._connection.row_factory = aiosqlite.Row
         try:
             await self._connection.executescript(SCHEMA)
@@ -417,32 +438,81 @@ class Database:
         rows = await self.conn.execute_fetchall(
             "SELECT agent_id FROM worker_control WHERE paused = 1"
         )
-        return [r["agent_id"] for r in rows]
+        return [row["agent_id"] for row in rows]
 
-        """Ensure reviews table exists with idx_reviews_task_id."""
-        await self.conn.execute("BEGIN IMMEDIATE")
-        try:
-            await self.conn.execute(
-                """CREATE TABLE IF NOT EXISTS reviews (
-                    review_id TEXT PRIMARY KEY,
-                    task_id TEXT NOT NULL,
-                    reviewer_agent_id TEXT NOT NULL,
-                    reviewer_session_id TEXT NOT NULL,
-                    sha TEXT NOT NULL,
-                    verdict TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    evidence TEXT DEFAULT '{}',
-                    test_results TEXT DEFAULT '{}',
-                    created_at TEXT NOT NULL
-                )"""
-            )
-            await self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_reviews_task_id ON reviews(task_id)"
-            )
-            await self.conn.commit()
-        except BaseException:
-            await self.conn.rollback()
-            raise
+    @staticmethod
+    async def _wait_for_worker(worker):
+        """Defer even repeated cancellation until the worker has cleaned up."""
+        cancelled = None
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+            except BaseException:
+                break
+        if cancelled is not None:
+            # Retrieve a possible failure so cancellation does not leak an
+            # unobserved task exception. Cancellation takes precedence.
+            try:
+                worker.result()
+            except BaseException:
+                pass
+            raise cancelled
+        return worker.result()
+
+    async def transaction(self, operation, *, write=True):
+        """Run a synchronous callback in its own committed transaction.
+
+        Connection creation, writer reservation, callback and cleanup all run
+        in one worker job. No pending work on ``conn`` can absorb this commit.
+        Cancellation waits for commit/rollback and connection closure before
+        propagating. Read callbacks use a deferred, query-only snapshot.
+        Callbacks must be DB-only: contention may replay the entire callback
+        on a fresh connection after rollback, within a five-second retry budget.
+        """
+        if self._closing:
+            raise RuntimeError("Database is closing or closed")
+        self.conn  # Require an initialized database (including its memory anchor).
+
+        def runner():
+            deadline = time.monotonic() + 5
+            while True:
+                # Own the busy wait here: SQLite's per-statement timeout would
+                # otherwise add another five seconds at each attempt/stage.
+                connection = sqlite3.connect(self.db_path, uri=True, timeout=0)
+                connection.row_factory = sqlite3.Row
+                try:
+                    if not write:
+                        connection.execute("PRAGMA query_only = ON")
+                    connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+                    result = operation(connection)
+                    connection.commit()
+                    return result
+                except BaseException as exc:
+                    connection.rollback()
+                    # Shared-cache memory tables can return SQLITE_LOCKED from
+                    # the callback after BEGIN succeeds; file DBs can be busy
+                    # at COMMIT. Replay only after discarding all partial work.
+                    code = getattr(exc, "sqlite_errorcode", None)
+                    if (not isinstance(exc, sqlite3.OperationalError)
+                            or not isinstance(code, int)
+                            or (code & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)):
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    contention = exc
+                finally:
+                    connection.close()
+                time.sleep(min(0.01, remaining))
+                if time.monotonic() >= deadline:
+                    raise contention
+
+        worker = asyncio.create_task(asyncio.to_thread(runner))
+        self._workers.add(worker)
+        worker.add_done_callback(self._workers.discard)
+        return await self._wait_for_worker(worker)
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -451,6 +521,17 @@ class Database:
         return self._connection
 
     async def close(self) -> None:
-        if self._connection:
-            await self._connection.close()
-            self._connection = None
+        if self._close_task is None:
+            # Admission and worker registration contain no await, so close
+            # cannot miss a transaction accepted on this event loop.
+            self._closing = True
+
+            async def finish():
+                if self._workers:
+                    await asyncio.gather(*self._workers, return_exceptions=True)
+                if self._connection:
+                    await self._connection.close()
+                    self._connection = None
+
+            self._close_task = asyncio.create_task(finish())
+        await self._wait_for_worker(self._close_task)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -242,7 +243,7 @@ class MessageBus:
                             actors.append("decided_by")
                         if path == "/register" or path.startswith("/locks/") or (
                             len(parts) == 3 and parts[0] == "tasks"
-                            and parts[2] in ("claim", "done", "review", "lock-files")
+                            and parts[2] in ("claim", "done", "review", "lock-files", "block")
                         ):
                             actors.append("agent_id")
                         if path.startswith("/kickoff/step/"):
@@ -570,9 +571,13 @@ class MessageBus:
         @self.app.post("/tasks/{task_id}/block")
         async def block_task(task_id: str, request: Request, req: dict | None = None):
             reason = req.get("reason") if req else None
-            task = await self.tasks.block(task_id, reason=reason)
+            principal = request.state.principal
+            if principal is None:
+                raise HTTPException(401, "Valid bearer session required", headers={"WWW-Authenticate": "Bearer"})
+            actor = principal.agent_id if not principal.is_admin else None
+            task = await self.tasks.block(task_id, reason=reason, actor=actor)
             if not task:
-                return JSONResponse({"error": "Task not found"}, status_code=404)
+                return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
 
         # --- Review endpoints ---
@@ -580,15 +585,16 @@ class MessageBus:
         @self.app.post("/reviews")
         async def create_review(req: CreateReviewRequest, request: Request):
             principal = request.state.principal
-            reviewer_agent_id = req.reviewer_agent_id
-            if not reviewer_agent_id and principal:
-                reviewer_agent_id = principal.agent_id
-            reviewer_agent_id = reviewer_agent_id or "gatekeeper"
-
-            reviewer_session_id = req.reviewer_session_id
-            if not reviewer_session_id and principal:
-                reviewer_session_id = getattr(principal, "session_id", "") or ""
-            reviewer_session_id = reviewer_session_id or ""
+            if principal is None:
+                raise HTTPException(401, "Valid bearer session required", headers={"WWW-Authenticate": "Bearer"})
+            # Legacy identity fields are assertions, never authority. Empty
+            # values mean unspecified for clients serializing default fields.
+            if req.reviewer_agent_id and req.reviewer_agent_id != principal.agent_id:
+                return JSONResponse({"error": "Reviewer does not match authenticated session"}, status_code=403)
+            if req.reviewer_session_id and req.reviewer_session_id != principal.session_id:
+                return JSONResponse({"error": "Reviewer session does not match authenticated session"}, status_code=403)
+            reviewer_agent_id = principal.agent_id
+            reviewer_session_id = principal.session_id
 
             try:
                 verdict_enum = Verdict(req.verdict)
@@ -597,7 +603,8 @@ class MessageBus:
 
             import uuid
             decision = ReviewDecision(
-                review_id=req.review_id or f"rev-{uuid.uuid4().hex[:8]}",
+                # Accept serialized legacy decisions, but always allocate the persisted ID.
+                review_id=f"rev-{uuid.uuid4().hex}",
                 task_id=req.task_id,
                 sha=req.sha,
                 verdict=verdict_enum,
@@ -606,9 +613,16 @@ class MessageBus:
                 test_results=req.test_results,
                 reviewer_agent_id=reviewer_agent_id,
                 reviewer_session_id=reviewer_session_id,
-                created_at=req.created_at or datetime.now(timezone.utc),
+                created_at=datetime.now(timezone.utc),
             )
-            saved = await self.reviews.add(decision)
+            try:
+                saved = await self.reviews.add(decision)
+            except sqlite3.IntegrityError as exc:
+                if getattr(exc, "sqlite_errorcode", None) in (
+                    sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY, sqlite3.SQLITE_CONSTRAINT_UNIQUE,
+                ):
+                    raise HTTPException(409, "Review uniqueness conflict; retry the request") from exc
+                raise
             return saved.model_dump(mode="json")
 
         @self.app.get("/reviews")
@@ -867,7 +881,7 @@ class MessageBus:
             return {
                 "tasks": [t.model_dump(mode="json") for t in tasks],
                 "agents": [a.model_dump(mode="json") for a in agents],
-                "locks": [l.model_dump(mode="json", exclude={"acquisition_id"}) for l in locks],
+                "locks": [lock.model_dump(mode="json", exclude={"acquisition_id"}) for lock in locks],
                 "decisions": [d.model_dump(mode="json") for d in decisions],
                 "paused_workers": sorted(paused),
                 "pending_approvals": len([m for m in human_inbox if m.reply_needed]),

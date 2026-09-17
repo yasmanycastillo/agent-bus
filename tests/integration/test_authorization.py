@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -26,6 +27,108 @@ async def secured(tmp_db, monkeypatch):
 
 def bearer(sessions, agent="alice"):
     return {"Authorization": f"Bearer {sessions[agent]['token']}"}
+
+
+@pytest.mark.parametrize("agent,owner,expected", [
+    ("alice", "alice", 200), ("lead", "alice", 200),
+    ("bob", "alice", 403), ("alice", "free", 403),
+    ("lead", "free", 200),
+])
+async def test_block_requires_owner_or_admin(secured, agent, owner, expected):
+    bus, client, sessions = secured
+    original = await bus.tasks.create("T1", "Task", owner=owner)
+    response = await client.post("/tasks/T1/block", json={"reason": "Dependency"}, headers=bearer(sessions, agent))
+    assert response.status_code == expected
+    task = await bus.tasks.get("T1")
+    if expected == 200:
+        assert task.status.value == "blocked"
+        assert task.owner == owner
+    else:
+        assert task == original
+
+
+async def test_block_rejects_spoofed_actor_and_handles_missing_or_done(secured):
+    bus, client, sessions = secured
+    original = await bus.tasks.create("T1", "Task", owner="alice")
+    response = await client.post("/tasks/T1/block", json={"agent_id": "bob"}, headers=bearer(sessions))
+    assert response.status_code == 403
+    assert await bus.tasks.get("T1") == original
+    assert (await client.post("/tasks/T1/block")).status_code == 401
+    assert (await client.post("/tasks/missing/block", headers=bearer(sessions))).status_code == 404
+    await bus.tasks.complete("T1")
+    for agent in ("alice", "lead"):
+        assert (await client.post("/tasks/T1/block", headers=bearer(sessions, agent))).status_code == 409
+    assert (await bus.tasks.get("T1")).status.value == "done"
+
+
+async def test_block_checks_owner_at_update(secured, monkeypatch):
+    bus, client, sessions = secured
+    await bus.tasks.create("T1", "Task", owner="alice")
+    original = bus.tasks.block
+
+    async def reassigned_before_update(task_id, reason=None, actor=None):
+        await bus.tasks.transfer("T1", "bob", actor="lead", session_id=sessions["lead"]["session_id"])
+        return await original(task_id, reason=reason, actor=actor)
+
+    monkeypatch.setattr(bus.tasks, "block", reassigned_before_update)
+    assert (await client.post("/tasks/T1/block", headers=bearer(sessions))).status_code == 403
+    task = await bus.tasks.get("T1")
+    assert task.owner == "bob"
+    assert task.status.value == "in_progress"
+
+
+@pytest.mark.parametrize("agent", ["alice", "lead"])
+@pytest.mark.parametrize("identity", ["omitted", "matching", "empty", "null"])
+@pytest.mark.parametrize("timestamp", [None, "2000-01-01T00:00:00Z", "2099-01-01T00:00:00Z"])
+async def test_review_identity_and_time_are_server_authoritative(secured, agent, identity, timestamp):
+    bus, client, sessions = secured
+    body = {"task_id": "T1", "sha": "abc123", "verdict": "approve", "reason": "Reviewed"}
+    if identity != "omitted":
+        body["reviewer_agent_id"] = agent if identity == "matching" else ("" if identity == "empty" else None)
+        body["reviewer_session_id"] = sessions[agent]["session_id"] if identity == "matching" else ("" if identity == "empty" else None)
+    if timestamp:
+        body["created_at"] = timestamp
+    before = datetime.now(timezone.utc)
+    response = await client.post("/reviews", json=body, headers=bearer(sessions, agent))
+    after = datetime.now(timezone.utc)
+    assert response.status_code == 200
+    review = await bus.reviews.get(response.json()["review_id"])
+    assert review.reviewer_agent_id == agent
+    assert review.reviewer_session_id == sessions[agent]["session_id"]
+    assert before <= review.created_at <= after
+    assert review.model_dump(mode="json") == response.json()
+    audit = await bus.db.conn.execute_fetchall("SELECT * FROM audit_log WHERE action = 'gatekeeper_review'")
+    assert len(audit) == 1
+    assert audit[0]["actor_agent_id"] == agent
+    assert audit[0]["actor_session_id"] == sessions[agent]["session_id"]
+    assert datetime.fromisoformat(audit[0]["created_at"]) == review.created_at
+
+
+@pytest.mark.parametrize("agent", ["alice", "lead"])
+@pytest.mark.parametrize("spoof", ["integrator", "other_agent", "other_session", "same_agent_session"])
+async def test_reviews_reject_contradictory_identity_without_writes(secured, agent, spoof):
+    bus, client, sessions = secured
+    body = {"task_id": "T1", "sha": "abc123", "verdict": "approve", "reason": "Forged"}
+    if spoof in ("integrator", "other_agent"):
+        body["reviewer_agent_id"] = "integrator" if spoof == "integrator" else "bob"
+    elif spoof == "other_session":
+        body["reviewer_session_id"] = sessions["bob"]["session_id"]
+    else:
+        body["reviewer_session_id"] = (await bus.sessions.create(agent))["session_id"]
+    response = await client.post("/reviews", json=body, headers=bearer(sessions, agent))
+    assert response.status_code == 403
+    assert await bus.reviews.list_all() == []
+    assert await bus.db.conn.execute_fetchall("SELECT * FROM audit_log") == []
+
+
+async def test_review_requires_authentication(secured):
+    bus, client, _ = secured
+    response = await client.post("/reviews", json={
+        "task_id": "T1", "sha": "abc123", "verdict": "approve", "reason": "Forged",
+        "reviewer_agent_id": "integrator",
+    })
+    assert response.status_code == 401
+    assert await bus.reviews.list_all() == []
 
 
 @pytest.mark.parametrize("path", ["/status", "/agents", "/tasks", "/locks", "/decisions", "/project/context", "/docs", "/openapi.json", "/inbox/alice", "/events/alice", "/events/all"])
@@ -322,3 +425,77 @@ async def test_assignment_states_remain_executable(secured):
     assert (await bus.tasks.get("T1")).owner == "bob"
     assert (await bus.tasks.get("T1")).status.value == "in_progress"
     assert await bus.inbox.get_inbox("free") == []
+
+
+@pytest.mark.parametrize("path", ["/tasks/T1/block", "/reviews"])
+async def test_sensitive_posts_require_principal_in_unsigned_mode(secured, monkeypatch, path):
+    bus, client, sessions = secured
+    monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "1")
+    original = await bus.tasks.create("T1", "Task", owner="bob")
+    body = {"task_id": "T1", "sha": "abc", "verdict": "approve", "reason": "Forged",
+            "reviewer_agent_id": "integrator", "reviewer_session_id": sessions["lead"]["session_id"]}
+    response = await client.post(path, json=body)
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert await bus.tasks.get("T1") == original
+    assert await bus.reviews.list_all() == []
+    assert await bus.db.conn.execute_fetchall("SELECT * FROM audit_log") == []
+    # Compatibility mode still enforces the authenticated actor's permissions.
+    response = await client.post(path, json=body, headers=bearer(sessions))
+    assert response.status_code == 403
+    assert await bus.tasks.get("T1") == original
+    assert await bus.reviews.list_all() == []
+
+
+@pytest.mark.parametrize("unsigned", ["0", "1"])
+async def test_serialized_review_ids_are_replaced_on_every_post(secured, monkeypatch, unsigned):
+    from uuid import UUID
+
+    from agent_bus.worker.gatekeeper import ReviewDecision, Verdict
+
+    bus, client, sessions = secured
+    monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", unsigned)
+    legacy = ReviewDecision(
+        review_id="rev-client-chosen", task_id="T1", sha="abc", verdict=Verdict.APPROVE,
+        reason="Reviewed", reviewer_agent_id="alice",
+        created_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+    )
+    ids = []
+    for supplied_id in (legacy.review_id, legacy.review_id, None):
+        body = legacy.model_dump(mode="json")
+        if supplied_id is None:
+            body.pop("review_id")
+        else:
+            body["review_id"] = supplied_id
+        before = datetime.now(timezone.utc)
+        response = await client.post("/reviews", json=body, headers=bearer(sessions))
+        assert response.status_code == 200
+        data = response.json()
+        review_id = data["review_id"]
+        assert review_id != legacy.review_id
+        assert len(review_id) == 36  # rev- plus all 32 UUID hex digits
+        assert UUID(review_id.removeprefix("rev-")).version == 4
+        assert data["reviewer_agent_id"] == "alice"
+        assert data["reviewer_session_id"] == sessions["alice"]["session_id"]
+        assert datetime.fromisoformat(data["created_at"]) >= before
+        assert (await bus.reviews.get(review_id)).model_dump(mode="json") == data
+        ids.append(review_id)
+    assert len(set(ids)) == 3
+    assert await bus.reviews.get(legacy.review_id) is None
+    assert len(await bus.db.conn.execute_fetchall("SELECT * FROM audit_log")) == 3
+
+
+async def test_internal_review_id_collision_returns_clean_conflict(secured, monkeypatch):
+    import uuid
+
+    bus, client, sessions = secured
+    fixed = uuid.uuid4()
+    monkeypatch.setattr(uuid, "uuid4", lambda: fixed)
+    body = {"task_id": "T1", "sha": "abc", "verdict": "approve", "reason": "Reviewed"}
+    first = await client.post("/reviews", json=body, headers=bearer(sessions))
+    assert first.status_code == 200
+    second = await client.post("/reviews", json=body, headers=bearer(sessions))
+    assert second.status_code == 409
+    assert len(await bus.reviews.list_all()) == 1
+    assert len(await bus.db.conn.execute_fetchall("SELECT * FROM audit_log")) == 1
+    assert (await bus.reviews.get(first.json()["review_id"])).model_dump(mode="json") == first.json()
