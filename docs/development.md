@@ -3,9 +3,11 @@
 ## Preparar el entorno
 
 ```sh
-uv sync --locked --extra dev
+uv sync --locked --all-extras --dev
 uv run agent-bus --help
-uv run pytest
+uv run ruff check .
+uv run python scripts/check_mypy_baseline.py
+uv run pytest -q
 ```
 
 El entorno validado usa Python 3.12 o posterior en Linux; consulta el
@@ -33,6 +35,11 @@ la revisión e integración Git son operaciones separadas.
 
 - Ejecuta primero las pruebas del área modificada y luego la suite completa
   antes de integrar código en `main`.
+- Ejecuta `uv run ruff check .` y el gate incremental
+  `uv run python scripts/check_mypy_baseline.py`. El baseline registra deuda
+  heredada: no equivale a afirmar que el proyecto esté completamente tipado.
+- Reduce el baseline sólo después de corregir errores y actualízalo explícitamente
+  con `uv run python scripts/check_mypy_baseline.py --update`.
 - Usa `git diff --check` para detectar errores de espacios.
 - Al editar guías, comprueba sus enlaces locales y los comandos con `--help`.
 - Conserva las distinciones entre pruebas con actores programados, modelos reales
