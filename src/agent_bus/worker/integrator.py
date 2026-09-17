@@ -1009,4 +1009,3 @@ class BranchIntegrator:
         except Exception as exc:
             logger.error(f"Failed to notify author {author_agent} of review feedback: {exc}")
             return False
-
