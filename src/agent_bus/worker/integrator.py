@@ -269,6 +269,15 @@ class BranchIntegrator:
             reviewer_agent_id=self.agent_id,
         )
         decision = self.gatekeeper.evaluate(review_request)
+        if decision.sha != candidate_sha:
+            return IntegratorResult(
+                success=False,
+                merged=False,
+                status="blocked",
+                output=test_output,
+                error="Gatekeeper reviewed a different commit; integration rejected.",
+                metadata={"candidate_sha": candidate_sha, "integration_sha": integration_sha or None},
+            )
 
         # Record the review decision in the bus audit trail (POST /reviews).
         # The review MUST be persisted before mutating main: if persistence

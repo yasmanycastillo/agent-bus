@@ -30,8 +30,8 @@ async def candidate(tmp_path):
     git(wt, 'commit', '-m', 'feature')
     integrator = BranchIntegrator(repo_dir=repo, require_approval=True)
     integrator.run_tests = AsyncMock(return_value=(True, 'tests passed'))
-    integrator._record_review = AsyncMock()
-    integrator._mark_task_completed = AsyncMock()
+    integrator._record_review = AsyncMock(side_effect=lambda decision: decision)
+    integrator._finalize_merge = AsyncMock(return_value=(True, None))
     integrator._notify_author_failure = AsyncMock()
     return integrator, repo, wt
 
@@ -49,7 +49,7 @@ async def test_success_merges_the_reviewed_sha(candidate):
     assert git(repo, 'rev-parse', 'HEAD^2') == sha
 
 
-async def test_commit_created_during_tests_is_rejected(candidate):
+async def test_commit_created_during_tests_does_not_replace_pinned_candidate(candidate):
     integrator, repo, wt = candidate
     initial = git(repo, 'rev-parse', 'HEAD')
     async def tests(*args):
@@ -57,10 +57,12 @@ async def test_commit_created_during_tests_is_rejected(candidate):
         git(wt, 'commit', '-am', 'changed during tests')
         return True, 'passed'
     integrator.run_tests = tests
+    reviewed = git(wt, 'rev-parse', 'HEAD')
     result = await integrate(integrator, wt)
-    assert result.status == 'rejected' and not result.merged
-    assert git(repo, 'rev-parse', 'HEAD') == initial
-    integrator._record_review.assert_not_called()
+    assert result.success and result.merged
+    assert result.metadata['review']['sha'] == reviewed
+    assert git(repo, 'rev-parse', 'HEAD') != initial
+    assert (repo / 'feature').read_text() == 'reviewed'
 
 
 async def test_branch_moves_after_review_merges_only_original_sha(candidate):
@@ -69,6 +71,7 @@ async def test_branch_moves_after_review_merges_only_original_sha(candidate):
     async def record(decision):
         (wt / 'feature').write_text('unreviewed successor')
         git(wt, 'commit', '-am', 'new unreviewed commit')
+        return decision
     integrator._record_review = record
     result = await integrate(integrator, wt)
     assert result.success, result
@@ -82,28 +85,32 @@ async def test_target_moves_after_review_refuses_merge(candidate):
         (repo / 'other').write_text('new target')
         git(repo, 'add', '.')
         git(repo, 'commit', '-m', 'target advanced')
+        return decision
     integrator._record_review = record
     result = await integrate(integrator, wt)
     assert not result.merged
-    assert 'Target changed' in result.output
+    assert 'moved from' in result.output
     assert not (repo / 'feature').exists()
 
 
-async def test_dirty_candidate_after_tests_refuses_review(candidate):
+async def test_dirty_candidate_after_tests_does_not_replace_pinned_candidate(candidate):
     integrator, repo, wt = candidate
     async def tests(*args):
         (wt / 'feature').write_text('uncommitted edits')
         return True, 'passed'
     integrator.run_tests = tests
+    reviewed = git(wt, 'rev-parse', 'HEAD')
     result = await integrate(integrator, wt)
-    assert result.status == 'rejected'
-    integrator._record_review.assert_not_called()
+    assert result.success and result.merged
+    assert result.metadata['review']['sha'] == reviewed
+    assert (repo / 'feature').read_text() == 'reviewed'
 
 
 async def test_non_git_checkout_fails_closed(tmp_path):
     integrator = BranchIntegrator(repo_dir=tmp_path)
     result = await integrate(integrator, tmp_path)
-    assert result.status == 'rejected'
+    assert result.status == 'error'
+    assert not result.merged
 
 
 async def test_gatekeeper_cannot_approve_another_sha(candidate):
