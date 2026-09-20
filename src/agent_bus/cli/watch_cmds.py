@@ -135,6 +135,20 @@ async def _record_failure(client, agent_id: str, message_id: str, error: str) ->
 SAFE_READONLY_TOOLS = frozenset({"Read", "Grep", "Glob", "view_file", "search", "read_file", "ls"})
 
 
+def validate_watch_tools(tools: str | None, allow_mutating_tools: bool = False) -> None:
+    """Validate that requested tools only contain safe read-only tools unless allow_mutating_tools is True."""
+    if not tools or allow_mutating_tools:
+        return
+    requested = {t.strip() for t in tools.split(",") if t.strip()}
+    disallowed = sorted(t for t in requested if t not in SAFE_READONLY_TOOLS)
+    if disallowed:
+        raise ValueError(
+            f"Herramientas no permitidas en modo watch: {', '.join(disallowed)}. "
+            f"Solo se permiten herramientas de solo lectura ({', '.join(sorted(SAFE_READONLY_TOOLS))}). "
+            f"Usa --allow-mutating-tools para habilitarlas explícitamente."
+        )
+
+
 async def run_turn(
     agent_id: str,
     message: dict,
@@ -149,6 +163,7 @@ async def run_turn(
     on_state=None,
 ) -> str | None:
     """Send one durable reply and acknowledge only after the CLI succeeds."""
+    validate_watch_tools(tools, allow_mutating_tools=allow_mutating_tools)
     bus_url = get_bus_url(bus_url)
     sessions_file = sessions_file or _session_file(agent_id)
     message_id = message["message_id"]
@@ -275,6 +290,7 @@ class PendingMessageWatcher:
         self.agent_id = agent_id
         self.cli = cli
         self.model = model
+        validate_watch_tools(tools, allow_mutating_tools=allow_mutating_tools)
         self.tools = tools
         self.allow_mutating_tools = allow_mutating_tools
         self.bus_url = get_bus_url(bus_url)
@@ -382,15 +398,10 @@ def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: b
             raise click.ClickException("Proveedor sin CLI conocido; indica --cli explícitamente")
     if model and cli not in ("grok", "claude", "codex", "agy", "aider"):
         raise click.UsageError(f"--model no está disponible para --cli {cli}")
-    if tools and not allow_mutating_tools:
-        requested = {t.strip() for t in tools.split(",") if t.strip()}
-        disallowed = [t for t in requested if t not in SAFE_READONLY_TOOLS]
-        if disallowed:
-            raise click.UsageError(
-                f"Herramientas no permitidas en modo watch: {', '.join(sorted(disallowed))}. "
-                f"Solo se permiten herramientas de solo lectura ({', '.join(sorted(SAFE_READONLY_TOOLS))}). "
-                f"Usa --allow-mutating-tools para habilitarlas explícitamente."
-            )
+    try:
+        validate_watch_tools(tools, allow_mutating_tools=allow_mutating_tools)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
     if not dry_run and not shutil.which(cli):
         raise click.ClickException(f"CLI '{cli}' no instalado o no disponible en PATH")
     # Fail immediately for missing/mismatched credentials, including dry-run.

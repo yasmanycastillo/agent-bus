@@ -121,7 +121,8 @@ def test_status_uses_lock_not_surviving_pid_file(tmp_path):
         assert watcher_status('bob', path)['state'] == 'auth_error'
         assert not watcher_status('bob', path)['can_dispatch']
         record_status(path, 'grok', 'waiting')
-        value = json.loads(path.read_text()); value['updated_at'] -= 60
+        value = json.loads(path.read_text())
+        value['updated_at'] -= 60
         path.write_text(json.dumps(value))
         assert watcher_status('bob', path)['state'] == 'unknown'
     assert watcher_status('bob', path)['state'] == 'stopped'
@@ -136,7 +137,8 @@ async def test_expired_session_recovers_after_replacement(secure_bus, monkeypatc
         sent = await c.post('/messages', json={'to_agent': 'bob', 'body': {'text': 'Answer'}, 'reply_needed': True})
         sent.raise_for_status()
     original = secure_bus.paths['bob'].read_text()
-    expired = json.loads(original); expired['expires_at'] = time.time() - 1
+    expired = json.loads(original)
+    expired['expires_at'] = time.time() - 1
     secure_bus.paths['bob'].write_text(json.dumps(expired))
     invoked = []
     async def run(*a, **kw):
@@ -220,3 +222,22 @@ async def test_grok_turn_tools_deny_and_allow_mutating(hub, monkeypatch, tmp_pat
     )
     assert calls[1][calls[1].index('--tools') + 1] == 'Read,Edit'
     assert '--deny' not in calls[1]
+
+
+async def test_run_turn_and_watcher_reject_disallowed_tools_directly(hub, tmp_path):
+    sessions = tmp_path / 'sessions.json'
+
+    # Direct call to run_turn with unwhitelisted tool raises ValueError
+    with pytest.raises(ValueError, match="Herramientas no permitidas en modo watch: Delete"):
+        await watch.run_turn(
+            'bob', hub.message, {}, cli='grok', sessions_file=sessions,
+            tools='Read,Delete', allow_mutating_tools=False
+        )
+
+    # PendingMessageWatcher initialization also rejects unwhitelisted tools
+    with pytest.raises(ValueError, match="Herramientas no permitidas en modo watch: Delete"):
+        watch.PendingMessageWatcher('bob', tools='Read,Delete', allow_mutating_tools=False)
+
+    # With allow_mutating_tools=True, PendingMessageWatcher accepts them
+    watcher = watch.PendingMessageWatcher('bob', tools='Read,Delete', allow_mutating_tools=True)
+    assert watcher.tools == 'Read,Delete'
