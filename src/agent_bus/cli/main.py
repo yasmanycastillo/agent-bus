@@ -740,6 +740,10 @@ from agent_bus.cli.orchestrator_cmds import breakdown, orchestrate  # noqa: E402
 app.add_command(breakdown)
 app.add_command(orchestrate)
 
+from agent_bus.cli.mcp_cmds import mcp  # noqa: E402
+
+app.add_command(mcp)
+
 
 
 @show.command("dashboard")
@@ -1081,6 +1085,9 @@ def mcp_server_cmd(bus_url: str, agent_id: str | None):
         asyncio.run(run_mcp_server(bus_url=bus_url, agent_id=agent_id))
     except AuthenticationError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+mcp.add_command(mcp_server_cmd, name="run")
 
 
 @app.command("hook-inbox", hidden=True)
