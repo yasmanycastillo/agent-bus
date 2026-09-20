@@ -309,7 +309,12 @@ class TaskManager:
         await self._db.conn.commit()
         return await self.get(task_id)
 
-    async def complete(self, task_id: str, actor: str | None = None) -> Task | None:
+    async def complete(
+        self,
+        task_id: str,
+        actor: str | None = None,
+        evidence: dict[str, Any] | None = None,
+    ) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
         condition = " AND owner = ? AND status IN ('in_progress', 'in_review')" if actor else " AND status != 'done'"
         params = (now, task_id, actor) if actor else (now, task_id)
@@ -320,6 +325,17 @@ class TaskManager:
         if not rows:
             await self._db.conn.commit()
             return None
+
+        if evidence:
+            try:
+                await self._db.conn.execute(
+                    """INSERT INTO audit_log
+                    (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    ("complete_with_evidence", task_id, actor or "unknown", json.dumps(evidence), "", "done", now),
+                )
+            except Exception:
+                pass
 
         # Unblock any blocked tasks whose dependencies are now all 'done'
         blocked_rows = await self._db.conn.execute_fetchall(

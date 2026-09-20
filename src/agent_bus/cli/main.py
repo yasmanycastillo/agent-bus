@@ -156,6 +156,20 @@ def init(bus_url):
     # Also ensure global config exists
     _ensure_global_config()
 
+    import subprocess
+    git_check = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+    )
+    if git_check.returncode != 0:
+        click.secho(
+            "⚠️  Aviso: Este directorio no es un repositorio Git inicializado.\n"
+            "   Para coordinar agentes con worktrees, locks y ramas de integración,\n"
+            "   te recomendamos ejecutar 'git init' y crear un commit inicial antes de operar.",
+            fg="yellow",
+        )
+
     # Generate protocol files for any already-configured agents
     from agent_bus.project import generate_all_agent_protocols
 
@@ -426,12 +440,26 @@ def work_reassign(task_id: str, new_owner: str):
             click.echo(f"Error: {_explain_error(resp)}")
 
 
+@work.command("review")
+@click.argument("task_id")
+def work_review(task_id: str):
+    """Enviar tarea propia a revisión para integración."""
+    with _client() as client:
+        resp = client.post(f"/tasks/{task_id}/review")
+        if resp.status_code == 200:
+            click.echo(f"Tarea {task_id} enviada a revisión")
+        else:
+            click.echo(f"Error: {_explain_error(resp)}")
+
+
 @work.command("done")
 @click.argument("task_id")
-def work_done(task_id: str):
+@click.option("--evidence", default=None, help="Evidencia o resumen del trabajo completado")
+def work_done(task_id: str, evidence: str | None = None):
     """Marcar tarea como completada."""
+    payload = {"evidence": {"summary": evidence}} if evidence else {}
     with _client() as client:
-        resp = client.post(f"/tasks/{task_id}/done")
+        resp = client.post(f"/tasks/{task_id}/done", json=payload)
         if resp.status_code == 200:
             click.echo(f"Tarea {task_id} completada")
         else:

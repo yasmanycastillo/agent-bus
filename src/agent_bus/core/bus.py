@@ -544,7 +544,18 @@ class MessageBus:
         async def complete_task(task_id: str, request: Request):
             principal = request.state.principal
             actor = None if (principal and principal.is_admin) else (principal.agent_id if principal else None)
-            task = await self.tasks.complete(task_id, actor=actor)
+            evidence = None
+            if request.headers.get("content-type", "").startswith("application/json"):
+                try:
+                    body = await request.json()
+                    if isinstance(body, dict):
+                        evidence = body.get("evidence")
+                except Exception:
+                    pass
+            if evidence is not None:
+                task = await self.tasks.complete(task_id, actor=actor, evidence=evidence)
+            else:
+                task = await self.tasks.complete(task_id, actor=actor)
             if not task:
                 return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")

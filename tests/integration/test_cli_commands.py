@@ -115,3 +115,38 @@ def test_project_option_preserves_invocation_relative_runtime(tmp_path, monkeypa
     assert observed == [(tmp_path / 'runtime', str(tmp_path / 'data/hub.db'), str(tmp_path / 'credentials/alice.json'))]
     assert Path.cwd() == tmp_path
     assert os.environ['AGENT_BUS_CONFIG_DIR'] == 'runtime'
+
+
+def test_work_review_and_work_done_with_evidence(monkeypatch):
+    from unittest.mock import MagicMock
+    from agent_bus.cli import main
+
+    posted = []
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def post(self, url, json=None):
+            posted.append((url, json))
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"task_id": "T1", "status": "ok"}
+            return resp
+
+    monkeypatch.setattr(main, "_client", lambda: FakeClient())
+    runner = CliRunner()
+
+    res_rev = runner.invoke(main.app, ["work", "review", "T101"])
+    assert res_rev.exit_code == 0
+    assert "enviada a revisión" in res_rev.output
+    assert posted[-1] == ("/tasks/T101/review", None)
+
+    res_done = runner.invoke(main.app, ["work", "done", "T101", "--evidence", "pytest green and diff verified"])
+    assert res_done.exit_code == 0
+    assert "completada" in res_done.output
+    assert posted[-1] == ("/tasks/T101/done", {"evidence": {"summary": "pytest green and diff verified"}})
+

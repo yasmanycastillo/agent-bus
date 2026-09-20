@@ -185,6 +185,8 @@ class AgentRunner:
             )
 
         cmd = [claude_bin, "-p", prompt, "--output-format", "json"]
+        if self.model:
+            cmd.extend(["--model", self.model])
 
         if thread_id and thread_id in self.session_map:
             cmd.extend(["--resume", self.session_map[thread_id]])

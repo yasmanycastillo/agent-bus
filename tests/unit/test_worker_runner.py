@@ -127,3 +127,22 @@ async def test_real_provider_adapters_use_headless_commands(monkeypatch, provide
     monkeypatch.setattr(runner, "_run_subprocess", fake_subprocess)
     await runner.execute_turn("hello", thread_id="t")
     assert calls[0][1:1 + len(expected)] == expected
+
+
+@pytest.mark.asyncio
+async def test_claude_runner_passes_model(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/claude" if name == "claude" else None)
+    calls = []
+
+    async def fake_subprocess(cmd, timeout, thread_id=None):
+        calls.append(cmd)
+        return RunnerResult(True, '{"result": "success from claude"}')
+
+    runner = AgentRunner("claude", provider="claude", model="glm-5.3")
+    monkeypatch.setattr(runner, "_run_subprocess", fake_subprocess)
+    result = await runner.execute_turn("test prompt")
+    assert result.success is True
+    assert result.output == "success from claude"
+    assert "--model" in calls[0]
+    assert calls[0][calls[0].index("--model") + 1] == "glm-5.3"
+
