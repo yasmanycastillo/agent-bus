@@ -32,6 +32,32 @@ Sigue la [guía de primer uso](docs/first-run.md) para conectar los clientes,
 iniciar listeners y resolver problemas. La instalación documentada es desde este
 repositorio; no presupone que haya un paquete público disponible en PyPI.
 
+### Configurar clientes MCP automáticamente
+
+Configura `agent-bus` directamente en los clientes soportados (**Cursor**, **Claude**, **Gemini / Antigravity**, **Codex**, **Grok**) sin editar archivos JSON a mano:
+
+```sh
+# Instalar en todos los clientes en el proyecto actual:
+agent-bus mcp install --client all
+
+# Instalar para un agente específico en clientes puntuales:
+agent-bus mcp install --client cursor,claude --agent hermes
+
+# Instalar a nivel global en la máquina del usuario (~/.cursor, ~/.config/Claude, ~/.gemini, etc.):
+agent-bus mcp install --client gemini --global
+
+# Simular qué archivos y configuraciones se tocarían sin modificarlos:
+agent-bus mcp install --client all --dry-run
+
+# Ver el snippet JSON resultante sin escribir en disco:
+agent-bus mcp show --client codex
+
+# Desinstalar la configuración MCP de un cliente:
+agent-bus mcp uninstall --client cursor
+```
+
+La instalación realiza una combinación no destructiva (*merge*): preserva cualquier otro servidor MCP preexistente en tus archivos de configuración.
+
 ## Probar sin modelos
 
 ```sh

@@ -19,6 +19,26 @@ El JSON generado fija intérprete, proyecto, base, URL y ruta de la credencial;
 no contiene el token. Conserva el entorno Python al que apunta. El comando
 `mcp-server` no arranca el hub ni provisiona credenciales.
 
+## Instalación automática en clientes
+
+Puedes configurar directamente tus clientes sin copiar ni editar JSON manualmente:
+
+```sh
+# Instalar en Cursor, Claude, Gemini, Codex y Grok a la vez:
+agent-bus mcp install --client all
+
+# Instalar para un cliente o agente concreto:
+agent-bus mcp install --client cursor,claude --agent backend
+
+# Instalar en el ámbito global del usuario (~/.cursor, ~/.config/Claude, etc.):
+agent-bus mcp install --client gemini --global
+
+# Simular cambios sin escribir en disco:
+agent-bus mcp install --client all --dry-run
+```
+
+La instalación realiza una combinación (*merge*) no destructiva conservando cualquier otro servidor MCP ya configurado.
+
 Para una configuración manual, la forma del cliente JSON es:
 
 ```json
