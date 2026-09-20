@@ -78,7 +78,7 @@ def test_sync_con_main(repo):
     (repo / "base.md").write_text("cambio en main")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-m", "main avanza")
-    out = mgr.sync_with_base("claude")
+    mgr.sync_with_base("claude")
     # tras rebase, el cambio de main es visible en el worktree
     assert (mgr.path_for("claude") / "base.md").exists()
 

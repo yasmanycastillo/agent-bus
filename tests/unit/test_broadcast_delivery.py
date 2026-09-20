@@ -10,7 +10,6 @@ from agent_bus.core.bus import MessageBus
 from agent_bus.core.inbox import InboxManager
 from agent_bus.core.registry import AgentRegistry
 from agent_bus.reputation.database import Database
-from agent_bus.types import Envelope
 
 
 async def test_broadcast_persists_for_three_offline_recipients_after_restart(tmp_path, monkeypatch):

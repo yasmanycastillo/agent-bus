@@ -10,18 +10,14 @@ Validates complete real-world operational cycle:
 
 from __future__ import annotations
 
-import asyncio
-import os
 import subprocess
-import time
 from pathlib import Path
 
-import httpx
 import pytest
 from click.testing import CliRunner
 
 from agent_bus.cli.main import app
-from agent_bus.security import async_bus_client, sync_bus_client
+from agent_bus.security import async_bus_client
 from agent_bus.worker.daemon import WorkerDaemon
 from agent_bus.worker.integrator import BranchIntegrator
 from agent_bus.worker.runner import AgentRunner, RunnerResult

@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from agent_bus.worker.client import BusEventClient, iter_bus_events
+from agent_bus.worker.client import BusEventClient
 
 
 def _sse_lines(*payloads: dict) -> list[str]:

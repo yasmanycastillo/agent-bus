@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import os
 import subprocess
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from agent_bus.cli.main import app
-from agent_bus.cli.worker_cmds import run_team, submit_goal, worker
+from agent_bus.cli.worker_cmds import worker
 
 
 @pytest.fixture
