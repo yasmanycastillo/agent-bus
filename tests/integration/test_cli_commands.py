@@ -149,4 +149,3 @@ def test_work_review_and_work_done_with_evidence(monkeypatch):
     assert res_done.exit_code == 0
     assert "completada" in res_done.output
     assert posted[-1] == ("/tasks/T101/done", {"evidence": {"summary": "pytest green and diff verified"}})
-

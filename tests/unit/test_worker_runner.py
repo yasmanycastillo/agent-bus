@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 import pytest
 
 from agent_bus.worker.runner import AgentRunner, RunnerResult
@@ -145,4 +144,3 @@ async def test_claude_runner_passes_model(monkeypatch):
     assert result.output == "success from claude"
     assert "--model" in calls[0]
     assert calls[0][calls[0].index("--model") + 1] == "glm-5.3"
-

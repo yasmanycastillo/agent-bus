@@ -314,55 +314,97 @@ class TaskManager:
         task_id: str,
         actor: str | None = None,
         evidence: dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
-        condition = " AND owner = ? AND status IN ('in_progress', 'in_review')" if actor else " AND status != 'done'"
-        params = (now, task_id, actor) if actor else (now, task_id)
-        rows = await self._db.conn.execute_fetchall(
-            "UPDATE tasks SET status = 'done', updated_at = ? WHERE task_id = ?"
-            + condition + " RETURNING *", params,
-        )
-        if not rows:
-            await self._db.conn.commit()
+        current = await self.get(task_id)
+        if not current:
+            return None
+        if actor and (current.owner != actor or current.status not in (TaskStatus.IN_PROGRESS, TaskStatus.IN_REVIEW)):
             return None
 
-        if evidence:
-            try:
-                await self._db.conn.execute(
-                    """INSERT INTO audit_log
-                    (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    ("complete_with_evidence", task_id, actor or "unknown", json.dumps(evidence), "", "done", now),
-                )
-            except Exception:
-                pass
+        previous_owner = current.owner
+        evidence_json = json.dumps(evidence) if evidence is not None else None
 
-        # Unblock any blocked tasks whose dependencies are now all 'done'
-        blocked_rows = await self._db.conn.execute_fetchall(
-            "SELECT * FROM tasks WHERE status = 'blocked'"
-        )
-        for b_row in blocked_rows:
-            b_task = self._row_to_task(b_row)
-            if not b_task.depends_on:
-                await self._db.conn.execute(
-                    "UPDATE tasks SET status = 'pending', updated_at = ? WHERE task_id = ? AND status = 'blocked'",
-                    (now, b_task.task_id),
+        def transaction(connection):
+            connection.execute("SAVEPOINT task_complete")
+            try:
+                condition = " AND owner = ? AND status IN ('in_progress', 'in_review')" if actor else " AND status != 'done'"
+                params = (now, task_id, actor) if actor else (now, task_id)
+                cursor = connection.execute(
+                    "UPDATE tasks SET status = 'done', updated_at = ? WHERE task_id = ?"
+                    + condition + " RETURNING *", params,
                 )
-            else:
-                placeholders = ",".join("?" * len(b_task.depends_on))
-                done_rows = await self._db.conn.execute_fetchall(
-                    f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) AND status = 'done'",
-                    tuple(b_task.depends_on),
-                )
-                done_count = done_rows[0]["COUNT(*)"] if hasattr(done_rows[0], "keys") and not isinstance(done_rows[0], (tuple, list)) else done_rows[0][0]
-                if done_count == len(b_task.depends_on):
-                    await self._db.conn.execute(
-                        "UPDATE tasks SET status = 'pending', updated_at = ? WHERE task_id = ? AND status = 'blocked'",
-                        (now, b_task.task_id),
+                row = cursor.fetchone()
+                if not row:
+                    connection.execute("RELEASE task_complete")
+                    return None
+
+                if evidence_json is not None:
+                    connection.execute(
+                        """INSERT INTO audit_log
+                        (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, evidence, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        ("complete_with_evidence", task_id, actor or "unknown", session_id or "", previous_owner, "done", evidence_json, now),
                     )
 
+                # Unblock any blocked tasks whose dependencies are now all 'done'
+                blocked_rows = connection.execute(
+                    "SELECT * FROM tasks WHERE status = 'blocked'"
+                ).fetchall()
+                for b_row in blocked_rows:
+                    b_deps_raw = b_row["depends_on"] if hasattr(b_row, "keys") else b_row[10]
+                    b_deps = json.loads(b_deps_raw) if isinstance(b_deps_raw, str) else (b_deps_raw or [])
+                    b_task_id = b_row["task_id"] if hasattr(b_row, "keys") else b_row[0]
+                    if not b_deps:
+                        connection.execute(
+                            "UPDATE tasks SET status = 'pending', updated_at = ? WHERE task_id = ? AND status = 'blocked'",
+                            (now, b_task_id),
+                        )
+                    else:
+                        placeholders = ",".join("?" * len(b_deps))
+                        c = connection.execute(
+                            f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) AND status = 'done'",
+                            tuple(b_deps),
+                        ).fetchone()[0]
+                        if c == len(b_deps):
+                            connection.execute(
+                                "UPDATE tasks SET status = 'pending', updated_at = ? WHERE task_id = ? AND status = 'blocked'",
+                                (now, b_task_id),
+                            )
+                connection.execute("RELEASE task_complete")
+                return row
+            except BaseException:
+                connection.execute("ROLLBACK TO task_complete")
+                connection.execute("RELEASE task_complete")
+                raise
+
+        row = await self._db.conn._execute(transaction, self._db.conn._conn)
         await self._db.conn.commit()
-        return self._row_to_task(rows[0])
+        return self._row_to_task(row) if row is not None else None
+
+    async def get_evidence(self, task_id: str) -> list[dict[str, Any]]:
+        rows = await self._db.conn.execute_fetchall(
+            """SELECT action, actor_agent_id, actor_session_id, previous_owner, new_owner, evidence, created_at
+               FROM audit_log
+               WHERE task_id = ? AND evidence IS NOT NULL
+               ORDER BY audit_id DESC""",
+            (task_id,),
+        )
+        results = []
+        for r in rows:
+            raw_ev = r["evidence"] if hasattr(r, "keys") else r[5]
+            parsed = json.loads(raw_ev) if isinstance(raw_ev, str) else raw_ev
+            results.append({
+                "action": r["action"] if hasattr(r, "keys") else r[0],
+                "actor_agent_id": r["actor_agent_id"] if hasattr(r, "keys") else r[1],
+                "actor_session_id": r["actor_session_id"] if hasattr(r, "keys") else r[2],
+                "previous_owner": r["previous_owner"] if hasattr(r, "keys") else r[3],
+                "new_owner": r["new_owner"] if hasattr(r, "keys") else r[4],
+                "evidence": parsed,
+                "created_at": r["created_at"] if hasattr(r, "keys") else r[6],
+            })
+        return results
 
     async def submit_review(self, task_id: str, actor: str | None = None) -> Task | None:
         """Move owned work to the serialized integration queue."""

@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     actor_session_id TEXT NOT NULL,
     previous_owner TEXT,
     new_owner TEXT,
+    evidence TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -224,6 +225,7 @@ class Database:
             await self._migrate_tasks()
             await self._migrate_reviews()
             await self._migrate_worker_control()
+            await self._migrate_audit_log()
         except BaseException:
             await self.close()
             raise
@@ -389,6 +391,18 @@ class Database:
                     updated_at TEXT NOT NULL
                 )"""
             )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_audit_log(self) -> None:
+        """Ensure evidence column exists in audit_log."""
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row["name"] for row in await self.conn.execute_fetchall("PRAGMA table_info(audit_log)")}
+            if "evidence" not in columns:
+                await self.conn.execute("ALTER TABLE audit_log ADD COLUMN evidence TEXT")
             await self.conn.commit()
         except BaseException:
             await self.conn.rollback()

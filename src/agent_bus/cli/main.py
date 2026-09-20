@@ -907,6 +907,32 @@ def show_tasks(task_status: str | None, owner: str | None):
             print_tasks_table(tasks)
 
 
+@show.command("task")
+@click.argument("task_id")
+def show_task(task_id: str):
+    """Ver detalle y evidencia de una tarea."""
+    import json
+    with _client() as client:
+        resp = client.get(f"/tasks/{task_id}")
+        if resp.status_code == 404:
+            click.echo(f"Tarea {task_id} no encontrada")
+            return
+        task = resp.json()
+        click.echo(f"ID: {task['task_id']}")
+        click.echo(f"Título: {task['title']}")
+        click.echo(f"Owner: {task['owner']}")
+        click.echo(f"Status: {task['status']}")
+        if task.get("description"):
+            click.echo(f"Descripción: {task['description']}")
+        ev_resp = client.get(f"/tasks/{task_id}/evidence")
+        if ev_resp.status_code == 200:
+            evidence_list = ev_resp.json().get("evidence", [])
+            if evidence_list:
+                click.echo("\n--- Evidencia Registrada ---")
+                for ev in evidence_list:
+                    click.echo(f"[{ev.get('created_at')}] {ev.get('actor_agent_id')}: {json.dumps(ev.get('evidence'), ensure_ascii=False)}")
+
+
 @show.command("inbox")
 @click.argument("agent_id", required=False)
 @click.option("--cursor", default=None)

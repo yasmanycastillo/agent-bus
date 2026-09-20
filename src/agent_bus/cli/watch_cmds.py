@@ -132,6 +132,9 @@ async def _record_failure(client, agent_id: str, message_id: str, error: str) ->
         logger.warning("Could not record watcher failure: %s", exc)
 
 
+SAFE_READONLY_TOOLS = frozenset({"Read", "Grep", "Glob", "view_file", "search", "read_file", "ls"})
+
+
 async def run_turn(
     agent_id: str,
     message: dict,
@@ -142,6 +145,7 @@ async def run_turn(
     bus_url: str | None = None,
     model: str | None = None,
     tools: str | None = None,
+    allow_mutating_tools: bool = False,
     on_state=None,
 ) -> str | None:
     """Send one durable reply and acknowledge only after the CLI succeeds."""
@@ -205,6 +209,8 @@ async def run_turn(
                         if tools is None or not tools.strip():
                             cmd.extend(["--deny", "*", "--permission-mode", "dontAsk", "--max-turns", "1"])
                         else:
+                            if not allow_mutating_tools:
+                                cmd.extend(["--deny", "Bash,Edit,Write,Shell"])
                             cmd.extend(["--permission-mode", "dontAsk", "--max-turns", "3"])
                     if session_id:
                         cmd.extend(["--resume", session_id])
@@ -265,11 +271,12 @@ class PendingMessageWatcher:
     """SSE wakes bounded polling; persisted delivery state decides what to execute."""
     def __init__(self, agent_id: str, *, cli: str = "claude", bus_url: str | None = None,
                  dry_run: bool = False, sessions_file: Path | None = None, model: str | None = None,
-                 tools: str | None = None):
+                 tools: str | None = None, allow_mutating_tools: bool = False):
         self.agent_id = agent_id
         self.cli = cli
         self.model = model
         self.tools = tools
+        self.allow_mutating_tools = allow_mutating_tools
         self.bus_url = get_bus_url(bus_url)
         self.dry_run = dry_run
         self.sessions_file = sessions_file or _session_file(agent_id)
@@ -304,7 +311,8 @@ class PendingMessageWatcher:
             try:
                 await run_turn(self.agent_id, message, self.session_map, cli=self.cli,
                                dry_run=self.dry_run, sessions_file=self.sessions_file, bus_url=self.bus_url,
-                               model=self.model, tools=self.tools, on_state=self.status)
+                               model=self.model, tools=self.tools,
+                               allow_mutating_tools=self.allow_mutating_tools, on_state=self.status)
             finally:
                 self.retry_after[message_id] = time.monotonic() + 3
         # Retain only unexpired backoff entries; no durable retry ledger is claimed.
@@ -349,12 +357,13 @@ class PendingMessageWatcher:
 @click.option("--cli", default=None, help="CLI a despertar; por defecto usa el proveedor de la credencial.")
 @click.option("--model", default=None, help="Modelo para el CLI (ej: grok-4.6, claude-3-5-sonnet-20241022).")
 @click.option("--tools", default=None, help="Herramientas permitidas para el CLI (ej: Read,Grep).")
+@click.option("--allow-mutating-tools", is_flag=True, help="Permitir herramientas de modificación/escritura en Grok/CLI.")
 @click.option("--status", "show_status", is_flag=True, help="Consultar estado local del ejecutor sin iniciar turnos.")
 @click.option("--bus-url", default=None, help="URL del bus")
 @click.option("--dry-run", is_flag=True, help="Solo mostrar qué se ejecutaría")
 @click.option("--once", is_flag=True, help="Procesar un solo mensaje pendiente y salir")
 def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: bool, once: bool,
-          model: str | None, tools: str | None, show_status: bool):
+          model: str | None, tools: str | None, allow_mutating_tools: bool, show_status: bool):
     """Escuchar solicitudes y responder con turnos headless; no inyecta en una TUI."""
     from agent_bus.cli.display import get_current_agent
 
@@ -373,11 +382,23 @@ def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: b
             raise click.ClickException("Proveedor sin CLI conocido; indica --cli explícitamente")
     if model and cli not in ("grok", "claude", "codex", "agy", "aider"):
         raise click.UsageError(f"--model no está disponible para --cli {cli}")
+    if tools and not allow_mutating_tools:
+        requested = {t.strip() for t in tools.split(",") if t.strip()}
+        disallowed = [t for t in requested if t not in SAFE_READONLY_TOOLS]
+        if disallowed:
+            raise click.UsageError(
+                f"Herramientas no permitidas en modo watch: {', '.join(sorted(disallowed))}. "
+                f"Solo se permiten herramientas de solo lectura ({', '.join(sorted(SAFE_READONLY_TOOLS))}). "
+                f"Usa --allow-mutating-tools para habilitarlas explícitamente."
+            )
     if not dry_run and not shutil.which(cli):
         raise click.ClickException(f"CLI '{cli}' no instalado o no disponible en PATH")
     # Fail immediately for missing/mismatched credentials, including dry-run.
     worker_environment(agent_id, bus_url=bus_url)
-    watcher = PendingMessageWatcher(agent_id, cli=cli, bus_url=bus_url, dry_run=dry_run, model=model, tools=tools)
+    watcher = PendingMessageWatcher(
+        agent_id, cli=cli, bus_url=bus_url, dry_run=dry_run, model=model, tools=tools,
+        allow_mutating_tools=allow_mutating_tools,
+    )
     click.echo(f"👀 Watcheando el bus como '{agent_id}' (CLI: {cli})")
     click.echo("   Consulta persistida y SSE activos. Ctrl+C para salir.")
     try:

@@ -544,6 +544,7 @@ class MessageBus:
         async def complete_task(task_id: str, request: Request):
             principal = request.state.principal
             actor = None if (principal and principal.is_admin) else (principal.agent_id if principal else None)
+            session_id = principal.session_id if principal else None
             evidence = None
             if request.headers.get("content-type", "").startswith("application/json"):
                 try:
@@ -553,12 +554,20 @@ class MessageBus:
                 except Exception:
                     pass
             if evidence is not None:
-                task = await self.tasks.complete(task_id, actor=actor, evidence=evidence)
+                task = await self.tasks.complete(task_id, actor=actor, evidence=evidence, session_id=session_id)
             else:
                 task = await self.tasks.complete(task_id, actor=actor)
             if not task:
                 return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
+
+        @self.app.get("/tasks/{task_id}/evidence")
+        async def get_task_evidence(task_id: str):
+            task = await self.tasks.get(task_id)
+            if not task:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            evidence_list = await self.tasks.get_evidence(task_id)
+            return {"task_id": task_id, "evidence": evidence_list}
 
 
         @self.app.post("/tasks/{task_id}/review")
@@ -878,7 +887,7 @@ class MessageBus:
             return {
                 "tasks": [t.model_dump(mode="json") for t in tasks],
                 "agents": [a.model_dump(mode="json") for a in agents],
-                "locks": [l.model_dump(mode="json", exclude={"acquisition_id"}) for l in locks],
+                "locks": [lk.model_dump(mode="json", exclude={"acquisition_id"}) for lk in locks],
                 "decisions": [d.model_dump(mode="json") for d in decisions],
                 "paused_workers": sorted(paused),
                 "pending_approvals": len([m for m in human_inbox if m.reply_needed]),

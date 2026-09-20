@@ -168,3 +168,55 @@ def test_default_cli_from_credential(monkeypatch):
     result = CliRunner().invoke(watch.watch, ['--agent', 'grok-generated', '--once'])
     assert result.exit_code == 0, result.output
     assert selected == ['grok']
+
+
+def test_grok_watch_tools_whitelist_and_mutating_flag(monkeypatch):
+    monkeypatch.setenv('AGENT_BUS_ALLOW_UNSIGNED', '1')
+    monkeypatch.setattr(watch.shutil, 'which', lambda _: '/bin/grok')
+
+    # Mutating tool without --allow-mutating-tools should fail
+    result = CliRunner().invoke(watch.watch, ['--agent', 'grok-agent', '--cli', 'grok', '--tools', 'Read,Edit'])
+    assert result.exit_code != 0
+    assert "Herramientas no permitidas en modo watch: Edit" in result.output
+
+    # Mutating tool with --allow-mutating-tools should pass validation
+    async def fake_run(self, **kw):
+        pass
+    monkeypatch.setattr(watch.PendingMessageWatcher, 'run', fake_run)
+    result_ok = CliRunner().invoke(watch.watch, [
+        '--agent', 'grok-agent', '--cli', 'grok', '--tools', 'Read,Edit', '--allow-mutating-tools', '--once'
+    ])
+    assert result_ok.exit_code == 0, result_ok.output
+
+
+async def test_grok_turn_tools_deny_and_allow_mutating(hub, monkeypatch, tmp_path):
+    calls = []
+
+    async def run(cmd, *a, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0,
+            json.dumps({'text': 'Done inspecting', 'sessionId': 'sess-1', 'stopReason': 'end_turn'}),
+            ''
+        )
+
+    monkeypatch.setattr(watch, '_run_cli', run)
+    sessions = tmp_path / 'sessions.json'
+
+    # 1. Read-only tools without allow_mutating_tools: Grok receives --tools Read,Grep and --deny Bash,Edit,Write,Shell
+    await watch.run_turn(
+        'bob', hub.message, {}, cli='grok', sessions_file=sessions,
+        tools='Read,Grep', allow_mutating_tools=False
+    )
+    assert calls[0][calls[0].index('--tools') + 1] == 'Read,Grep'
+    assert '--deny' in calls[0]
+    assert calls[0][calls[0].index('--deny') + 1] == 'Bash,Edit,Write,Shell'
+
+    # 2. Mutating tools permitted: --deny Bash,Edit,Write,Shell should not be present
+    hub.message['acknowledged'] = False
+    await watch.run_turn(
+        'bob', hub.message, {}, cli='grok', sessions_file=sessions,
+        tools='Read,Edit', allow_mutating_tools=True
+    )
+    assert calls[1][calls[1].index('--tools') + 1] == 'Read,Edit'
+    assert '--deny' not in calls[1]
