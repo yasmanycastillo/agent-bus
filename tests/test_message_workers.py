@@ -4,13 +4,62 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import sys
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from agent_bus.cli import watch_cmds as watch
 from agent_bus.worker.daemon import WorkerDaemon
+from agent_bus.worker.notifier import ExternalNotifier
 from agent_bus.worker.runner import AgentRunner, RunnerResult
+
+
+@pytest.mark.asyncio
+async def test_tmux_notification_uses_explicit_target(monkeypatch):
+    calls = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def spawn(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Process()
+
+    monkeypatch.setattr("agent_bus.worker.notifier.shutil.which", lambda name: "/usr/bin/tmux" if name == "tmux" else None)
+    monkeypatch.setattr("agent_bus.worker.notifier.asyncio.create_subprocess_exec", spawn)
+
+    result = await ExternalNotifier(enable_desktop=False, tmux_target="%3").notify(
+        "Agent-bus", "Grok recibió un mensaje", level="info"
+    )
+
+    assert result.delivered is True
+    assert result.channels == ["tmux:%3"]
+    assert calls == [(("/usr/bin/tmux", "display-message", "-l", "-t", "%3", "-d", "8000", "Agent-bus: Grok recibió un mensaje"), {})]
+
+
+def test_osascript_notification_escapes_remote_text():
+    escaped = ExternalNotifier._escape_osascript('title "x"\\nreturn 1')
+    assert escaped == 'title \\"x\\"\\\\nreturn 1'
+
+
+@pytest.mark.asyncio
+async def test_notification_process_is_terminated_when_cancelled():
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "import time; time.sleep(60)"
+    )
+    task = asyncio.create_task(ExternalNotifier._finish_process(process, timeout=30))
+    await asyncio.sleep(0.01)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(process.wait(), timeout=2)
+    assert process.returncode is not None
 
 
 class DeliveryHub:
@@ -59,6 +108,25 @@ class DeliveryHub:
 
 def make_worker(execute):
     return WorkerDaemon("bob", AgentRunner("bob", custom_executor=execute))
+
+
+@pytest.mark.asyncio
+async def test_worker_notifies_interactive_pane_before_and_after_reply():
+    hub = DeliveryHub()
+    notifier = AsyncMock()
+
+    async def execute(*args):
+        return RunnerResult(success=True, output="Reviewed")
+
+    worker = WorkerDaemon("bob", AgentRunner("bob", custom_executor=execute), notifier=notifier)
+    async with hub.client() as client:
+        worker._client = client
+        result = await worker._handle_urgent_message(hub.message)
+
+    assert result.success
+    assert notifier.notify.await_count == 2
+    assert "Mensaje recibido" in notifier.notify.await_args_list[0].args[1]
+    assert "Respuesta enviada" in notifier.notify.await_args_list[1].args[1]
 
 
 @pytest.mark.parametrize("failure", ["result", "exception", "empty", "cancelled"])

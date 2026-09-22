@@ -113,6 +113,30 @@ proyecto (o `~/.agent-bus/workers/<agente>.log` cuando se usa un runtime global)
 El worker atiende el inbox, mantiene heartbeat y confirma sólo después de producir
 y entregar la respuesta.
 
+Para que el worker avise a la TUI sin inyectar comandos, configura el pane destino
+de tmux antes de iniciarlo:
+
+```sh
+tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_title}'
+export AGENT_BUS_TMUX_TARGET='odoo:0.2'
+agent-bus --project /ruta/mi-proyecto worker start --agent grok --provider grok
+```
+
+Si no usas tmux, puedes activar notificaciones de escritorio sin inyectar nada en
+la terminal:
+
+```sh
+export AGENT_BUS_NOTIFY_DESKTOP=1
+agent-bus --project /ruta/mi-proyecto worker start --agent grok --provider grok
+```
+
+En Linux usa `notify-send` cuando está disponible. El worker no marca el mensaje
+como leído por mostrar la notificación; la confirmación sigue ocurriendo sólo
+después de generar y entregar la respuesta.
+
+También puedes usar `--foreground` bajo un supervisor; conserva la variable
+`AGENT_BUS_TMUX_TARGET` o `AGENT_BUS_NOTIFY_DESKTOP` en el entorno del servicio.
+
 No uses `watch` y `worker` simultáneamente con la misma identidad: ambos intentan
 ser el ejecutor automático y `ExecutionGuard` rechazará uno. Si además mantienes
 una TUI abierta para supervisar, trátala como interfaz manual; no es el componente

@@ -30,11 +30,13 @@ class ExternalNotifier:
         webhook_urls: list[str] | None = None,
         telegram_token: str | None = None,
         telegram_chat_id: str | None = None,
+        tmux_target: str | None = None,
     ) -> None:
         self.enable_desktop = enable_desktop
         self.webhook_urls = webhook_urls or []
         self.telegram_token = telegram_token or os.environ.get("TELEGRAM_BOT_TOKEN")
         self.telegram_chat_id = telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+        self.tmux_target = tmux_target or os.environ.get("AGENT_BUS_TMUX_TARGET")
 
     async def notify(
         self,
@@ -53,7 +55,15 @@ class ExternalNotifier:
             if desktop_ok:
                 channels_succeeded.append("desktop")
 
-        # 2. Generic HTTP Webhooks
+        # 2. tmux status-line notification for an interactive UI pane
+        if self.tmux_target:
+            tmux_ok = await self._send_tmux(title, message)
+            if tmux_ok:
+                channels_succeeded.append(f"tmux:{self.tmux_target}")
+            else:
+                errors.append(f"tmux notification failed for {self.tmux_target}")
+
+        # 3. Generic HTTP Webhooks
         for url in self.webhook_urls:
             webhook_ok = await self._send_webhook(url, title, message, level, metadata)
             if webhook_ok:
@@ -90,6 +100,49 @@ class ExternalNotifier:
             metadata={"task_id": task_id, "reason": reason},
         )
 
+    async def _send_tmux(self, title: str, message: str) -> bool:
+        """Show a non-invasive message in a configured tmux pane."""
+        tmux = shutil.which("tmux")
+        if not tmux or not self.tmux_target:
+            return False
+        text = f"{title}: {message}".replace("\n", " ")[:400]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                tmux, "display-message", "-l", "-t", self.tmux_target, "-d", "8000", text
+            )
+            return await self._finish_process(proc)
+        except Exception as exc:
+            logger.debug("tmux notification failed: %s", exc)
+            return False
+
+    @staticmethod
+    async def _finish_process(proc: asyncio.subprocess.Process, timeout: float = 2.0) -> bool:
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return proc.returncode == 0
+        except asyncio.TimeoutError:
+            await ExternalNotifier._stop_process(proc)
+            return False
+        except asyncio.CancelledError:
+            await asyncio.shield(ExternalNotifier._stop_process(proc))
+            raise
+
+    @staticmethod
+    async def _stop_process(proc: asyncio.subprocess.Process) -> None:
+        if proc.returncode is not None:
+            return
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+
+
+    @staticmethod
+    def _escape_osascript(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+
     async def _send_desktop(self, title: str, message: str, level: str) -> bool:
         """Sends native desktop notification via notify-send or osascript."""
         notify_send = shutil.which("notify-send")
@@ -99,19 +152,19 @@ class ExternalNotifier:
                 proc = await asyncio.create_subprocess_exec(
                     notify_send, "-u", urgency, "-a", "agent-bus", title, message
                 )
-                await proc.communicate()
-                return proc.returncode == 0
+                return await self._finish_process(proc)
             except Exception as exc:
                 logger.debug(f"notify-send failed: {exc}")
                 return False
 
         osascript = shutil.which("osascript")
         if osascript:
-            script = f'display notification "{message}" with title "{title}" subtitle "agent-bus"'
+            safe_message = self._escape_osascript(message)
+            safe_title = self._escape_osascript(title)
+            script = f'display notification "{safe_message}" with title "{safe_title}" subtitle "agent-bus"'
             try:
                 proc = await asyncio.create_subprocess_exec(osascript, "-e", script)
-                await proc.communicate()
-                return proc.returncode == 0
+                return await self._finish_process(proc)
             except Exception as exc:
                 logger.debug(f"osascript failed: {exc}")
                 return False

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import hashlib
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from agent_bus.worker.execution import ExecutionGuard
 
 from agent_bus.types import AgentStatus
 from agent_bus.worker.client import BusEventClient
+from agent_bus.worker.notifier import ExternalNotifier
 from agent_bus.worker.runner import AgentRunner, RunnerResult
 
 logger = logging.getLogger("agent_bus.worker.daemon")
@@ -33,6 +35,7 @@ class WorkerDaemon:
         heartbeat_interval_seconds: float = 15.0,
         max_turns_per_task: int = 10,
         max_message_attempts: int = 5,
+        notifier: ExternalNotifier | None = None,
     ) -> None:
         if runner.agent_id != agent_id:
             raise ValueError("Runner identity must match its daemon")
@@ -44,6 +47,9 @@ class WorkerDaemon:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.max_turns_per_task = max_turns_per_task
         self.max_message_attempts = max(1, max_message_attempts)
+        self.notifier = notifier or ExternalNotifier(
+            enable_desktop=os.environ.get("AGENT_BUS_NOTIFY_DESKTOP") == "1"
+        )
         self._running = False
         self._task_turn_counts: dict[str, int] = {}
         self._client: httpx.AsyncClient | None = None
@@ -115,6 +121,14 @@ class WorkerDaemon:
         # High priority wake up for messages requiring reply or task assignments
         if event.get("event") == "reset" or event.get("reply_needed") or event.get("message_type") in ("handoff", "task_assigned"):
             self._wake_event.set()
+
+    async def _notify(self, title: str, message: str, level: str = "info") -> None:
+        try:
+            result = await self.notifier.notify(title, message, level=level)
+            if result.error:
+                logger.debug("Worker notification failed: %s", result.error)
+        except Exception as exc:
+            logger.debug("Worker notification raised: %s", exc)
 
     async def _heartbeat_loop(self) -> None:
         while self._running:
@@ -221,6 +235,10 @@ class WorkerDaemon:
             if message.get("acknowledged"):
                 self._message_retry_after.pop(message_id, None)
                 return RunnerResult(success=True, output="", metadata={"already_acknowledged": True})
+            await self._notify(
+                f"agent-bus: {self.agent_id}",
+                f"Mensaje recibido de {message.get('from_agent', '?')} ({message_id[:8]})",
+            )
             attempts = int(message.get("attempts", 0) or 0)
             if attempts >= self.max_message_attempts:
                 detail = (
@@ -258,6 +276,14 @@ class WorkerDaemon:
             )
             response.raise_for_status()
             self._message_retry_after.pop(message_id, None)
+            try:
+                await asyncio.shield(self._notify(
+                    f"agent-bus: {self.agent_id}",
+                    f"Respuesta enviada ({message_id[:8]})",
+                    level="success",
+                ))
+            except asyncio.CancelledError:
+                logger.debug("Worker cancelled after acknowledging message %s", message_id)
             return result
         except asyncio.CancelledError:
             await asyncio.shield(self._record_message_failure(message_id, "Runner cancelled"))
