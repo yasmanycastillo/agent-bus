@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import select
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import click
@@ -27,6 +29,27 @@ def _pid_file(agent_id: str) -> Path:
 
 def _log_file(agent_id: str) -> Path:
     return _workers_dir() / f"{agent_id}.log"
+
+
+@contextmanager
+def _worker_environment(env: dict[str, str]):
+    """Apply only worker-scoped variables temporarily for foreground execution."""
+    keys = {key for key in env if key.startswith("AGENT_BUS_")}
+    previous: dict[str, str] = {
+        key: os.environ[key] for key in os.environ if key.startswith("AGENT_BUS_")
+    }
+    try:
+        for key in set(previous) - keys:
+            os.environ.pop(key, None)
+        for key in keys:
+            os.environ[key] = env[key]
+        yield
+    finally:
+        for key in set(os.environ):
+            if key.startswith("AGENT_BUS_"):
+                os.environ.pop(key, None)
+        for key, value in previous.items():
+            os.environ[key] = value
 
 
 _SUPPORTED_PROVIDERS = {"claude", "agy", "antigravity", "aider", "codex", "grok", "xai", "openai", "mock"}
@@ -126,8 +149,9 @@ def worker():
 @click.option("--model", default=None, help="Modelo para el proveedor")
 @click.option("--worktree", "worktree_dir", default=None, help="Directorio worktree para el agente")
 @click.option("--bus-url", default=None, help="URL del bus")
-def worker_start(agent_id: str | None, provider: str | None, model: str | None, worktree_dir: str | None, bus_url: str | None):
-    """Iniciar el daemon worker de un agente en background."""
+@click.option("--foreground", is_flag=True, help="Ejecutar en primer plano para un supervisor externo")
+def worker_start(agent_id: str | None, provider: str | None, model: str | None, worktree_dir: str | None, bus_url: str | None, foreground: bool):
+    """Iniciar el daemon worker de un agente."""
     if agent_id is None:
         from agent_bus.cli.display import get_current_agent
 
@@ -142,6 +166,23 @@ def worker_start(agent_id: str | None, provider: str | None, model: str | None, 
     except AuthenticationError as exc:
         raise click.ClickException(str(exc)) from exc
     provider = _worker_provider(agent_id, provider, child_env)
+    if foreground:
+        from agent_bus.project import get_checkout_root
+        from agent_bus.worker.daemon import WorkerDaemon
+        from agent_bus.worker.runner import AgentRunner
+
+        checkout = Path(worktree_dir).resolve() if worktree_dir else (get_checkout_root() or Path.cwd()).resolve()
+        daemon = WorkerDaemon(
+            agent_id=agent_id,
+            runner=AgentRunner(agent_id, provider=provider, model=model, worktree_dir=checkout),
+            bus_url=bus_url,
+        )
+        try:
+            with _worker_environment(child_env):
+                asyncio.run(daemon.start())
+        except KeyboardInterrupt:
+            pass
+        return
     _workers_dir().mkdir(parents=True, exist_ok=True)
     pid_file = _pid_file(agent_id)
     if pid_file.exists():

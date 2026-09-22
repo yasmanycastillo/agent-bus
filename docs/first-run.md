@@ -98,9 +98,17 @@ agent-bus --project /ruta/mi-proyecto worker status --agent claude
 agent-bus --project /ruta/mi-proyecto worker status --agent grok
 ```
 
-El worker debe usar la misma URL del hub, proyecto y credencial que MCP. Déjalo
-bajo `systemd --user`, `tmux` u otro supervisor que lo reinicie si termina y revisa
-el log del runtime activo: `.agent-bus/runtime/workers/<agente>.log` dentro del
+El worker debe usar la misma URL del hub, proyecto y credencial que MCP. Para usar
+un supervisor externo, ejecútalo en primer plano con `--foreground`; así el supervisor
+puede detectar su salida y reiniciarlo:
+
+```sh
+agent-bus --project /ruta/mi-proyecto worker start \
+  --agent grok --provider grok --foreground
+```
+
+Con `systemd --user`, configura `Restart=on-failure` y `RestartSec=5`; con `tmux`,
+mantén la sesión abierta. Revisa el log del runtime activo: `.agent-bus/runtime/workers/<agente>.log` dentro del
 proyecto (o `~/.agent-bus/workers/<agente>.log` cuando se usa un runtime global).
 El worker atiende el inbox, mantiene heartbeat y confirma sólo después de producir
 y entregar la respuesta.
