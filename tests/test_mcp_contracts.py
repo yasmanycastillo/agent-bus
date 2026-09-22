@@ -72,6 +72,8 @@ async def test_connection_teaches_onboarding_before_any_tool_call(bound_server, 
         assert "my_pending_items" in client.instructions
         assert "prepare_edit" in client.instructions
         assert "complete_handoff" in client.instructions
+        assert "MCP por sí solo no inicia" in client.instructions
+        assert "worker start" in client.instructions
         assert "private-session-token" not in client.instructions
         assert calls == []
 

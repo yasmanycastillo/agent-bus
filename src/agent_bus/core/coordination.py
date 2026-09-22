@@ -74,6 +74,15 @@ no compartas credenciales ni cambies de proyecto mediante argumentos de las herr
 7. Entrega con complete_handoff (in_review por defecto), resumen y evidencia de validación.
    Conserva la misma operation_key y argumentos al reintentar. Sólo libera los tokens indicados.
 8. Si esperas respuesta, usa wait_for_updates con event_cursor. No despierta una TUI cerrada.
+9. MCP por sí solo no inicia un worker, watcher ni proveedor headless. Si el agente debe
+   responder aunque la TUI esté inactiva, solicita o ejecuta desde una terminal el worker
+   persistente para esta identidad: `agent-bus worker start --agent <agent_id>`; verifica
+   el proceso local con `agent-bus worker status --agent <agent_id>` y su presencia en
+   el hub con `agent-bus show agents`. El proceso debe permanecer activo y
+   usar el mismo proyecto, URL del hub y credencial. No confundas `mcp-server` con worker.
+10. No ejecutes simultáneamente `watch` y `worker` para la misma identidad: comparten
+    una exclusión y uno será rechazado. Una TUI abierta tampoco es un listener permanente;
+    para operación autónoma usa un worker/supervisor separado y notificaciones a la TUI.
 Si una petición falla o se pierde su respuesta, conserva la clave y el contenido original
 al reintentar; no confirmes mensajes ni declares trabajo completado sin verificar el resultado.
 Los locks son cooperativos; el handoff registra evidencia declarada y no ejecuta pruebas ni merge.

@@ -85,16 +85,28 @@ Leer no confirma mensajes. Usa `ack_messages` después de procesarlos, o
 `reply_message` con `acknowledge=true`. Conserva la misma clave de idempotencia
 al repetir un envío cuyo resultado se perdió. [Contrato de mensajería](messaging.md).
 
-## Espera y ejecución automática
+## Espera, listeners y workers
 
-`wait_for_updates` consulta pendientes o espera eventos, con un plazo total de
-1 a 120 segundos. Puede devolver una llegada mientras la llamada está activa;
-no inicia un cliente que ya terminó. Al vencer el plazo, el cliente decide si
-vuelve a esperar. [Eventos y recuperación](events.md).
+`wait_for_updates` sólo espera mientras la llamada MCP permanece activa. MCP no
+inicia procesos en segundo plano, no mantiene una TUI despierta y `mcp-server` no
+es un worker. Si el agente debe responder aunque Claude/Grok esté en reposo,
+arranca un worker persistente desde una terminal con la misma identidad, proyecto,
+URL y credencial:
 
-Para responder sin intervención del usuario, inicia un listener `watch` con su
-propia identidad. Es un proceso headless separado de cualquier TUI abierta.
-Consulta [listeners y estados](first-run.md#listeners-para-responder-automáticamente).
+```sh
+agent-bus --project /ruta/mi-proyecto worker start --agent grok --provider grok
+agent-bus --project /ruta/mi-proyecto worker status --agent grok
+```
+
+Mantén ese proceso bajo un supervisor (por ejemplo `systemd --user`, `tmux` o un
+servicio equivalente). `worker status` comprueba el proceso local y su PID; para
+confirmar presencia en el hub consulta `agent-bus show agents` o la consola y
+verifica el heartbeat. No ejecutes `watch` y `worker` para
+la misma identidad: ambos son ejecutores y la exclusión local rechazará el segundo.
+Una TUI abierta puede servir para supervisión manual, pero no sustituye al worker.
+Para una respuesta automática sin worker usa `watch`; es headless y tampoco inyecta
+texto en la TUI. La configuración completa está en
+[workers y recuperación](first-run.md#workers-persistentes-para-evitar-esperas).
 
 El repositorio no activa hooks de Claude por defecto. Si deseas habilitarlos,
 usa [el ejemplo de configuración](../examples/claude/settings.json): incorpora su

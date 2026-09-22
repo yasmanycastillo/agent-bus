@@ -26,7 +26,10 @@ agent-bus --project /ruta/mi-proyecto onboard --mcp-only
 
 El asistente prepara un hub local, credenciales y configuraciones MCP para dos
 agentes. Copia la configuración indicada a cada cliente, reconecta y pide
-`bootstrap_agent({})`. No inicia modelos, workers ni merges automáticamente.
+`bootstrap_agent({})`. No inicia modelos, workers ni merges automáticamente: MCP
+por sí solo tampoco despierta una TUI. Para evitar esperas cuando un agente está
+inactivo, inicia un worker persistente por identidad con `worker start` y verifica
+su estado con `worker status`; consulta [workers persistentes](docs/first-run.md#workers-persistentes-para-evitar-esperas).
 
 Sigue la [guía de primer uso](docs/first-run.md) para conectar los clientes,
 iniciar listeners y resolver problemas. La instalación documentada es desde este

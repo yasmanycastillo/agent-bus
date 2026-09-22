@@ -84,6 +84,34 @@ Conservar el entorno Python usado por los snippets. Una reinstalación que cambi
 su ruta requiere regenerar la configuración. El asistente no sobrescribe un
 snippet diferente ni modifica archivos propios del cliente.
 
+## Workers persistentes para evitar esperas
+
+El servidor MCP y una terminal Claude/Grok no son ejecutores persistentes. El MCP
+por sí solo no inicia un worker y `wait_for_updates` deja de esperar cuando termina
+la llamada. Por eso, si dos agentes deben continuar intercambiando mensajes sin
+intervención humana, inicia un worker por identidad desde una terminal separada:
+
+```sh
+agent-bus --project /ruta/mi-proyecto worker start --agent claude --provider claude
+agent-bus --project /ruta/mi-proyecto worker start --agent grok --provider grok
+agent-bus --project /ruta/mi-proyecto worker status --agent claude
+agent-bus --project /ruta/mi-proyecto worker status --agent grok
+```
+
+El worker debe usar la misma URL del hub, proyecto y credencial que MCP. Déjalo
+bajo `systemd --user`, `tmux` u otro supervisor que lo reinicie si termina y revisa
+el log del runtime activo: `.agent-bus/runtime/workers/<agente>.log` dentro del
+proyecto (o `~/.agent-bus/workers/<agente>.log` cuando se usa un runtime global).
+El worker atiende el inbox, mantiene heartbeat y confirma sólo después de producir
+y entregar la respuesta.
+
+No uses `watch` y `worker` simultáneamente con la misma identidad: ambos intentan
+ser el ejecutor automático y `ExecutionGuard` rechazará uno. Si además mantienes
+una TUI abierta para supervisar, trátala como interfaz manual; no es el componente
+que garantiza la entrega. Para automatización completa usa una identidad worker
+separada de la identidad de la TUI y muestra alertas en la terminal o por otro
+canal, sin inyectar comandos ciegamente en el prompt.
+
 ## Listeners para responder automáticamente
 
 Para Grok y Codex:
