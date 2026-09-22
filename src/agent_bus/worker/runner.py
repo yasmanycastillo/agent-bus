@@ -291,7 +291,55 @@ class AgentRunner:
             cmd.extend(["--model", self.model])
         if thread_id and thread_id in self.session_map:
             cmd.extend(["--resume", self.session_map[thread_id]])
-        return await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+        previous_session = self.session_map.get(thread_id) if thread_id else None
+        result = await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+        if not result.success:
+            return result
+        # _run_subprocess can discover a session ID before this provider-specific
+        # envelope is validated. Restore the previous mapping on every rejected
+        # Grok response so failed turns cannot poison the next --resume.
+        def restore_session() -> None:
+            if not thread_id:
+                return
+            if previous_session is None:
+                self.session_map.pop(thread_id, None)
+            else:
+                self.session_map[thread_id] = previous_session
+            self._save_sessions()
+
+        # Grok's JSON envelope contains internal fields (for example `thought`).
+        # Deliver only the explicit final text and never the raw envelope.
+        try:
+            envelope = json.loads(result.output)
+        except (ValueError, TypeError):
+            envelope = None
+        text = envelope.get("text") if isinstance(envelope, dict) else None
+        session_id = envelope.get("sessionId") if isinstance(envelope, dict) else None
+        stop_reason = envelope.get("stopReason") if isinstance(envelope, dict) else None
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("is_error")
+            or stop_reason != "end_turn"
+            or not isinstance(text, str)
+            or not text.strip()
+            or not isinstance(session_id, str)
+            or not session_id.strip()
+        ):
+            restore_session()
+            result.success = False
+            result.error = (
+                text[:500] if isinstance(text, str) and text.strip()
+                else "Grok CLI returned no successful text result"
+            )
+            result.output = ""
+            return result
+        if isinstance(session_id, str) and session_id.strip():
+            result.session_id = session_id
+            if thread_id:
+                self.session_map[thread_id] = session_id
+                self._save_sessions()
+        result.output = text.strip()
+        return result
 
     async def _execute_codex_cli(
         self,
