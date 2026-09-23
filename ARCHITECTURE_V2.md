@@ -4,13 +4,18 @@
 
 Proposal for the post-0.1.x evolution of `agent-bus`.
 
+This document defines target boundaries, not completed V2 functionality. Phase -1
+spikes and measured adoption decisions are still required before selecting an
+external runtime. Domain terms are defined in [CONTEXT.md](CONTEXT.md).
+
 ## Product Positioning
 
 `agent-bus` should evolve into a **durable coordination and governance layer for heterogeneous AI software-engineering agents**.
 
 It already provides valuable coordination primitives: durable tasks/messages, MCP coordination, explicit ACKs, task claiming, file-lock leases, agent identities/sessions, DAGs, workers, worktrees, evidence-aware handoffs, Gatekeeper review, human decisions, event streaming and auditability.
 
-V2 should preserve those strengths while avoiding duplication of mature runtime projects such as Orca and OpenHands.
+V2 should preserve those strengths while evaluating external runtimes and
+avoiding duplication where a tested integration actually reduces maintenance.
 
 ## Core Principle
 
@@ -89,7 +94,9 @@ Before V2 implementation, complete the evaluation defined in [LANDSCAPE_AND_ADOP
 
 This evaluation is mandatory for runtime and planning decisions. In particular:
 
-- Orca must be tested as an external runtime candidate before expanding native runtime responsibilities.
+- A named Orca repository/revision must pass a source and command preflight
+  before an executable runtime spike. The first candidate failed that
+  preflight; see [Phase -1 evidence](docs/spikes/2026-09-23-phase-minus-one.md).
 - OpenHands must be evaluated as a sandbox/remote execution backend before building equivalent infrastructure.
 - Hermes is treated as one planner implementation, not as the fixed planner of Agent Bus.
 - Patterns from Pact, Hydra, Orka and multiagents must be explicitly classified as ADOPT, ADAPT, SPIKE or REJECT.
@@ -139,6 +146,11 @@ class PlanningBackend(Protocol):
 
 Hermes is optional and replaceable. A deterministic workflow planner, a human-authored planner or another planning strategy must be able to emit the same validated `TaskPlan` contract.
 
+The current code calls its plan `TaskBreakdownPlan`. Phase -1 must define a
+versioned `TaskPlan` contract or explicitly retain that name, then verify that
+existing plans remain valid. A static planner has no `PlanningBackend`; only
+planners that call a model need an inference backend.
+
 ### Runtime Adapter
 
 ```python
@@ -155,6 +167,13 @@ class AgentRuntime(Protocol):
     async def status(self, session: RuntimeSession) -> RuntimeStatus:
         ...
 ```
+
+`RuntimeStartRequest` carries a bus-generated attempt ID and idempotency key.
+`RuntimeSession` binds that attempt to a task, an opaque external reference and
+a workspace reference. Status and result retrieval must work after an Agent Bus
+restart. The adapter must distinguish completion, failure, cancellation and
+unknown outcome; an unknown outcome is reconciled before another attempt starts.
+The bus records state transitions and may reject stale or duplicate reports.
 
 Possible adapters:
 
@@ -185,6 +204,10 @@ class WorkspaceBackend(Protocol):
 
 Backends can include direct checkout, Git worktree, Docker, Dev Container and remote sandbox.
 
+Before the first external-runtime pilot, define the minimum workspace ownership
+contract: who creates it, how the runtime receives it, how the candidate commit
+is exported, and who cleans it up. A general `WorkspaceBackend` can follow later.
+
 ## Capability-Based Routing
 
 Workflows should request capabilities instead of naming models.
@@ -204,6 +227,9 @@ requires:
 ```
 
 Example agent:
+
+The values below are illustrative declarations, not verified model limits or
+automatic authorization to work on a project.
 
 ```yaml
 agent:
@@ -234,6 +260,13 @@ Initial router policy should be deterministic:
 
 Avoid opaque AI-based routing initially.
 
+Agent presence already records self-declared capabilities. V2 must distinguish
+those declarations from project-approved capabilities, persist task requirements,
+and enforce eligibility at claim time as well as at route time. Availability is
+derived from a recent heartbeat and execution capacity, not a static `ready`
+label. Routing records the eligible set, selected agent and reasons; an agent
+cannot bypass the decision by claiming an incompatible free task.
+
 ## Artifacts and Context Transfer
 
 Messages are not enough for large multi-agent workflows. V2 needs first-class artifacts.
@@ -247,7 +280,7 @@ Example:
   "producer": "kimi-analysis-01",
   "kind": "repository-analysis",
   "media_type": "application/json",
-  "uri": "file://...",
+  "uri": "artifact://project/art_123",
   "sha256": "...",
   "summary": "Mapped account.move fiscal-number flow"
 }
@@ -256,6 +289,11 @@ Example:
 Tasks should reference artifacts instead of duplicating large content.
 
 Evidence remains distinct from artifacts. An artifact is produced output; evidence supports an acceptance criterion.
+
+Artifact IDs resolve through project-scoped access control. The metadata records
+size, checksum, producer, task, attempt and retention policy. Local filesystem
+storage is an implementation detail; external runtimes must use an authorized
+transfer method rather than a host-local `file://` path.
 
 ## Usage and Cost Accounting
 
@@ -318,7 +356,17 @@ The current `BranchIntegrator` and Gatekeeper design should remain a core streng
 
 Critical invariant:
 
-> The commit that was reviewed must be the commit that is integrated.
+> The candidate commit tested and approved must be the candidate commit used
+> as input to integration. A merge commit has a different SHA; its second
+> parent must be the approved candidate, and the target baseline must be the
+> one validated before merge.
+
+The integrator now requires a Gatekeeper approval by default. An operator can
+explicitly choose advisory review, which records the verdict but permits a
+`CHANGES_REQUESTED` candidate with passing tests to merge. `BLOCKED` remains
+non-mergeable in either mode. Today the CLI flag is the only policy control;
+the Phase 8 workflow compiler does not yet exist. When it does, a workflow
+whose gate says `review: approved` must reject advisory mode.
 
 Preserve:
 
@@ -336,7 +384,11 @@ Do not reimplement their runtime strengths.
 
 ### Orca
 
-Treat Orca as an optional execution backend. Agent Bus should own workflow state, routing, evidence, human decisions and governance.
+Treat Orca as a possible future execution backend only after a specific
+repository/revision exposes launch, status and cancellation commands. The
+`orca-cli/orca` revision reviewed in Phase -1 is not viable as the first
+adapter. Agent Bus must still own workflow state, routing, evidence, human
+decisions and governance.
 
 ### OpenHands
 
@@ -438,7 +490,10 @@ V2 is successful when:
 5. artifacts can move between agents without being embedded in messages,
 6. task-level usage/cost is inspectable,
 7. a third-party runtime can execute work while Agent Bus retains governance,
-8. Gatekeeper preserves reviewed-SHA == integrated-SHA,
+8. in strict mode, integration requires Gatekeeper approval and verifies that
+   the approved candidate is the merge input and second parent; explicit
+   advisory mode may merge `CHANGES_REQUESTED` with passing tests, never
+   `BLOCKED`, while keeping the same candidate-parent and target-baseline checks,
 9. current MCP coordination remains backward compatible,
 10. V2 primitives are testable without paid model access.
 

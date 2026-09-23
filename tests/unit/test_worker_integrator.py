@@ -23,7 +23,7 @@ async def test_bus(tmp_path):
 
 @pytest.mark.asyncio
 async def test_integrator_test_failure_triggers_author_feedback(tmp_path):
-    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", max_retries_per_task=2)
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", max_retries_per_task=2, require_approval=False)
 
     # Mock run_tests to simulate test failure
     async def mock_fail_tests(worktree_dir, test_cmd=None):
@@ -51,7 +51,7 @@ async def test_integrator_test_failure_triggers_author_feedback(tmp_path):
 
 @pytest.mark.asyncio
 async def test_integrator_exceeding_max_retries_blocks_task(tmp_path):
-    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", max_retries_per_task=2)
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", max_retries_per_task=2, require_approval=False)
 
     async def mock_fail_tests(worktree_dir, test_cmd=None):
         return (False, "Fatal syntax error")
@@ -85,7 +85,7 @@ async def test_integrator_exceeding_max_retries_blocks_task(tmp_path):
 
 @pytest.mark.asyncio
 async def test_integrator_success_flow(tmp_path):
-    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", require_approval=False)
 
     async def mock_pass_tests(worktree_dir, test_cmd=None):
         return (True, "All tests passed (10/10)")

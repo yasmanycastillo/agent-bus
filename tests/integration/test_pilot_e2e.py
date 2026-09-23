@@ -178,6 +178,7 @@ async def test_pilot_end_to_end_operational_cycle(
     assert f"feat(agent): complete {task_id}" in candidate_commit_msg
     candidate_sha = _git(wt_info.path, "rev-parse", "HEAD")
     assert candidate_sha
+    target_baseline = _git(pilot_git_repo, "rev-parse", "HEAD")
 
     # 6. Branch Integrator Execution
     integrator = BranchIntegrator(
@@ -197,6 +198,10 @@ async def test_pilot_end_to_end_operational_cycle(
     assert int_res.success is True, int_res
     assert int_res.merged is True
     assert int_res.status == "integrated"
+    assert int_res.metadata["review"]["verdict"] == "approve"
+    assert _git(pilot_git_repo, "rev-parse", "HEAD") != candidate_sha
+    assert _git(pilot_git_repo, "rev-parse", "HEAD^1") == target_baseline
+    assert _git(pilot_git_repo, "rev-parse", "HEAD^2") == candidate_sha
 
     # Verify task is now 'done' on the bus
     async with async_bus_client(integrator_agent, base_url=live_bus_url) as client:
@@ -316,4 +321,4 @@ async def test_pilot_integration_rejection_and_feedback_cycle(
         messages = inbox_resp.json()["messages"]
         feedback = [m for m in messages if m.get("related_task") == task_id]
         assert len(feedback) >= 1
-        assert "Integration test/merge failed" in feedback[0]["body"]["text"]
+        assert "Gatekeeper review" in feedback[0]["body"]["text"]

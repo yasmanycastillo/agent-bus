@@ -33,6 +33,10 @@ class IntegratorResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+class MergeInvariantError(RuntimeError):
+    """The created integration commit does not match the reviewed snapshot."""
+
+
 class BranchIntegrator:
     """Automated Integrator / Tech Lead agent that tests candidate branches and manages merge semantics."""
 
@@ -42,7 +46,7 @@ class BranchIntegrator:
         bus_url: str | None = None,
         agent_id: str = "integrator",
         max_retries_per_task: int = 2,
-        require_approval: bool = False,
+        require_approval: bool = True,
         gatekeeper: Gatekeeper | None = None,
     ) -> None:
         self.repo_dir = repo_dir or Path.cwd()
@@ -225,7 +229,12 @@ class BranchIntegrator:
                 )
 
             # Verdict is APPROVE: proceed with git merge!
-            merge_ok, merge_output = await self._merge_branches(sha, target_branch, expected_target_sha=snapshot["target_sha"])
+            try:
+                merge_ok, merge_output = await self._merge_branches(
+                    sha, target_branch, expected_target_sha=snapshot["target_sha"]
+                )
+            except MergeInvariantError as exc:
+                return await self._block_merge_invariant(task_id, author_agent, decision, test_output, exc)
             if not merge_ok:
                 retries = self._retry_counts.get(task_id, 0) + 1
                 self._retry_counts[task_id] = retries
@@ -251,8 +260,8 @@ class BranchIntegrator:
             )
 
         else:
-            # Under require_approval=False:
-            # Record audit decision, merge if tests passed and not explicitly blocked
+            # Explicit advisory-review mode: record the verdict and merge on
+            # passing tests unless Gatekeeper blocks the candidate.
             if not tests_passed:
                 retries = self._retry_counts.get(task_id, 0) + 1
                 self._retry_counts[task_id] = retries
@@ -284,7 +293,12 @@ class BranchIntegrator:
                     metadata={"review": decision.model_dump(mode="json")},
                 )
 
-            merge_ok, merge_output = await self._merge_branches(sha, target_branch, expected_target_sha=snapshot["target_sha"])
+            try:
+                merge_ok, merge_output = await self._merge_branches(
+                    sha, target_branch, expected_target_sha=snapshot["target_sha"]
+                )
+            except MergeInvariantError as exc:
+                return await self._block_merge_invariant(task_id, author_agent, decision, test_output, exc)
             if not merge_ok:
                 retries = self._retry_counts.get(task_id, 0) + 1
                 self._retry_counts[task_id] = retries
@@ -309,7 +323,24 @@ class BranchIntegrator:
                 metadata={"review": decision.model_dump(mode="json")},
             )
 
-    async def _merge_branches(self, candidate_branch: str, target_branch: str, *, expected_target_sha: str) -> tuple[bool, str]:
+    async def _block_merge_invariant(
+        self, task_id: str, author_agent: str, decision: ReviewDecision,
+        test_output: str, error: MergeInvariantError,
+    ) -> IntegratorResult:
+        message = f"Merge invariant failed: {error}. Inspect the target checkout before retrying."
+        logger.error(message)
+        await self._mark_task_blocked(task_id, message)
+        await self._notify_bus_blocked(task_id, author_agent, message)
+        return IntegratorResult(
+            success=False, merged=True, status="blocked", output=test_output,
+            error=message,
+            metadata={
+                "review": decision.model_dump(mode="json"),
+                "merge_commit_sha": await self._git_output("rev-parse", "HEAD"),
+            },
+        )
+
+    async def _merge_branches(self, candidate_sha: str, target_branch: str, *, expected_target_sha: str) -> tuple[bool, str]:
         """Merge the reviewed commit ID, never a movable candidate branch."""
         try:
             current = await self._git_output("symbolic-ref", "--short", "HEAD")
@@ -321,7 +352,7 @@ class BranchIntegrator:
                 return False, "Target checkout is dirty; refusing to merge."
             # Check merge possibility
             proc = await asyncio.create_subprocess_exec(
-                "git", "merge", "--no-commit", "--no-ff", candidate_branch,
+                "git", "merge", "--no-commit", "--no-ff", candidate_sha,
                 cwd=str(self.repo_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -345,7 +376,7 @@ class BranchIntegrator:
 
             # Commit merge
             proc_commit = await asyncio.create_subprocess_exec(
-                "git", "commit", "-m", f"chore(merge): integrate {candidate_branch} into {target_branch}",
+                "git", "commit", "-m", f"chore(merge): integrate {candidate_sha} into {target_branch}",
                 cwd=str(self.repo_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -356,8 +387,17 @@ class BranchIntegrator:
                 abort = await asyncio.create_subprocess_exec("git", "merge", "--abort", cwd=str(self.repo_dir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                 await abort.communicate()
                 return False, "Merge commit failed: " + commit_text
+            first_parent = await self._git_output("rev-parse", "HEAD^1")
+            second_parent = await self._git_output("rev-parse", "HEAD^2")
+            if first_parent != expected_target_sha or second_parent != candidate_sha:
+                raise MergeInvariantError(
+                    f"expected parents ({expected_target_sha}, {candidate_sha}), "
+                    f"found ({first_parent or 'missing'}, {second_parent or 'missing'})"
+                )
             return (True, "Merge completed successfully.\n" + commit_text)
 
+        except MergeInvariantError:
+            raise
         except Exception as exc:
             return (False, str(exc))
 
@@ -429,7 +469,7 @@ class BranchIntegrator:
                 logger.error(f"Failed to notify author {author_agent}: {exc}")
 
     async def _notify_bus_blocked(self, task_id: str, author_agent: str, details: str) -> None:
-        """Alerts that a task exceeded max integration retries and is blocked."""
+        """Alert the author to a blocked integration with its specific reason."""
         async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
             try:
                 await client.post(
@@ -439,7 +479,7 @@ class BranchIntegrator:
                         "to_agent": author_agent,
                         "message_type": "blocker",
                         "body": {
-                            "text": f"Task {task_id} blocked: exceeded max integration retries ({self.max_retries_per_task}).",
+                            "text": f"Task {task_id} blocked: {details[:300]}",
                             "details": details[:300],
                         },
                         "reply_needed": True,

@@ -2,7 +2,10 @@
 
 ## Goal
 
-Evolve `agent-bus` from a strong local multi-agent coordination prototype into a durable, provider-neutral coordination and governance layer without duplicating mature runtime projects such as Orca or OpenHands.
+Evolve `agent-bus` from a strong local multi-agent coordination prototype into
+a durable, provider-neutral coordination and governance layer. Adopt external
+runtime infrastructure only when a measured integration reduces maintenance
+without transferring task or review authority.
 
 This roadmap is incremental. Each phase must leave the current product usable.
 
@@ -12,15 +15,32 @@ This roadmap is incremental. Each phase must leave the current product usable.
 
 Validate the V2 boundaries before writing capability routing or runtime code.
 
+Phase -1 is a bounded evaluation, not a production adapter. Record the tested
+repository version, commands, observed results and decision for each spike.
+
 Use [LANDSCAPE_AND_ADOPTION.md](LANDSCAPE_AND_ADOPTION.md) as the evaluation checklist and [ADR-001](docs/adr/001-pluggable-planning-and-runtime.md) as the initial architectural decision.
+
+The first [Phase -1 evidence record](docs/spikes/2026-09-23-phase-minus-one.md)
+rejects the tested `orca-cli/orca` revision as the first adapter: its CLI does
+not yet implement task launch. Planner compatibility passed only with mock
+HTTP backends, so Phase -1 remains open.
 
 ### Required spikes
 
-#### Orca runtime spike
+#### External runtime spike
 
-Prove whether Agent Bus can delegate execution to Orca while retaining durable ownership of tasks, routing, evidence, review state and audit history.
+Prove whether Agent Bus can delegate execution while retaining durable ownership of tasks, routing, evidence, review state and audit history.
 
 Evaluate launch/session lifecycle, cancellation, status visibility, worktree ownership, result/artifact capture, failure recovery and maintenance cost.
+
+Start with a generic external-command probe. Revisit Orca only when a named
+revision passes the source and command preflight. Use a disposable repository
+and a bus-owned task/attempt ID. Try launch,
+completion, cancellation, process restart and ambiguous completion. Verify that
+the external runtime cannot mark the Agent Bus task done or merge it
+independently. Stop if its own DAG/review lifecycle cannot be confined to
+execution. The probe must not become a maintained adapter before the runtime
+contract exists.
 
 #### Planner abstraction spike
 
@@ -30,7 +50,10 @@ Run the same planning request through:
 2. Hermes with a second backend,
 3. a deterministic/static planner.
 
-All must produce the same validated `TaskPlan` contract.
+First define a versioned plan contract compatible with the current
+`TaskBreakdownPlan`. All three must produce plans accepted by the same
+validator and publisher. The static planner must work without an inference
+backend or paid model access.
 
 #### External ecosystem review
 
@@ -40,7 +63,7 @@ Record what Agent Bus will adopt, adapt, test or reject from Orca, OpenHands, Pa
 
 Before Phase 0 begins, answer with evidence:
 
-- whether Orca should become a first-class runtime adapter,
+- whether any tested Orca revision should become a first-class runtime adapter,
 - what remains in `NativeRuntime`,
 - whether OpenHands is useful now or deferred,
 - whether Hermes can operate with multiple backends,
@@ -48,10 +71,14 @@ Before Phase 0 begins, answer with evidence:
 - what external patterns are explicitly adopted/rejected,
 - what code should not be built.
 
+The decision record must state pass/fail for restart reconciliation, task
+ownership, cancellation, result provenance, reviewed candidate SHA and
+integration maintenance cost. A source review alone does not pass the spike.
+
 ### Deliverables
 
 - `LANDSCAPE_AND_ADOPTION.md`,
-- runtime spike notes/results,
+- runtime spike notes/results, including rejected preflights,
 - planner spike notes/results,
 - ADR updates if evidence changes the architecture,
 - revised Phase 1 scope.
@@ -85,6 +112,10 @@ Stop assigning work by hard-coded model/agent identity.
 
 Add first-class capability metadata.
 
+Build on the existing `AgentInfo.capabilities` field. It is currently a
+participant declaration; define separate project approval, freshness and
+capacity signals before treating it as routing authority.
+
 Suggested entities:
 
 - `AgentCapability`
@@ -102,6 +133,7 @@ Suggested initial capabilities:
 - `code-review`
 - `security-review`
 - `git`
+- `python`
 - `odoo`
 - `sql`
 - `frontend`
@@ -137,6 +169,9 @@ agent-bus route TASK_ID
 - unavailable-agent filtering,
 - deterministic tie resolution,
 - project isolation.
+- a direct claim cannot bypass requirements or project policy,
+- concurrent routing and claims produce one owner,
+- stale presence, missing capacity and revoked capability are ineligible.
 
 ### Definition of done
 
@@ -149,6 +184,10 @@ A task can be created with:
 ```
 
 and routed without naming Kimi, Codex, Claude or another provider.
+
+Eligibility is enforced by the atomic claim path, including claims initiated
+through existing CLI and MCP commands. Existing tasks without requirements
+retain their current claim behavior.
 
 ## Phase 2 - Runtime Adapter Interface
 
@@ -177,6 +216,12 @@ class AgentRuntime(Protocol):
     async def cancel(self, session: RuntimeSession) -> None: ...
 ```
 
+Define `RuntimeStartRequest`, `RuntimeSession`, `RuntimeStatus` and a result
+envelope before freezing this protocol. The bus creates an idempotent attempt
+ID; the adapter persists an opaque external reference and can reconcile it
+after restart. Completion includes outcome, candidate commit and references to
+logs/results. Retrying an unknown attempt is blocked until reconciliation.
+
 Wrap the current worker/watch execution path as `NativeRuntime`. Do not rewrite it.
 
 ### Acceptance criteria
@@ -184,6 +229,8 @@ Wrap the current worker/watch execution path as `NativeRuntime`. Do not rewrite 
 - current listeners/workers operate through the adapter contract,
 - a fake runtime executes all runtime tests,
 - core imports no provider-specific CLI code.
+- a restarted bus can recover the same runtime attempt without launching a
+  duplicate execution.
 
 ## Phase 3 - External Runtime Pilot
 
@@ -193,7 +240,8 @@ Prove that Agent Bus can govern work it does not execute itself.
 
 ### Recommended first adapter
 
-**Orca** or a generic external-command runtime.
+A generic external-command runtime. Reconsider Orca only after a viable
+executable revision is demonstrated.
 
 ### Deliverables
 
@@ -203,6 +251,8 @@ Prove that Agent Bus can govern work it does not execute itself.
 - cancellation,
 - completion mapping,
 - output capture.
+- a minimum workspace ownership and candidate-export contract,
+- a small, immutable result/evidence reference contract needed by Gatekeeper.
 
 ### Definition of done
 
@@ -214,6 +264,11 @@ A task can:
 4. return result/evidence,
 5. enter the existing review/integration pipeline,
 6. remain fully visible in Agent Bus history.
+
+Exercise completion after a hub restart, cancellation during execution, and
+an ambiguous timeout. The candidate submitted to review must be traceable to
+the exact runtime attempt. This pilot does not wait for the full artifact store
+or general workspace interface, but it must use their minimum contracts.
 
 ## Phase 4 - Artifact Store
 
@@ -230,6 +285,11 @@ Add:
 - `ArtifactReference`
 
 Initial storage can remain filesystem + SQLite metadata.
+
+Artifact IDs are project-scoped; publishing records the producer, task,
+runtime attempt, media type, byte size, checksum and retention policy. Retrieval
+verifies both authorization and checksum. A local file path is never the
+portable artifact identifier.
 
 ### Initial kinds
 
@@ -286,6 +346,14 @@ Allow policies to require:
 ### Definition of done
 
 Under a strict policy, a task cannot be integrated if required evidence is missing even when the author says it is complete.
+
+The current integrator requires an approved Gatekeeper verdict by default.
+Explicit advisory review exists for compatibility: it may merge
+`CHANGES_REQUESTED` with passing tests, but never `BLOCKED`. Today this is an
+operator-selected flag; the Phase 8 compiler must prevent advisory mode from
+satisfying a workflow's `review: approved` gate. Evidence policy must bind
+verdict, test result and candidate SHA to the same runtime attempt and target
+baseline.
 
 ## Phase 6 - Planner Decoupling
 
@@ -486,7 +554,7 @@ SQLite and local-first operation are strengths at the current stage.
 - runtime registry,
 - fake runtime,
 - external command runtime,
-- Orca proof of concept.
+- a new Orca proof of concept only after its command preflight passes.
 
 ## Epic C - Artifact and Evidence Layer
 
@@ -571,6 +639,7 @@ Replace any one provider with another agent exposing the same capabilities witho
 - one external runtime,
 - artifact references,
 - backward-compatible MCP.
+- durable runtime-attempt recovery and claim-time capability enforcement.
 
 ## V2 Beta
 
@@ -591,6 +660,9 @@ Replace any one provider with another agent exposing the same capabilities witho
 
 1. No big-bang rewrite.
 2. Preserve existing CLI behavior unless explicitly deprecated.
+   The integrator's approval default is an intentional policy change:
+   automation that relied on advisory review must now pass
+   `--advisory-review` explicitly.
 3. Keep MCP contracts backward compatible when possible.
 4. New infrastructure must be testable without paid APIs.
 5. All external runtimes require fake/test adapters.
@@ -598,6 +670,8 @@ Replace any one provider with another agent exposing the same capabilities witho
 7. No provider-specific object may leak into core domain models.
 8. Keep SQLite as the default persistence backend.
 9. Gatekeeper invariants must not regress.
+   In strict workflows, `CHANGES_REQUESTED` never merges, and the approved
+   candidate SHA is the merge commit's second parent.
 10. Every phase needs an end-to-end acceptance test.
 
 # Immediate Next Sprint
@@ -606,13 +680,16 @@ Do **not** start Phase 1 yet.
 
 The next sprint is Phase -1 and should contain only evaluation work:
 
-### 1. Orca runtime spike
+### 1. External-command runtime spike
 
-Build the smallest adapter/probe necessary to measure whether Orca can execute Agent Bus-owned work without taking over governance.
+Build the smallest disposable probe necessary to measure whether an external
+command can execute Agent Bus-owned work without taking over governance. The
+tested Orca revision failed preflight and is recorded separately.
 
 ### 2. Planner abstraction spike
 
-Demonstrate interchangeable planning backends and a non-Hermes planner against the same `TaskPlan` contract.
+Define the plan contract against today's `TaskBreakdownPlan`, then demonstrate
+interchangeable inference backends and a non-Hermes planner against it.
 
 ### 3. Adoption decision record
 

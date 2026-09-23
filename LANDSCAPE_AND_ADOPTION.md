@@ -6,12 +6,33 @@ Before implementing Agent Bus V2, evaluate adjacent multi-agent coding systems a
 
 This document is a decision aid, not a feature wishlist.
 
+As of 2026-09-23, the labels below are **provisional pattern decisions** based
+on source review. They do not mean an integration has passed a spike. Every
+runtime adoption decision must include a tested release/commit, commands,
+results, limitations and a dated ADR. Recheck the license and API surface at
+the exact revision tested.
+
 Decision labels:
 
 - **ADOPT**: use the pattern directly where compatible.
 - **ADAPT**: keep the idea but implement it in Agent Bus terms.
 - **SPIKE**: build a bounded proof of concept before deciding.
 - **REJECT**: intentionally do not pursue the pattern now.
+
+## Reference projects
+
+| Name used here | Primary source | Surface to assess |
+|---|---|---|
+| Orca | [orca-cli/orca](https://github.com/orca-cli/orca) | Advertised CLI/MCP lifecycle; first source preflight failed |
+| OpenHands | [OpenHands Software Agent SDK](https://github.com/OpenHands/software-agent-sdk) | Agent Server API and workspace/sandbox implementations separately |
+| Pact | [zekariasasaminew/pact](https://github.com/zekariasasaminew/pact) | Worktree and merge workflow |
+| Hydra | [krowxx/hydra](https://github.com/krowxx/hydra) | Heuristic routing and deliberation |
+| Orka | [orka-agents/orka](https://github.com/orka-agents/orka) | Kubernetes task, review and security workflows |
+| multiagents | [zetbrush/multiagents](https://github.com/zetbrush/multiagents) | MCP peer discovery and messaging |
+
+The generic names Orca, Hydra and Orka identify multiple unrelated projects;
+spike reports must name the exact repository and revision. A pattern listed as
+ADOPT below still needs a local compatibility test before code is adopted.
 
 ---
 
@@ -25,7 +46,8 @@ Each external pattern should be judged against:
 4. Does it improve observability or safety?
 5. Can it be tested without paid model access?
 6. Does it avoid leaking provider-specific concepts into core?
-7. Does it preserve reviewed-SHA == integrated-SHA?
+7. Does it preserve the reviewed candidate SHA as the merge input, verify its
+   parentage and target baseline, and require approval when review is strict?
 8. Can it work with local-first SQLite deployments?
 9. Does it make Odoo-oriented workflows easier to compose?
 10. Can the integration be removed later without rewriting core?
@@ -44,8 +66,9 @@ Each external pattern should be judged against:
 
 ### Decision
 
-- External execution backend: **SPIKE**
-- Reuse as primary runtime where useful: **SPIKE**
+- External execution backend at commit `5beeefc`: **REJECT for now**; the
+  command preflight failed ([evidence](docs/spikes/2026-09-23-phase-minus-one.md))
+- Reuse as primary runtime at that revision: **REJECT for now**
 - Replace Agent Bus durable task/message layer: **REJECT**
 - Copy Orca-specific concepts into core domain objects: **REJECT**
 - Learn from operational simplicity: **ADOPT**
@@ -54,7 +77,18 @@ Each external pattern should be judged against:
 
 > Can Agent Bus delegate execution to Orca while retaining task ownership, routing, evidence, decisions, review state and audit history?
 
-### Success criteria
+The Orca README describes its own run state, worktrees, DAG and review flows.
+If a future revision implements these, the probe must use it only as an
+executor and record which side owns each transition. A generic
+external-command runtime is the first executable probe; any later Orca
+adapter would be compared against it.
+
+At the tested revision, only `orca version` is registered. The advertised
+launch/MCP/cancel commands are absent, so the executable governance spike
+cannot run. A future revision or a different Orca project requires a new
+preflight; this finding does not evaluate those candidates.
+
+### Success criteria for a future Orca revision
 
 A task must:
 
@@ -93,6 +127,10 @@ Do not adopt Orca runtime integration if it requires Agent Bus to surrender task
 ### Key lesson
 
 Agent Bus should avoid becoming a VM/container orchestration platform when a backend can provide that responsibility.
+
+Evaluate Agent Server and the selected workspace implementation as separate
+surfaces. A successful local SDK conversation is not evidence that remote
+sandbox provisioning, recovery or artifact export works.
 
 ---
 
@@ -185,8 +223,8 @@ Agent communication should remain durable and contract-driven through the bus.
 
 | Area | Agent Bus direction | External reference | Decision |
 |---|---|---|---|
-| Durable state | Keep in Agent Bus | Orca | ADOPT concept, keep ownership |
-| Agent execution | Adapter-based | Orca/OpenHands | SPIKE |
+| Durable state | Keep in Agent Bus | Orca | Existing core; compare recovery patterns |
+| Agent execution | Adapter-based | Generic command/OpenHands | SPIKE; tested Orca revision rejected |
 | Worktrees | Workspace backend | Orca/Pact | ADAPT |
 | Remote sandbox | Delegate | OpenHands | SPIKE |
 | Routing | Capability-based | Hydra | ADAPT |
@@ -211,21 +249,16 @@ PlanningRequest
       |
       v
    Planner
-      |
-      +---- HermesPlanner
-      +---- StaticPlanner
-      +---- WorkflowPlanner
+      +---- HermesPlanner ----> PlanningBackend
+      |                            +---- OpenAI-compatible
+      |                            +---- Anthropic / Kimi / GLM
+      |                            +---- Local / Fake
+      +---- StaticPlanner (no inference backend)
+      +---- WorkflowPlanner (no inference backend required)
       +---- Future planner
       |
       v
-PlanningBackend
-      |
-      +---- OpenAI-compatible
-      +---- Kimi
-      +---- Anthropic
-      +---- GLM
-      +---- Local
-      +---- Fake
+Validated TaskPlan
 ```
 
 Two distinct concepts must remain separate:
@@ -256,6 +289,9 @@ Run the same planning request through at least:
 3. a deterministic/static planner.
 
 All outputs must converge to the same validated `TaskPlan` contract.
+
+The current implementation calls this contract `TaskBreakdownPlan`. The spike
+must define versioning and compatibility before claiming interchangeability.
 
 ---
 
@@ -289,6 +325,20 @@ Each spike should record:
 - failure recovery,
 - provider portability,
 - code maintenance required in Agent Bus.
+
+Also record the tested revision, exact commands and observed results for:
+
+1. the same task surviving a hub restart without duplicate execution,
+2. a timed-out launch reconciled before retry,
+3. cancellation and cleanup with an unambiguous terminal state,
+4. the candidate commit and evidence reaching Gatekeeper without the external
+   runtime changing task or review authority,
+5. a comparison with the generic external-command probe on maintenance cost.
+
+Any loss of bus-owned task/review state, ambiguous retry that duplicates work,
+or inability to bind the reviewed candidate to the runtime attempt fails the
+runtime adoption gate. Latency and usage numbers inform the trade-off but do
+not override those correctness gates.
 
 Do not select a runtime only because it runs more agents. Select it if it reduces Agent Bus maintenance while preserving governance.
 
@@ -335,13 +385,16 @@ The feature:
 
 Before Phase 1 implementation:
 
-1. complete Orca runtime spike,
+1. record the Orca preflight rejection and complete an executable generic
+   external-command runtime spike,
 2. complete planner abstraction spike,
 3. document OpenHands integration feasibility,
 4. record decisions in ADRs,
 5. update the roadmap based on evidence,
 6. decide the minimum scope of `NativeRuntime`,
 7. identify code that can be deleted or frozen if an external runtime is adopted.
+8. publish a scorecard with source revision, commands, raw results and each
+   correctness gate marked pass/fail/unknown.
 
 ---
 

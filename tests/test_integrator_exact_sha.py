@@ -28,11 +28,13 @@ async def candidate(tmp_path):
     (wt / 'feature').write_text('reviewed')
     git(wt, 'add', '.')
     git(wt, 'commit', '-m', 'feature')
-    integrator = BranchIntegrator(repo_dir=repo, require_approval=True)
+    integrator = BranchIntegrator(repo_dir=repo)
     integrator.run_tests = AsyncMock(return_value=(True, 'tests passed'))
     integrator._record_review = AsyncMock()
     integrator._mark_task_completed = AsyncMock()
+    integrator._mark_task_blocked = AsyncMock()
     integrator._notify_author_failure = AsyncMock()
+    integrator._notify_bus_blocked = AsyncMock()
     return integrator, repo, wt
 
 
@@ -43,10 +45,34 @@ async def integrate(integrator, wt):
 async def test_success_merges_the_reviewed_sha(candidate):
     integrator, repo, wt = candidate
     sha = git(wt, 'rev-parse', 'HEAD')
+    baseline = git(repo, 'rev-parse', 'HEAD')
     result = await integrate(integrator, wt)
     assert result.success, result
     assert result.metadata['review']['sha'] == sha
+    assert git(repo, 'rev-parse', 'HEAD') != sha
+    assert git(repo, 'rev-parse', 'HEAD^1') == baseline
     assert git(repo, 'rev-parse', 'HEAD^2') == sha
+
+
+async def test_post_commit_parent_mismatch_blocks_completion(candidate):
+    integrator, repo, wt = candidate
+    original_git_output = integrator._git_output
+
+    async def wrong_second_parent(*args, **kwargs):
+        if args == ('rev-parse', 'HEAD^2'):
+            return '0' * 40
+        return await original_git_output(*args, **kwargs)
+
+    integrator._git_output = wrong_second_parent
+    result = await integrate(integrator, wt)
+
+    assert result.status == 'blocked' and not result.success
+    assert result.merged is True
+    assert 'Merge invariant failed' in result.error
+    assert result.metadata['merge_commit_sha'] == git(repo, 'rev-parse', 'HEAD')
+    integrator._mark_task_blocked.assert_awaited_once()
+    integrator._mark_task_completed.assert_not_awaited()
+    assert git(repo, 'rev-parse', 'HEAD^2') == git(wt, 'rev-parse', 'HEAD')
 
 
 async def test_commit_created_during_tests_is_rejected(candidate):
@@ -113,4 +139,22 @@ async def test_gatekeeper_cannot_approve_another_sha(candidate):
     integrator.gatekeeper.evaluate = lambda request: original(request).model_copy(update={'sha': 'f' * 40})
     result = await integrate(integrator, wt)
     assert result.status == 'blocked' and not result.merged
+    assert git(repo, 'rev-parse', 'HEAD') == initial
+
+
+async def test_default_policy_requires_approved_review(candidate):
+    integrator, repo, wt = candidate
+    initial = git(repo, 'rev-parse', 'HEAD')
+    original = integrator.gatekeeper.evaluate
+    from agent_bus.worker.gatekeeper import Verdict
+
+    integrator.gatekeeper.evaluate = lambda request: original(request).model_copy(
+        update={'verdict': Verdict.CHANGES_REQUESTED, 'reason': 'Review requested changes'}
+    )
+    integrator._notify_author_review_feedback = AsyncMock()
+
+    result = await integrate(integrator, wt)
+
+    assert integrator.require_approval is True
+    assert result.status == 'retry_requested' and not result.merged
     assert git(repo, 'rev-parse', 'HEAD') == initial
