@@ -6,6 +6,56 @@ Evolve `agent-bus` from a strong local multi-agent coordination prototype into a
 
 This roadmap is incremental. Each phase must leave the current product usable.
 
+## Phase -1 - Architecture Evaluation
+
+### Objective
+
+Validate the V2 boundaries before writing capability routing or runtime code.
+
+Use [LANDSCAPE_AND_ADOPTION.md](LANDSCAPE_AND_ADOPTION.md) as the evaluation checklist and [ADR-001](docs/adr/001-pluggable-planning-and-runtime.md) as the initial architectural decision.
+
+### Required spikes
+
+#### Orca runtime spike
+
+Prove whether Agent Bus can delegate execution to Orca while retaining durable ownership of tasks, routing, evidence, review state and audit history.
+
+Evaluate launch/session lifecycle, cancellation, status visibility, worktree ownership, result/artifact capture, failure recovery and maintenance cost.
+
+#### Planner abstraction spike
+
+Run the same planning request through:
+
+1. Hermes with one inference backend,
+2. Hermes with a second backend,
+3. a deterministic/static planner.
+
+All must produce the same validated `TaskPlan` contract.
+
+#### External ecosystem review
+
+Record what Agent Bus will adopt, adapt, test or reject from Orca, OpenHands, Pact, Hydra, Orka and multiagents.
+
+### Exit criteria
+
+Before Phase 0 begins, answer with evidence:
+
+- whether Orca should become a first-class runtime adapter,
+- what remains in `NativeRuntime`,
+- whether OpenHands is useful now or deferred,
+- whether Hermes can operate with multiple backends,
+- whether a non-Hermes planner can produce a valid `TaskPlan`,
+- what external patterns are explicitly adopted/rejected,
+- what code should not be built.
+
+### Deliverables
+
+- `LANDSCAPE_AND_ADOPTION.md`,
+- runtime spike notes/results,
+- planner spike notes/results,
+- ADR updates if evidence changes the architecture,
+- revised Phase 1 scope.
+
 ## Phase 0 - Freeze the Boundary
 
 ### Objective
@@ -384,6 +434,8 @@ Retain in Agent Bus:
 # Priority Order
 
 ```text
+-1. Architecture Evaluation / Spikes
+0. Freeze the Boundary
 1. Capability Registry
 2. Runtime Interface
 3. External Runtime Pilot
@@ -396,7 +448,7 @@ Retain in Agent Bus:
 10. Remote Runtime
 ```
 
-The first three phases validate the architectural bet.
+Phase -1 validates the architectural bet before implementation. The first three implementation phases then validate the selected contracts.
 
 # What Not to Build Yet
 
@@ -550,7 +602,23 @@ Replace any one provider with another agent exposing the same capabilities witho
 
 # Immediate Next Sprint
 
-The next sprint should contain only three technical objectives:
+Do **not** start Phase 1 yet.
+
+The next sprint is Phase -1 and should contain only evaluation work:
+
+### 1. Orca runtime spike
+
+Build the smallest adapter/probe necessary to measure whether Orca can execute Agent Bus-owned work without taking over governance.
+
+### 2. Planner abstraction spike
+
+Demonstrate interchangeable planning backends and a non-Hermes planner against the same `TaskPlan` contract.
+
+### 3. Adoption decision record
+
+Update `LANDSCAPE_AND_ADOPTION.md` and ADRs with measured conclusions.
+
+After Phase -1 exits successfully, the first implementation sprint should contain only three technical objectives:
 
 ### 1. Capability model
 
