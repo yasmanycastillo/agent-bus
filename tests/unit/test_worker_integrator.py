@@ -59,7 +59,7 @@ async def test_integrator_exceeding_max_retries_blocks_task(tmp_path):
     async def mock_notify(task_id, author_agent, details, retry):
         pass
 
-    async def mock_block(task_id, author_agent, details):
+    async def mock_block(task_id, author_agent, reason, details=""):
         pass
 
     integrator.run_tests = mock_fail_tests

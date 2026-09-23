@@ -274,12 +274,53 @@ async def test_branch_integrator_require_approval_blocked(live_bus_url, tmp_path
         # Blocker message sent
         inbox_resp = await client.get("/inbox/charlie")
         messages = inbox_resp.json()
-        assert any(m.get("message_type") == "blocker" for m in messages)
+        blockers = [m for m in messages if m.get("message_type") == "blocker"]
+        assert len(blockers) == 1
+        assert blockers[0]["body"]["text"].startswith(
+            "Task T-BLK-1 blocked: Gatekeeper review blocked:"
+        )
+        assert blockers[0]["body"]["text"].count("Task T-BLK-1 blocked:") == 1
 
         # Review audited
         revs = (await client.get("/tasks/T-BLK-1/reviews")).json()
         assert len(revs) == 1
         assert revs[0]["verdict"] == "blocked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("require_approval", [True, False])
+async def test_retry_blocker_separates_reason_from_test_output(
+    live_bus_url, tmp_path, require_approval
+):
+    task_id = f"T-RETRY-{require_approval}"
+    async with async_bus_client("integrator", base_url=live_bus_url) as client:
+        await client.post("/tasks", json={"task_id": task_id, "title": "Retry limit", "owner": "alice"})
+
+    integrator = BranchIntegrator(
+        repo_dir=tmp_path, bus_url=live_bus_url,
+        max_retries_per_task=0, require_approval=require_approval,
+    )
+    test_output = "FAILED tests/test_calc.py::test_add - AssertionError"
+
+    async def mock_fail_tests(worktree_dir, test_cmd=None):
+        return False, test_output
+
+    async def mock_git_output(*args, cwd=None):
+        return SAMPLE_CLEAN_DIFF if "diff" in args else ""
+
+    integrator.run_tests = mock_fail_tests
+    integrator._git_output = mock_git_output
+    result = await integrator.integrate_task(task_id, "alice", tmp_path, "agent/alice")
+    assert result.status == "blocked"
+
+    async with async_bus_client("alice", base_url=live_bus_url) as client:
+        messages = (await client.get("/inbox/alice")).json()
+    blockers = [m for m in messages if m.get("message_type") == "blocker"]
+    assert len(blockers) == 1
+    body = blockers[0]["body"]
+    assert "Exceeded max" in body["text"]
+    assert test_output not in body["text"]
+    assert body["details"] == test_output
 
 
 @pytest.mark.asyncio

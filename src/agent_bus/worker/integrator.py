@@ -182,9 +182,10 @@ class BranchIntegrator:
 
         # If verdict is BLOCKED, DO NOT MERGE under any policy
         if decision.verdict == Verdict.BLOCKED:
-            await self._mark_task_blocked(task_id, f"Gatekeeper review blocked: {decision.reason}")
+            reason = f"Gatekeeper review blocked: {decision.reason}"
+            await self._mark_task_blocked(task_id, reason)
             await self._notify_bus_blocked(
-                task_id, author_agent, f"Task {task_id} blocked by gatekeeper: {decision.reason}"
+                task_id, author_agent, reason
             )
             return IntegratorResult(
                 success=False,
@@ -202,10 +203,16 @@ class BranchIntegrator:
                 self._retry_counts[task_id] = retries
 
                 if retries > self.max_retries_per_task:
-                    await self._mark_task_blocked(
-                        task_id, f"Exceeded max retries ({self.max_retries_per_task}). Gatekeeper: {decision.reason}"
+                    task_reason = (
+                        f"Exceeded max retries ({self.max_retries_per_task}). "
+                        f"Gatekeeper: {decision.reason}"
                     )
-                    await self._notify_bus_blocked(task_id, author_agent, test_output)
+                    inbox_reason = (
+                        f"Exceeded max retries ({self.max_retries_per_task}) "
+                        "after Gatekeeper requested changes."
+                    )
+                    await self._mark_task_blocked(task_id, task_reason)
+                    await self._notify_bus_blocked(task_id, author_agent, inbox_reason, test_output)
                     return IntegratorResult(
                         success=False,
                         merged=False,
@@ -267,10 +274,9 @@ class BranchIntegrator:
                 self._retry_counts[task_id] = retries
 
                 if retries > self.max_retries_per_task:
-                    await self._mark_task_blocked(
-                        task_id, f"Exceeded max integration retries ({self.max_retries_per_task})."
-                    )
-                    await self._notify_bus_blocked(task_id, author_agent, test_output)
+                    reason = f"Exceeded max integration retries ({self.max_retries_per_task})."
+                    await self._mark_task_blocked(task_id, reason)
+                    await self._notify_bus_blocked(task_id, author_agent, reason, test_output)
                     return IntegratorResult(
                         success=False,
                         merged=False,
@@ -468,7 +474,9 @@ class BranchIntegrator:
             except Exception as exc:
                 logger.error(f"Failed to notify author {author_agent}: {exc}")
 
-    async def _notify_bus_blocked(self, task_id: str, author_agent: str, details: str) -> None:
+    async def _notify_bus_blocked(
+        self, task_id: str, author_agent: str, reason: str, details: str = ""
+    ) -> None:
         """Alert the author to a blocked integration with its specific reason."""
         async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
             try:
@@ -479,7 +487,7 @@ class BranchIntegrator:
                         "to_agent": author_agent,
                         "message_type": "blocker",
                         "body": {
-                            "text": f"Task {task_id} blocked: {details[:300]}",
+                            "text": f"Task {task_id} blocked: {reason[:300]}",
                             "details": details[:300],
                         },
                         "reply_needed": True,

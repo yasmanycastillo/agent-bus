@@ -9,9 +9,15 @@ integration and mocked contract checks from live provider checks.
   (2026-05-08).
 - Why this candidate: its README describes the single Go binary, SQLite state,
   Git worktrees and MCP surface named in the V2 proposal.
-- Reproduction: `gh repo clone orca-cli/orca /tmp/agent-bus-orca-spike -- --depth=1`,
-  then `git ls-tree -r --name-only HEAD internal/cli internal/mcp internal/runner`
-  and `rg -n 'rootCmd\.AddCommand|&cobra\.Command|Use:' .` in that checkout.
+- Reproduction (full clone, pinned revision; stop if the checkout differs):
+
+  ```sh
+  gh repo clone orca-cli/orca /tmp/agent-bus-orca-spike
+  git -C /tmp/agent-bus-orca-spike checkout --detach 5beeefcb57555962bb93facc54b5f82484731802
+  test "$(git -C /tmp/agent-bus-orca-spike rev-parse HEAD)" = 5beeefcb57555962bb93facc54b5f82484731802 || exit 1
+  git -C /tmp/agent-bus-orca-spike ls-tree -r --name-only HEAD internal/cli internal/mcp internal/runner
+  rg -n 'rootCmd\.AddCommand|&cobra\.Command|Use:' /tmp/agent-bus-orca-spike/internal
+  ```
 - Observed: the CLI registers only its root and `version` command;
   `internal/mcp` and `internal/runner` contain only `doc.go`. The README lists
   `orca run`, `orca kill` and `orca mcp serve`, but this commit has no command
