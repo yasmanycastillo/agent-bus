@@ -83,6 +83,20 @@ Those belong behind adapters.
                                   Merge
 ```
 
+## Pre-Implementation Evaluation
+
+Before V2 implementation, complete the evaluation defined in [LANDSCAPE_AND_ADOPTION.md](LANDSCAPE_AND_ADOPTION.md).
+
+This evaluation is mandatory for runtime and planning decisions. In particular:
+
+- Orca must be tested as an external runtime candidate before expanding native runtime responsibilities.
+- OpenHands must be evaluated as a sandbox/remote execution backend before building equivalent infrastructure.
+- Hermes is treated as one planner implementation, not as the fixed planner of Agent Bus.
+- Patterns from Pact, Hydra, Orka and multiagents must be explicitly classified as ADOPT, ADAPT, SPIKE or REJECT.
+- Decisions that affect core boundaries must be recorded as ADRs.
+
+See [ADR-001](docs/adr/001-pluggable-planning-and-runtime.md).
+
 ## Architectural Boundaries
 
 ### Agent Bus Core
@@ -122,6 +136,8 @@ class PlanningBackend(Protocol):
 ```
 
 `HermesPlanner` should consume a `PlanningBackend`.
+
+Hermes is optional and replaceable. A deterministic workflow planner, a human-authored planner or another planning strategy must be able to emit the same validated `TaskPlan` contract.
 
 ### Runtime Adapter
 
