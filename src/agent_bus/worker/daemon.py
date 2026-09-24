@@ -316,6 +316,7 @@ class WorkerDaemon:
         await self._set_agent_status(AgentStatus.BUSY, work={"type": "task", "task_id": task_id})
 
         decisions = await self._fetch_recent_decisions()
+        task = {**task, "runtime_messages": await self._runtime_messages(task_id)}
         prompt = self.runner.assemble_prompt(task=task, decisions=decisions)
 
         result = await self.runner.execute_turn(prompt)
@@ -325,6 +326,19 @@ class WorkerDaemon:
 
         await self._set_agent_status(AgentStatus.ONLINE, work=None)
         return result
+
+    async def _runtime_messages(self, task_id: str) -> list[str]:
+        if not self._client or not task_id:
+            return []
+        try:
+            response = await self._client.get(f"/runtime/native/by-task/{task_id}/messages")
+            if response.status_code != 200:
+                return []
+            messages = response.json().get("messages") or []
+            return [message for message in messages if isinstance(message, str)]
+        except Exception as exc:
+            logger.debug("Runtime messages were not loaded: %s", exc)
+            return []
 
     async def _commit_and_submit_review(self, task_id: str) -> None:
         """Commit the worker checkout and enqueue it for serialized integration."""

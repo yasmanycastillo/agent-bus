@@ -424,6 +424,15 @@ class Database:
                 )"""
             )
             await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS runtime_messages (
+                    message_id TEXT PRIMARY KEY,
+                    attempt_id TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    consumed INTEGER NOT NULL DEFAULT 0
+                )"""
+            )
+            await self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS runtime_attempts (
                     attempt_id TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL,

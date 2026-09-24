@@ -565,6 +565,10 @@ class MessageBus:
             await self.db.conn.commit()
             return await self._load_profile(agent_id)
 
+        @self.app.get("/agents/{agent_id}/route-profile")
+        async def get_route_profile(agent_id: str):
+            return await self._load_profile(agent_id)
+
         @self.app.post("/tasks/{task_id}/requirements")
         async def set_requirements(task_id: str, request: Request):
             body = await self._json_object(request)
@@ -644,6 +648,27 @@ class MessageBus:
             except KeyError:
                 return JSONResponse({"error": "Attempt not found"}, status_code=404)
             return {"attempt_id": session.attempt_id, "state": session.state, "task_id": session.task_id}
+
+        @self.app.post("/runtime/native/{attempt_id}/send")
+        async def native_send(attempt_id: str, request: Request):
+            from agent_bus.runtimes.native import NativeRuntime
+            body = await self._json_object(request)
+            text = body.get("text")
+            if not isinstance(text, str) or not text:
+                return JSONResponse({"error": "text is required"}, status_code=422)
+            runtime = NativeRuntime(self.db)
+            try:
+                session = await runtime.status(attempt_id)
+            except KeyError:
+                return JSONResponse({"error": "Attempt not found"}, status_code=404)
+            message = await runtime.send(session, text)
+            return {"attempt_id": message.attempt_id, "text": message.text}
+
+        @self.app.get("/runtime/native/by-task/{task_id}/messages")
+        async def native_messages(task_id: str):
+            from agent_bus.runtimes.native import NativeRuntime
+            messages = await NativeRuntime(self.db).consume_messages(task_id)
+            return {"task_id": task_id, "messages": messages}
 
         @self.app.post("/tasks/{task_id}/reassign")
         async def reassign_task(task_id: str, req: ReassignRequest, request: Request):

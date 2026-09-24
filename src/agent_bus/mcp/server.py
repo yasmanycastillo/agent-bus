@@ -137,6 +137,31 @@ TOOLS_DEFINITIONS = [
         },
     },
     {
+        "name": "register_capabilities",
+        "description": "Registrar capacidades declaradas y, si la sesión puede, las aprobadas por el proyecto.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "declared": {"type": "array", "items": {"type": "string"}},
+                "approved": {"type": "array", "items": {"type": "string"}},
+                "priority": {"type": "integer"},
+                "cost_class": {"type": "string"},
+                "can_edit": {"type": "boolean"},
+            },
+            "required": ["agent_id", "declared"],
+        },
+    },
+    {
+        "name": "route_task",
+        "description": "Enrutar una tarea libre hacia un agente elegible sin reclamarla.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    },
+    {
         "name": "complete_task",
         "description": "Marcar una tarea como completada (done).",
         "inputSchema": {
@@ -329,6 +354,24 @@ class McpServer:
                 task_id = args["task_id"]
                 agent_id = args["agent_id"]
                 resp = await client.post(f"/tasks/{task_id}/claim", json={"agent_id": agent_id})
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "register_capabilities":
+                agent_id = args["agent_id"]
+                payload = {
+                    "declared": args.get("declared") or [],
+                    "approved": args.get("approved") or [],
+                    "priority": args.get("priority", 0),
+                    "cost_class": args.get("cost_class", "medium"),
+                    "can_edit": args.get("can_edit", True),
+                }
+                resp = await client.post(f"/agents/{agent_id}/route-profile", json=payload)
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "route_task":
+                resp = await client.post(f"/tasks/{args['task_id']}/route")
                 resp.raise_for_status()
                 return resp.json()
 

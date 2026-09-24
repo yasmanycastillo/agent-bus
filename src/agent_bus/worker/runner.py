@@ -85,6 +85,10 @@ class AgentRunner:
                 parts.append(f"- Description: {task.get('description')}")
             if task.get("locked_files"):
                 parts.append(f"- Locked files: {', '.join(task.get('locked_files', []))}")
+            runtime_messages = task.get("runtime_messages") or []
+            if runtime_messages:
+                parts.append("- Runtime messages:")
+                parts.extend(f"  - {message}" for message in runtime_messages)
 
         if message:
             parts.append("\n## High Priority Incoming Message (Reply Needed):")

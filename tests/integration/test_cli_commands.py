@@ -117,6 +117,48 @@ def test_project_option_preserves_invocation_relative_runtime(tmp_path, monkeypa
     assert os.environ['AGENT_BUS_CONFIG_DIR'] == 'runtime'
 
 
+def test_agent_capabilities_and_route_commands(monkeypatch):
+    from unittest.mock import MagicMock
+    from agent_bus.cli import main
+
+    calls = []
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, url):
+            calls.append(("GET", url))
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"declared": ["python"], "approved": [], "priority": 0, "cost_class": "low", "max_in_progress": 1, "can_edit": True}
+            return resp
+
+        def post(self, url, json=None):
+            calls.append(("POST", url, json))
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"selected_agent": "codex-01", "eligible": ["codex-01"], "declared": ["python", "implementation"], "approved": ["implementation"]}
+            return resp
+
+    monkeypatch.setattr(main, "_client", lambda: FakeClient())
+    runner = CliRunner()
+    shown = runner.invoke(main.app, ["agent", "capabilities", "codex-01"])
+    assert shown.exit_code == 0
+    assert "python" in shown.output
+    registered = runner.invoke(main.app, ["agent", "register-capability", "codex-01", "implementation", "--approve"])
+    assert registered.exit_code == 0
+    assert calls[-1][0] == "POST"
+    assert "implementation" in calls[-1][2]["declared"]
+    assert "implementation" in calls[-1][2]["approved"]
+    routed = runner.invoke(main.app, ["work", "route", "T1"])
+    assert routed.exit_code == 0
+    assert "codex-01" in routed.output
+
+
 def test_work_review_and_work_done_with_evidence(monkeypatch):
     from unittest.mock import MagicMock
     from agent_bus.cli import main

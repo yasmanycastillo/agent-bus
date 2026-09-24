@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 from agent_bus.reputation.database import Database
@@ -38,7 +39,34 @@ class NativeRuntime:
         return RuntimeSession(request.attempt_id, request.task_id, external, request.workspace_ref, "started")
 
     async def send(self, session: RuntimeSession, message: str) -> RuntimeMessage:
+        message_id = f"rtm-{uuid.uuid4().hex[:12]}"
+        await self._db.conn.execute(
+            """INSERT INTO runtime_messages (message_id, attempt_id, text, created_at, consumed)
+               VALUES (?, ?, ?, ?, 0)""",
+            (message_id, session.attempt_id, message, _now()),
+        )
+        await self._db.conn.commit()
         return RuntimeMessage(session.attempt_id, message)
+
+    async def consume_messages(self, task_id: str) -> list[str]:
+        rows = await self._db.conn.execute_fetchall(
+            """SELECT runtime_messages.message_id, runtime_messages.text
+               FROM runtime_messages
+               JOIN runtime_attempts ON runtime_attempts.attempt_id = runtime_messages.attempt_id
+               WHERE runtime_attempts.task_id = ? AND runtime_messages.consumed = 0
+               ORDER BY runtime_messages.created_at""",
+            (task_id,),
+        )
+        if not rows:
+            return []
+        ids = [row["message_id"] for row in rows]
+        placeholders = ",".join("?" * len(ids))
+        await self._db.conn.execute(
+            f"UPDATE runtime_messages SET consumed = 1 WHERE message_id IN ({placeholders})",
+            tuple(ids),
+        )
+        await self._db.conn.commit()
+        return [row["text"] for row in rows]
 
     async def cancel(self, session: RuntimeSession) -> None:
         await self._set_state(session.attempt_id, "cancelled")

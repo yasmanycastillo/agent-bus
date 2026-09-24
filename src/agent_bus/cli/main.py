@@ -414,6 +414,68 @@ def work_task(
             click.echo(f"Error: {_explain_error(resp)}")
 
 
+@work.command("route")
+@click.argument("task_id")
+def work_route(task_id: str):
+    """Elegir un agente elegible para una tarea libre."""
+    with _client() as client:
+        resp = client.post(f"/tasks/{task_id}/route")
+        if resp.status_code != 200:
+            click.echo(f"Error: {_explain_error(resp)}")
+            return
+        body = resp.json()
+        click.echo(f"Seleccionado: {body.get('selected_agent')}")
+        click.echo(f"Elegibles: {', '.join(body.get('eligible') or []) or '-'}")
+
+
+agent = click.Group(name="agent", help="Capacidades de un agente")
+app.add_command(agent)
+
+
+@agent.command("capabilities")
+@click.argument("agent_id")
+def agent_capabilities(agent_id: str):
+    """Mostrar capacidades declaradas y aprobadas."""
+    with _client() as client:
+        resp = client.get(f"/agents/{agent_id}/route-profile")
+        if resp.status_code != 200:
+            click.echo(f"Error: {_explain_error(resp)}")
+            return
+        body = resp.json()
+        click.echo(f"Declaradas: {', '.join(body.get('declared') or []) or '-'}")
+        click.echo(f"Aprobadas: {', '.join(body.get('approved') or []) or '-'}")
+
+
+@agent.command("register-capability")
+@click.argument("agent_id")
+@click.argument("capability")
+@click.option("--approve", is_flag=True, help="También aprueba la capacidad para el proyecto")
+def agent_register_capability(agent_id: str, capability: str, approve: bool):
+    """Añadir una capacidad declarada."""
+    with _client() as client:
+        current = client.get(f"/agents/{agent_id}/route-profile")
+        if current.status_code != 200:
+            click.echo(f"Error: {_explain_error(current)}")
+            return
+        body = current.json()
+        declared = list(dict.fromkeys([*(body.get("declared") or []), capability]))
+        approved = list(body.get("approved") or [])
+        if approve and capability not in approved:
+            approved.append(capability)
+        saved = client.post(f"/agents/{agent_id}/route-profile", json={
+            "declared": declared,
+            "approved": approved,
+            "priority": body.get("priority", 0),
+            "cost_class": body.get("cost_class", "medium"),
+            "max_in_progress": body.get("max_in_progress", 1),
+            "can_edit": body.get("can_edit", True),
+        })
+        if saved.status_code != 200:
+            click.echo(f"Error: {_explain_error(saved)}")
+            return
+        click.echo(f"{agent_id}: {capability}")
+
+
 @work.command("claim")
 @click.argument("task_id")
 def work_claim(task_id: str):

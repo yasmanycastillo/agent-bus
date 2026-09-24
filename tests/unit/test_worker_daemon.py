@@ -73,6 +73,32 @@ async def test_worker_daemon_processes_urgent_message(test_bus):
 
 
 @pytest.mark.asyncio
+async def test_worker_prompt_includes_runtime_send(test_bus):
+    await test_bus.registry.register(AgentInfo(agent_id="worker_bob", display_name="Bob"))
+    await test_bus.tasks.create("T-run", "Implement the helper")
+    await test_bus.tasks.claim("T-run", "worker_bob")
+    transport = ASGITransport(app=test_bus.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        started = await client.post("/runtime/native/start", json={
+            "attempt_id": "att-run", "task_id": "T-run", "idempotency_key": "native:T-run", "agent_id": "worker_bob",
+        })
+        assert started.status_code == 200
+        sent = await client.post("/runtime/native/att-run/send", json={"text": "use the new helper"})
+        assert sent.status_code == 200
+        prompts = []
+
+        async def mock_exec(prompt: str, session_id: str | None) -> RunnerResult:
+            prompts.append(prompt)
+            return RunnerResult(success=True, output="done")
+
+        daemon = WorkerDaemon(agent_id="worker_bob", runner=AgentRunner(agent_id="worker_bob", custom_executor=mock_exec), bus_url="http://test")
+        daemon._client = client
+        daemon._running = True
+        await daemon._check_and_process_pending()
+    assert prompts and "use the new helper" in prompts[0]
+
+
+@pytest.mark.asyncio
 async def test_worker_daemon_claims_and_runs_task(test_bus, tmp_path):
     # Register agent
     await test_bus.registry.register(AgentInfo(agent_id="worker_bob", display_name="Bob"))

@@ -49,6 +49,8 @@ TOOL_GUIDANCE = {
     "ack_messages": "Requiere IDs de mensajes de tu inbox que ya procesaste. Obtén pendientes con my_pending_items después de bootstrap_agent.",
     "reply_message": "Requiere un mensaje de tu inbox obtenido con my_pending_items o read_messages. Si acknowledge=true, responde y confirma en una operación.",
     "claim_task": "Antes: bootstrap_agent y consulta de tareas disponibles. Requiere tarea libre y pendiente; tras reclamar, usa prepare_edit antes de editar.",
+    "register_capabilities": "Declara capacidades de tu sesión. La aprobación del proyecto la hace un administrador. Después enruta con route_task.",
+    "route_task": "Elige un agente elegible para una tarea libre. No reclama. Si el resultado no te incluye, no reclames esa tarea.",
     "complete_task": "Requiere una tarea propia en estado permitido. Para entregar evidencia, mensaje y locks juntos, prefiere complete_handoff; usa in_review si falta revisión.",
     "acquire_lock": "Antes: bootstrap_agent. Para varios archivos usa prepare_edit; después renueva con renew_lock o libera con release_lock usando el token recibido.",
     "release_lock": "Requiere el acquisition_id vigente de la misma sesión, ruta y scope. Si falla, consulta get_project_status y no liberes un lock ajeno.",
