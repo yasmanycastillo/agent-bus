@@ -17,7 +17,8 @@ from agent_bus.worker.gatekeeper import (
     ReviewRequest,
     Verdict,
 )
-from agent_bus.worker.worktrees import WorktreeManager
+from agent_bus.workspaces.base import Workspace
+from agent_bus.workspaces.worktree import WorktreeWorkspaceBackend
 
 logger = logging.getLogger("agent_bus.worker.integrator")
 
@@ -75,23 +76,46 @@ class BranchIntegrator:
             tasks = response.json()
         results: list[IntegratorResult] = []
         for task in tasks:
-            worktree = worktree_for(task)
-            if asyncio.iscoroutine(worktree):
-                worktree = await worktree
-            branch = str(task.get("candidate_branch") or f"agent/{task.get('owner', '')}")
+            located = worktree_for(task)
+            if asyncio.iscoroutine(located):
+                located = await located
+            worktree, branch = self._checkout_from(located, task)
             acceptance_criteria = task.get("acceptance_criteria", [])
             results.append(await self.integrate_task(
-                task["task_id"], task.get("owner", "unknown"), Path(worktree), branch,
+                task["task_id"], task.get("owner", "unknown"), worktree, branch,
                 target_branch=target_branch, test_cmd=test_cmd,
                 acceptance_criteria=acceptance_criteria,
             ))
         return results
 
-    async def run_once(self, test_cmd: list[str] | None = None, target_branch: str = "main") -> list[IntegratorResult]:
-        """Process the conventional ``.worktrees/<owner>`` queue once."""
-        manager = WorktreeManager(self.repo_dir)
+    @staticmethod
+    def _checkout_from(located: Workspace | Path, task: dict[str, Any]) -> tuple[Path, str]:
+        if isinstance(located, Workspace):
+            return located.path, located.branch
+        branch = str(task.get("candidate_branch") or "")
+        if not branch:
+            raise ValueError("candidate_branch is required when the checkout is only a path")
+        return Path(located), branch
+
+    async def run_once(
+        self,
+        test_cmd: list[str] | None = None,
+        target_branch: str = "main",
+        workspace_backend=None,
+    ) -> list[IntegratorResult]:
+        """Process the review queue using a workspace backend."""
+        backend = workspace_backend or WorktreeWorkspaceBackend(self.repo_dir)
+
+        async def resolve(task: dict[str, Any]) -> Workspace:
+            from agent_bus.workspaces.base import WorkspaceRequest
+            return await backend.open(WorkspaceRequest(
+                task_id=str(task.get("task_id") or ""),
+                agent_id=str(task.get("owner") or ""),
+                base_ref=target_branch,
+            ))
+
         return await self.process_pending(
-            lambda task: manager.path_for(str(task.get("owner", ""))),
+            resolve,
             test_cmd=test_cmd,
             target_branch=target_branch,
         )
