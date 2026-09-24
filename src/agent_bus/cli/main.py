@@ -331,6 +331,32 @@ def _check_daemon() -> None:
 
 
 @app.command()
+@click.option("--task", default=None, help="Filtrar por tarea")
+@click.option("--agent", default=None, help="Filtrar por agente")
+@click.option("--workflow", default=None, help="Filtrar por workflow")
+def usage(task: str | None, agent: str | None, workflow: str | None):
+    """Costo y consumo por tarea, agente o workflow."""
+    params = {key: value for key, value in {"task": task, "agent": agent, "workflow": workflow}.items() if value}
+    with _client() as client:
+        resp = client.get("/usage/summary", params=params)
+        if resp.status_code != 200:
+            click.echo(f"Error: {_explain_error(resp)}")
+            return
+        body = resp.json()
+        cost = body.get("estimated_cost_usd")
+        cached = body.get("cached_input_tokens")
+        click.echo(f"Registros: {body.get('records', 0)}")
+        click.echo("Costo USD: desconocido" if cost is None else f"Costo USD: {cost}")
+        click.echo("Cache de entrada: desconocido" if cached is None else f"Cache de entrada: {cached}")
+        top_agent = body.get("top_agent")
+        if top_agent:
+            click.echo(f"Mayor consumo: {top_agent['agent_id']} ({top_agent['estimated_cost_usd']} USD)")
+        top_workflow = body.get("top_workflow_retries")
+        if top_workflow:
+            click.echo(f"Mas reintentos: {top_workflow['workflow_id']} ({top_workflow['retries']})")
+
+
+@app.command()
 def status():
     """Health check del servidor."""
     with _client() as client:

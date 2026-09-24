@@ -229,6 +229,7 @@ class Database:
             await self._migrate_phase1()
             await self._migrate_artifacts()
             await self._migrate_evidence()
+            await self._migrate_usage()
         except BaseException:
             await self.close()
             raise
@@ -510,6 +511,35 @@ class Database:
                     status TEXT NOT NULL,
                     attempt_id TEXT NOT NULL,
                     target_sha TEXT NOT NULL
+                )"""
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_usage(self) -> None:
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS usage_records (
+                    record_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    agent_id TEXT,
+                    runtime TEXT,
+                    provider TEXT,
+                    model TEXT,
+                    task_id TEXT,
+                    workflow_id TEXT,
+                    input_tokens INTEGER,
+                    cached_input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    wall_seconds REAL,
+                    estimated_cost_usd REAL,
+                    retries INTEGER NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 )"""
             )
             await self.conn.commit()

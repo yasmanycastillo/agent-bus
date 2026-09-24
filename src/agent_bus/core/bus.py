@@ -670,6 +670,25 @@ class MessageBus:
                 return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
             return Response(content, media_type=artifact.media_type, headers={"X-Artifact-SHA256": artifact.sha256})
 
+        @self.app.post("/usage")
+        async def record_usage(request: Request):
+            from agent_bus.core.usage import UsageError, UsageLedger
+            body = await self._json_object(request)
+            principal = request.state.principal
+            if principal and not principal.is_admin:
+                body = {**body, "agent_id": principal.agent_id}
+            try:
+                return await UsageLedger(self.db, self.project_id).record(body)
+            except UsageError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+            except (TypeError, ValueError) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=422)
+
+        @self.app.get("/usage/summary")
+        async def usage_summary(task: str | None = None, agent: str | None = None, workflow: str | None = None):
+            from agent_bus.core.usage import UsageLedger
+            return await UsageLedger(self.db, self.project_id).summary(task_id=task, agent_id=agent, workflow_id=workflow)
+
         @self.app.post("/tasks/{task_id}/evidence-policy")
         async def set_evidence_policy(task_id: str, request: Request):
             from agent_bus.core.evidence import EvidenceError, EvidenceLog
