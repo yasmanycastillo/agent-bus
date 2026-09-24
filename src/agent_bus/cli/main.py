@@ -356,6 +356,34 @@ def usage(task: str | None, agent: str | None, workflow: str | None):
             click.echo(f"Mas reintentos: {top_workflow['workflow_id']} ({top_workflow['retries']})")
 
 
+workflow = click.Group(name="workflow", help="Compilar workflows declarativos al DAG")
+app.add_command(workflow)
+
+
+@workflow.command("compile")
+@click.option("--file", "yaml_file", default=None, type=click.Path(exists=True, dir_okay=False))
+@click.option("--name", default=None, help="Workflow incluido, por ejemplo feature-development")
+@click.option("--instance", required=True, help="Identificador de esta ejecucion")
+@click.option("--advisory", is_flag=True, help="Rechazado si el workflow exige review: approved")
+def workflow_compile(yaml_file: str | None, name: str | None, instance: str, advisory: bool):
+    """Cargar, validar y crear las tareas de un workflow."""
+    yaml_text = ""
+    if yaml_file:
+        with open(yaml_file, encoding="utf-8") as handle:
+            yaml_text = handle.read()
+    with _client() as client:
+        resp = client.post("/workflows/compile", json={
+            "yaml": yaml_text, "name": name, "instance_id": instance, "advisory": advisory,
+        })
+        if resp.status_code != 200:
+            click.echo(f"Error: {_explain_error(resp)}")
+            return
+        body = resp.json()
+        click.echo(f"Workflow: {body.get('workflow')}")
+        for task in body.get("tasks") or []:
+            click.echo(task["task_id"])
+
+
 @app.command()
 def status():
     """Health check del servidor."""

@@ -670,6 +670,29 @@ class MessageBus:
                 return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
             return Response(content, media_type=artifact.media_type, headers={"X-Artifact-SHA256": artifact.sha256})
 
+        @self.app.post("/workflows/compile")
+        async def compile_workflow(request: Request):
+            from agent_bus.core.evidence import EvidenceLog
+            from agent_bus.workflows import WorkflowError, compile_tasks, load_workflow
+            body = await self._json_object(request)
+            try:
+                document = load_workflow(
+                    body.get("yaml") or "", name=body.get("name"), advisory=bool(body.get("advisory")),
+                )
+                tasks = compile_tasks(document, body.get("instance_id") or "")
+            except WorkflowError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=422)
+            created = []
+            for task in tasks:
+                strict = task.pop("strict_review")
+                stored = await self.tasks.create(**task)
+                if strict:
+                    await EvidenceLog(self.db, self.project_id).set_policy(
+                        stored.task_id, strict=True, require_review=True, require_sha_match=True,
+                    )
+                created.append(stored.model_dump(mode="json"))
+            return {"workflow": document["workflow"], "tasks": created}
+
         @self.app.post("/usage")
         async def record_usage(request: Request):
             from agent_bus.core.usage import UsageError, UsageLedger
