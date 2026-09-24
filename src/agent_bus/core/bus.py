@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -517,6 +518,9 @@ class MessageBus:
         @self.app.post("/tasks/{task_id}/claim")
         async def claim_task(task_id: str, req: ClaimRequest, request: Request):
             req.agent_id = self._actor(request, req.agent_id)
+            refusal = await self._claim_refusal(task_id, req.agent_id)
+            if refusal is not None:
+                return refusal
             task = await self.tasks.claim(task_id, req.agent_id)
             if not task:
                 existing = await self.tasks.get(task_id)
@@ -527,6 +531,119 @@ class MessageBus:
                     )
                 return JSONResponse({"error": "Task not found or already owned"}, status_code=409)
             return task.model_dump(mode="json")
+
+        @self.app.post("/agents/{agent_id}/route-profile")
+        async def put_route_profile(agent_id: str, request: Request):
+            body = await self._json_object(request)
+            principal = request.state.principal
+            if principal and not principal.is_admin and principal.agent_id != agent_id:
+                return JSONResponse({"error": "agent_id does not match the session"}, status_code=403)
+            current = await self._load_profile(agent_id)
+            declared = body.get("declared", current["declared"])
+            if principal and not principal.is_admin:
+                approved = current["approved"]
+            else:
+                approved = body.get("approved", current["approved"])
+            await self.db.conn.execute(
+                """INSERT INTO agent_route_profiles
+                   (agent_id, declared, approved, priority, cost_class, max_in_progress, can_edit)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(agent_id) DO UPDATE SET
+                     declared=excluded.declared, approved=excluded.approved, priority=excluded.priority,
+                     cost_class=excluded.cost_class, max_in_progress=excluded.max_in_progress,
+                     can_edit=excluded.can_edit""",
+                (
+                    agent_id,
+                    json.dumps(declared),
+                    json.dumps(approved),
+                    int(body.get("priority", current["priority"])),
+                    body.get("cost_class", current["cost_class"]),
+                    int(body.get("max_in_progress", current["max_in_progress"])),
+                    1 if body.get("can_edit", current["can_edit"]) else 0,
+                ),
+            )
+            await self.db.conn.commit()
+            return await self._load_profile(agent_id)
+
+        @self.app.post("/tasks/{task_id}/requirements")
+        async def set_requirements(task_id: str, request: Request):
+            body = await self._json_object(request)
+            requires = body.get("requires") or []
+            if not isinstance(requires, list) or not all(isinstance(item, str) and item for item in requires):
+                return JSONResponse({"error": "requires must be a list of capability names"}, status_code=422)
+            task = await self.tasks.get(task_id)
+            if task is None:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            await self.db.conn.execute(
+                "UPDATE tasks SET requirements = ?, updated_at = ? WHERE task_id = ?",
+                (json.dumps(requires), datetime.now(timezone.utc).isoformat(), task_id),
+            )
+            await self.db.conn.commit()
+            updated = await self.tasks.get(task_id)
+            return updated.model_dump(mode="json")
+
+        @self.app.post("/tasks/{task_id}/route")
+        async def route_task(task_id: str):
+            task = await self.tasks.get(task_id)
+            if task is None:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            if task.owner != "free" or task.status != TaskStatus.PENDING:
+                return JSONResponse({"error": "Only a free pending task can be routed"}, status_code=409)
+            decision = await self._decide(task.requirements)
+            decision_id = f"route-{uuid.uuid4().hex[:12]}"
+            await self.db.conn.execute(
+                """INSERT INTO route_decisions
+                   (decision_id, task_id, selected_agent, eligible, reasons, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    decision_id, task_id, decision.selected_agent, json.dumps(list(decision.eligible)),
+                    json.dumps(decision.reasons), datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            await self.db.conn.commit()
+            return {
+                "decision_id": decision_id,
+                "task_id": task_id,
+                "selected_agent": decision.selected_agent,
+                "eligible": list(decision.eligible),
+                "reasons": decision.reasons,
+            }
+
+        @self.app.post("/runtime/native/start")
+        async def native_start(request: Request):
+            from agent_bus.runtimes.native import NativeRuntime
+            from agent_bus.runtimes.protocol import AttemptConflict, RuntimeStartRequest
+            body = await self._json_object(request)
+            try:
+                start = RuntimeStartRequest(
+                    attempt_id=body.get("attempt_id") or f"att-{uuid.uuid4().hex[:12]}",
+                    task_id=body["task_id"],
+                    idempotency_key=body["idempotency_key"],
+                    agent_id=body["agent_id"],
+                    workspace_ref=body.get("workspace_ref"),
+                )
+            except KeyError as exc:
+                return JSONResponse({"error": f"{exc.args[0]} is required"}, status_code=422)
+            try:
+                session = await NativeRuntime(self.db).start(start)
+            except AttemptConflict as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
+            return {
+                "attempt_id": session.attempt_id,
+                "task_id": session.task_id,
+                "external_ref": session.external_ref,
+                "workspace_ref": session.workspace_ref,
+                "state": session.state,
+            }
+
+        @self.app.get("/runtime/native/{attempt_id}")
+        async def native_status(attempt_id: str):
+            from agent_bus.runtimes.native import NativeRuntime
+            try:
+                session = await NativeRuntime(self.db).status(attempt_id)
+            except KeyError:
+                return JSONResponse({"error": "Attempt not found"}, status_code=404)
+            return {"attempt_id": session.attempt_id, "state": session.state, "task_id": session.task_id}
 
         @self.app.post("/tasks/{task_id}/reassign")
         async def reassign_task(task_id: str, req: ReassignRequest, request: Request):
@@ -1165,6 +1282,65 @@ class MessageBus:
         if scheme.lower() != "bearer" or not token or " " in token:
             raise AuthenticationError("Valid bearer session required")
         return await self.sessions.authenticate(token), token
+
+    async def _claim_refusal(self, task_id: str, agent_id: str) -> JSONResponse | None:
+        task = await self.tasks.get(task_id)
+        if task is None or not task.requirements:
+            return None
+        decision = await self._decide(task.requirements)
+        if agent_id in decision.eligible:
+            return None
+        reason = decision.reasons.get(agent_id, "agent is not eligible")
+        return JSONResponse(
+            {"error": reason, "eligible": list(decision.eligible), "reasons": decision.reasons},
+            status_code=409,
+        )
+
+    async def _decide(self, requires: list[str]):
+        from agent_bus.routing import AgentCandidate, route
+        profiles = await self.db.conn.execute_fetchall("SELECT * FROM agent_route_profiles")
+        agents = []
+        now = datetime.now(timezone.utc)
+        for row in profiles:
+            info = await self.registry.get(row["agent_id"])
+            age = None if info is None else (now - info.last_heartbeat).total_seconds()
+            load_rows = await self.db.conn.execute_fetchall(
+                "SELECT COUNT(*) AS n FROM tasks WHERE owner = ? AND status = 'in_progress'",
+                (row["agent_id"],),
+            )
+            load = load_rows[0]["n"]
+            agents.append(AgentCandidate(
+                agent_id=row["agent_id"],
+                declared=frozenset(json.loads(row["declared"])),
+                approved=frozenset(json.loads(row["approved"])),
+                heartbeat_age_seconds=age,
+                in_progress=load,
+                max_in_progress=row["max_in_progress"],
+                priority=row["priority"],
+                cost_class=row["cost_class"],
+                can_edit=bool(row["can_edit"]),
+            ))
+        return route(requires, agents, heartbeat_limit_seconds=30)
+
+    async def _load_profile(self, agent_id: str) -> dict:
+        rows = await self.db.conn.execute_fetchall(
+            "SELECT * FROM agent_route_profiles WHERE agent_id = ?", (agent_id,),
+        )
+        if not rows:
+            return {
+                "agent_id": agent_id, "declared": [], "approved": [], "priority": 0,
+                "cost_class": "medium", "max_in_progress": 1, "can_edit": True,
+            }
+        row = rows[0]
+        return {
+            "agent_id": agent_id,
+            "declared": json.loads(row["declared"]),
+            "approved": json.loads(row["approved"]),
+            "priority": row["priority"],
+            "cost_class": row["cost_class"],
+            "max_in_progress": row["max_in_progress"],
+            "can_edit": bool(row["can_edit"]),
+        }
 
     @staticmethod
     async def _json_object(request: Request) -> dict:

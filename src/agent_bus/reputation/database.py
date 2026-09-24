@@ -226,6 +226,7 @@ class Database:
             await self._migrate_reviews()
             await self._migrate_worker_control()
             await self._migrate_audit_log()
+            await self._migrate_phase1()
         except BaseException:
             await self.close()
             raise
@@ -344,6 +345,7 @@ class Database:
                 ("test_cmd", "TEXT"),
                 ("depends_on", "TEXT DEFAULT '[]'"),
                 ("operation_key", "TEXT"),
+                ("requirements", "TEXT DEFAULT '[]'"),
             ]
             for name, col_def in new_cols:
                 if name not in columns:
@@ -388,6 +390,47 @@ class Database:
                 """CREATE TABLE IF NOT EXISTS worker_control (
                     agent_id TEXT PRIMARY KEY,
                     paused INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_phase1(self) -> None:
+        """Capability profiles, route decisions and native runtime attempts."""
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS agent_route_profiles (
+                    agent_id TEXT PRIMARY KEY,
+                    declared TEXT NOT NULL DEFAULT '[]',
+                    approved TEXT NOT NULL DEFAULT '[]',
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    cost_class TEXT NOT NULL DEFAULT 'medium',
+                    max_in_progress INTEGER NOT NULL DEFAULT 1,
+                    can_edit INTEGER NOT NULL DEFAULT 1
+                )"""
+            )
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS route_decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    selected_agent TEXT,
+                    eligible TEXT NOT NULL,
+                    reasons TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS runtime_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    state TEXT NOT NULL,
+                    external_ref TEXT,
+                    workspace_ref TEXT,
                     updated_at TEXT NOT NULL
                 )"""
             )

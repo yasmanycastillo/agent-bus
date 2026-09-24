@@ -209,6 +209,14 @@ class WorkerDaemon:
                 )
                 if claim_resp.status_code == 200:
                     logger.info(f"Agent '{self.agent_id}' claimed task {task_to_claim['task_id']}")
+                    try:
+                        await self._client.post("/runtime/native/start", json={
+                            "task_id": task_to_claim["task_id"],
+                            "idempotency_key": f"native:{task_to_claim['task_id']}",
+                            "agent_id": self.agent_id,
+                        })
+                    except Exception as exc:
+                        logger.debug("Native runtime attempt was not recorded: %s", exc)
                     await self._handle_active_task(claim_resp.json())
                     return
 
