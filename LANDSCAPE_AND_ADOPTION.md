@@ -132,6 +132,13 @@ Evaluate Agent Server and the selected workspace implementation as separate
 surfaces. A successful local SDK conversation is not evidence that remote
 sandbox provisioning, recovery or artifact export works.
 
+On 2026-09-24 the Docker workspace at SDK `5b36cac` / package `1.49.5` started
+`ghcr.io/openhands/agent-server:1.49.5-python`, ran a command, transferred a
+file, survived `docker pause`, and lost that file in a new container. No API
+key was required, and the server warned that it was listening on `0.0.0.0`
+without `SESSION_API_KEY`. `AgentSandboxWorkspace` was not run: this host has
+no kubeconfig. That measurement does not adopt an adapter.
+
 ---
 
 ## Pact
@@ -405,7 +412,7 @@ Commands and raw gates are in [docs/spikes/2026-09-23-phase-minus-one.md](docs/s
 | Maintenance versus keeping the probe | one test module, no core runtime type | **PASS** as a spike; do not adopt it as an adapter yet |
 | Plan contract version 1 and static planner | `tests/unit/test_plan_contract.py` | **PASS** |
 | Two live inference backends | Runpod pod `k5wdcmxdszmb4t`, H100 80GB, `Qwen2.5-7B-Instruct-AWQ` and `Qwen2.5-Coder-7B-Instruct-AWQ`, 2026-09-24. Earlier CPU `qwen2.5:1.5b` / `smollm2:135m` run failed. | **PASS** |
-| OpenHands sandbox lifecycle | SDK `5b36cac`, source only | **unknown**; adoption deferred |
+| OpenHands sandbox lifecycle | SDK `5b36cac`, `DockerWorkspace` plus image `1.49.5-python` on local Docker, 2026-09-24 | **PASS** for local Docker; Kubernetes/cloud **unknown**; do not adopt an adapter yet |
 | Pact, Hydra, Orka, multiagents executable compatibility | README at `0b3d882`, `c4377f4`, `80bfc20`, `03fcf6e` | **unknown**; revisions cited, no local run |
 
 `NativeRuntime` remains the current worker and watch path. Nothing in the worker

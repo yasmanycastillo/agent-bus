@@ -168,12 +168,32 @@ worker. Orca at `5beeefc` remains rejected and was not given this role.
 
 ## OpenHands source feasibility
 
-The [OpenHands Software Agent SDK at commit 5b36cac](https://github.com/OpenHands/software-agent-sdk/tree/5b36cacccc2bbe6f8fbce9e1d3ff4b0a3dcddadb) exposes an Agent Server
-API for conversations/events and separate remote workspace implementations.
-These are plausible adapter surfaces, but this review did not launch a sandbox
-or measure lifecycle, recovery, artifact export or credential requirements.
-Decision: **DEFER runtime adoption**; keep Agent Server and workspace choices
-separate in a later executable spike.
+The [OpenHands Software Agent SDK at commit 5b36cac](https://github.com/OpenHands/software-agent-sdk/tree/5b36cacccc2bbe6f8fbce9e1d3ff4b0a3dcddadb)
+is release v1.49.5. It exposes an Agent Server API and separate workspace
+implementations. A local SDK conversation is not this measurement.
+
+## OpenHands Docker workspace, 2026-09-24
+
+Package `openhands-workspace==1.49.5` and image
+`ghcr.io/openhands/agent-server:1.49.5-python`. No LLM call. The probe lived
+in `/tmp` and was not added to the repository.
+
+| Gate | Result |
+|---|---|
+| Container start and health | **PASS** |
+| Command execution | **PASS** (`echo hello-from-sandbox`) |
+| Client-side command timeout | **PASS** (`sleep 30` returned exit `-1` within the 2s timeout) |
+| File upload and download | **PASS** |
+| `docker pause` / `unpause` keeps the file | **PASS** |
+| A new container after `docker stop` | **PASS** as isolation; the marker is gone |
+| Credentials for this local workspace | **PASS**; none were required |
+| Kubernetes `AgentSandboxWorkspace` | **UNKNOWN**; this host has no kubeconfig or warm pool |
+
+The image logs a warning when it binds `0.0.0.0` without `SESSION_API_KEY`.
+`OH_SECRET_KEY` was unset, so the server said secrets do not survive its own
+restart. This run does not adopt an adapter. Agent Bus would still own the
+task, the review, and the candidate SHA. The Docker workspace is a later
+adapter candidate. The Kubernetes and cloud workspaces stay unmeasured.
 
 ## Remaining exit gates
 
@@ -183,9 +203,10 @@ separate in a later executable spike.
 2. Keep the external-command probe disposable. Do not promote it to an adapter
    before the runtime contract exists. Unsigned `done`, `review` and `block`
    now require `agent_id`, and that agent must own the task.
-3. Record measured OpenHands sandbox feasibility. Pact, Hydra, Orka and
-   multiagents now have cited revisions on the
-   [adoption scorecard](../../LANDSCAPE_AND_ADOPTION.md); none has a local run.
+3. The local Docker workspace is measured above. Kubernetes and cloud
+   OpenHands workspaces remain unknown. Pact, Hydra, Orka and multiagents have
+   cited revisions on the [adoption scorecard](../../LANDSCAPE_AND_ADOPTION.md)
+   and still have no local run.
 
 Until those gates pass, Phase 0 and Phase 1 remain proposed work rather than
 validated follow-on implementation.
