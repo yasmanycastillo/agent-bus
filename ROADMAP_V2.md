@@ -677,9 +677,12 @@ Replace any one provider with another agent exposing the same capabilities witho
 
 # Immediate Next Sprint
 
-Do **not** start Phase 1 yet.
+The executable Phase -1 checks that this host can run are recorded in
+[the spike](docs/spikes/2026-09-23-phase-minus-one.md). Phase 1 is the next
+implementation sprint. It still does not add an Orca adapter, an OpenHands
+adapter, or a second task owner inside a terminal UI.
 
-The next sprint is the rest of Phase -1, and it should contain only evaluation work:
+The evaluation record:
 
 ### 1. Live plan backends
 
@@ -698,9 +701,10 @@ that agent must own the task. An empty completion returns 422.
 
 Pact `demo`, Hydra `init`, multiagents `status` and the Orka CLI `version` and
 `status` were run on 2026-09-24 at the cited revisions. Orka had no server.
-The OpenHands Docker workspace was measured. Its cloud and remote API
-constructors fail closed without credentials, and the Kubernetes sandbox was
-not run. None of these is an adapter. Do not turn the command probe into one.
+The OpenHands Docker workspace and a kind smoke test of
+`AgentSandboxWorkspace` passed on 2026-09-24. Cloud and remote API constructors
+fail closed without credentials. None of these is an adapter. Do not turn the
+command probe into one. The kind cluster was deleted after the test.
 
 After Phase -1 exits successfully, the first implementation sprint should contain only three technical objectives:
 
