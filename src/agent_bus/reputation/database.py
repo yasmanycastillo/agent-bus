@@ -228,6 +228,7 @@ class Database:
             await self._migrate_audit_log()
             await self._migrate_phase1()
             await self._migrate_artifacts()
+            await self._migrate_evidence()
         except BaseException:
             await self.close()
             raise
@@ -483,6 +484,33 @@ class Database:
             )
             await self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(project_id, task_id)"
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_evidence(self) -> None:
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS evidence_policies (
+                    task_id TEXT PRIMARY KEY,
+                    strict INTEGER NOT NULL,
+                    require_review INTEGER NOT NULL,
+                    require_sha_match INTEGER NOT NULL
+                )"""
+            )
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS task_evidence (
+                    evidence_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    criterion TEXT NOT NULL,
+                    artifact_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt_id TEXT NOT NULL,
+                    target_sha TEXT NOT NULL
+                )"""
             )
             await self.conn.commit()
         except BaseException:

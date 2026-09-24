@@ -181,6 +181,16 @@ class BranchIntegrator:
         )
 
         # If verdict is BLOCKED, DO NOT MERGE under any policy
+        evidence_gap = await self._evidence_gap(task_id, sha, snapshot["target_sha"], decision.verdict.value)
+        if evidence_gap:
+            reason = f"Evidence policy rejected integration: {evidence_gap}"
+            await self._mark_task_blocked(task_id, reason)
+            await self._notify_bus_blocked(task_id, author_agent, reason, test_output)
+            return IntegratorResult(
+                success=False, merged=False, status="blocked", output=test_output, error=reason,
+                metadata={"review": decision.model_dump(mode="json")},
+            )
+
         if decision.verdict == Verdict.BLOCKED:
             reason = f"Gatekeeper review blocked: {decision.reason}"
             await self._mark_task_blocked(task_id, reason)
@@ -526,6 +536,30 @@ class BranchIntegrator:
         except Exception as exc:
             logger.debug(f"Could not fetch task {task_id} details: {exc}")
         return []
+
+    async def _evidence_gap(self, task_id: str, candidate_sha: str, target_sha: str, verdict: str) -> str | None:
+        try:
+            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=1.0) as client:
+                policy = await client.get(f"/tasks/{task_id}/evidence-policy")
+                if policy.status_code == 404:
+                    return None
+                if policy.status_code != 200:
+                    return f"evidence policy unavailable ({policy.status_code})"
+                if not policy.json().get("strict"):
+                    return None
+                checked = await client.post(f"/tasks/{task_id}/evidence-check", json={
+                    "candidate_sha": candidate_sha,
+                    "target_sha": target_sha,
+                    "verdict": verdict,
+                })
+                if checked.status_code != 200:
+                    return "evidence check failed"
+                body = checked.json()
+                if not body.get("ok"):
+                    return body.get("error") or "required evidence is missing"
+                return None
+        except Exception:
+            return None
 
     async def _record_review(self, decision: ReviewDecision) -> None:
         try:

@@ -670,6 +670,60 @@ class MessageBus:
                 return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
             return Response(content, media_type=artifact.media_type, headers={"X-Artifact-SHA256": artifact.sha256})
 
+        @self.app.post("/tasks/{task_id}/evidence-policy")
+        async def set_evidence_policy(task_id: str, request: Request):
+            from agent_bus.core.evidence import EvidenceError, EvidenceLog
+            body = await self._json_object(request)
+            try:
+                return await EvidenceLog(self.db, self.project_id).set_policy(
+                    task_id,
+                    strict=bool(body.get("strict", True)),
+                    require_review=bool(body.get("require_review", True)),
+                    require_sha_match=bool(body.get("require_sha_match", True)),
+                )
+            except EvidenceError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+        @self.app.get("/tasks/{task_id}/evidence-policy")
+        async def get_evidence_policy(task_id: str):
+            from agent_bus.core.evidence import EvidenceLog
+            policy = await EvidenceLog(self.db, self.project_id).policy(task_id)
+            if policy is None:
+                return JSONResponse({"error": "No evidence policy"}, status_code=404)
+            return policy
+
+        @self.app.post("/tasks/{task_id}/evidence")
+        async def add_task_evidence(task_id: str, request: Request):
+            from agent_bus.core.evidence import EvidenceError, EvidenceLog
+            body = await self._json_object(request)
+            try:
+                return await EvidenceLog(self.db, self.project_id).add(
+                    task_id,
+                    criterion=body["criterion"],
+                    artifact_id=body["artifact_id"],
+                    status=body.get("status") or "passed",
+                    attempt_id=body["attempt_id"],
+                    target_sha=body["target_sha"],
+                )
+            except KeyError as exc:
+                return JSONResponse({"error": f"{exc.args[0]} is required"}, status_code=422)
+            except EvidenceError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+        @self.app.post("/tasks/{task_id}/evidence-check")
+        async def check_task_evidence(task_id: str, request: Request):
+            from agent_bus.core.evidence import EvidenceLog
+            body = await self._json_object(request)
+            gap = await EvidenceLog(self.db, self.project_id).gap(
+                task_id,
+                candidate_sha=body.get("candidate_sha") or "",
+                target_sha=body.get("target_sha") or "",
+                verdict=body.get("verdict") or "",
+            )
+            if gap:
+                return {"ok": False, "error": gap}
+            return {"ok": True}
+
         @self.app.post("/runtime/native/start")
         async def native_start(request: Request):
             from agent_bus.runtimes.native import NativeRuntime
