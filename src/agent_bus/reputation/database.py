@@ -227,6 +227,7 @@ class Database:
             await self._migrate_worker_control()
             await self._migrate_audit_log()
             await self._migrate_phase1()
+            await self._migrate_artifacts()
         except BaseException:
             await self.close()
             raise
@@ -456,6 +457,33 @@ class Database:
             ):
                 if name not in columns:
                     await self.conn.execute(f"ALTER TABLE runtime_attempts ADD COLUMN {name} {definition}")
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_artifacts(self) -> None:
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    producer TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    retention TEXT NOT NULL,
+                    summary TEXT,
+                    attempt_id TEXT,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            await self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(project_id, task_id)"
+            )
             await self.conn.commit()
         except BaseException:
             await self.conn.rollback()

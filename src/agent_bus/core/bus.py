@@ -613,6 +613,63 @@ class MessageBus:
                 "reasons": decision.reasons,
             }
 
+        @self.app.post("/tasks/{task_id}/artifacts")
+        async def publish_artifact(task_id: str, request: Request):
+            from agent_bus.core.artifacts import ArtifactError, ArtifactStore
+            body = await self._json_object(request)
+            content = body.get("content")
+            if isinstance(content, str):
+                payload = content.encode()
+            elif isinstance(content, dict):
+                payload = json.dumps(content, separators=(",", ":"), sort_keys=True).encode()
+            else:
+                return JSONResponse({"error": "content must be text or a JSON object"}, status_code=422)
+            principal = request.state.principal
+            producer = body.get("producer")
+            if principal and not principal.is_admin:
+                producer = principal.agent_id
+            if not isinstance(producer, str) or not producer:
+                return JSONResponse({"error": "producer is required"}, status_code=422)
+            store = ArtifactStore(self.db, self.project_id)
+            try:
+                artifact = await store.publish(
+                    task_id=task_id,
+                    producer=producer,
+                    kind=body.get("kind") or "",
+                    media_type=body.get("media_type") or "application/json",
+                    content=payload,
+                    summary=body.get("summary") or "",
+                    attempt_id=body.get("attempt_id"),
+                    retention=body.get("retention") or "until-task-deleted",
+                )
+            except ArtifactError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+            return artifact.metadata()
+
+        @self.app.get("/tasks/{task_id}/artifacts")
+        async def list_task_artifacts(task_id: str):
+            from agent_bus.core.artifacts import ArtifactStore
+            artifacts = await ArtifactStore(self.db, self.project_id).list_for_task(task_id)
+            return [item.metadata() for item in artifacts]
+
+        @self.app.get("/artifacts/{artifact_id}")
+        async def get_artifact(artifact_id: str):
+            from agent_bus.core.artifacts import ArtifactError, ArtifactStore
+            try:
+                return (await ArtifactStore(self.db, self.project_id).get(artifact_id)).metadata()
+            except ArtifactError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+        @self.app.get("/artifacts/{artifact_id}/content")
+        async def get_artifact_content(artifact_id: str):
+            from fastapi.responses import Response
+            from agent_bus.core.artifacts import ArtifactError, ArtifactStore
+            try:
+                artifact, content = await ArtifactStore(self.db, self.project_id).read(artifact_id)
+            except ArtifactError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+            return Response(content, media_type=artifact.media_type, headers={"X-Artifact-SHA256": artifact.sha256})
+
         @self.app.post("/runtime/native/start")
         async def native_start(request: Request):
             from agent_bus.runtimes.native import NativeRuntime

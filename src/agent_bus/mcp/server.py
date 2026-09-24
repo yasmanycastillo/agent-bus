@@ -162,6 +162,41 @@ TOOLS_DEFINITIONS = [
         },
     },
     {
+        "name": "publish_artifact",
+        "description": "Publicar un artefacto acotado y recibir su metadata. El cuerpo no es un file://.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "producer": {"type": "string"},
+                "kind": {"type": "string"},
+                "media_type": {"type": "string"},
+                "content": {},
+                "summary": {"type": "string"},
+                "attempt_id": {"type": "string"},
+            },
+            "required": ["task_id", "producer", "kind", "content"],
+        },
+    },
+    {
+        "name": "list_task_artifacts",
+        "description": "Listar metadatos de los artefactos de una tarea.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "get_artifact_metadata",
+        "description": "Obtener metadatos de un artefacto por id, sin el cuerpo.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"artifact_id": {"type": "string"}},
+            "required": ["artifact_id"],
+        },
+    },
+    {
         "name": "complete_task",
         "description": "Marcar una tarea como completada (done).",
         "inputSchema": {
@@ -372,6 +407,28 @@ class McpServer:
 
             elif name == "route_task":
                 resp = await client.post(f"/tasks/{args['task_id']}/route")
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "publish_artifact":
+                resp = await client.post(f"/tasks/{args['task_id']}/artifacts", json={
+                    "producer": args.get("producer"),
+                    "kind": args.get("kind"),
+                    "media_type": args.get("media_type") or "application/json",
+                    "content": args.get("content"),
+                    "summary": args.get("summary") or "",
+                    "attempt_id": args.get("attempt_id"),
+                })
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "list_task_artifacts":
+                resp = await client.get(f"/tasks/{args['task_id']}/artifacts")
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "get_artifact_metadata":
+                resp = await client.get(f"/artifacts/{args['artifact_id']}")
                 resp.raise_for_status()
                 return resp.json()
 
