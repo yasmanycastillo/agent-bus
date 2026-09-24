@@ -10,6 +10,7 @@ from agent_bus.orchestrator.client import (
     InferenceTimeoutError,
 )
 from agent_bus.orchestrator.schema import (
+    PLAN_VERSION,
     BreakdownTaskItem,
     PlanValidationError,
     TASK_BREAKDOWN_JSON_SCHEMA,
@@ -17,6 +18,7 @@ from agent_bus.orchestrator.schema import (
     parse_and_validate_plan,
     validate_breakdown_dict,
 )
+from agent_bus.orchestrator.static import StaticPlanner
 from agent_bus.orchestrator.hermes import (
     BreakdownFailureReport,
     BreakdownResult,
@@ -37,7 +39,9 @@ __all__ = [
     "InferenceTimeoutError",
     "OrchestrationResult",
     "OrchestratorConfig",
+    "PLAN_VERSION",
     "PlanValidationError",
+    "StaticPlanner",
     "TASK_BREAKDOWN_JSON_SCHEMA",
     "TaskBreakdownPlan",
     "parse_and_validate_plan",

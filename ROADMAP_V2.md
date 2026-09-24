@@ -20,10 +20,11 @@ repository version, commands, observed results and decision for each spike.
 
 Use [LANDSCAPE_AND_ADOPTION.md](LANDSCAPE_AND_ADOPTION.md) as the evaluation checklist and [ADR-001](docs/adr/001-pluggable-planning-and-runtime.md) as the initial architectural decision.
 
-The first [Phase -1 evidence record](docs/spikes/2026-09-23-phase-minus-one.md)
-rejects the tested `orca-cli/orca` revision as the first adapter: its CLI does
-not yet implement task launch. Planner compatibility passed only with mock
-HTTP backends, so Phase -1 remains open.
+The [Phase -1 evidence record](docs/spikes/2026-09-23-phase-minus-one.md)
+rejects `orca-cli/orca` at `5beeefc`, records plan contract version 1 with a
+static planner, and records a disposable external-command probe. Live inference
+backends, the OpenHands sandbox, and unsigned task completion remain open, so
+Phase -1 remains open.
 
 ### Required spikes
 
@@ -678,22 +679,26 @@ Replace any one provider with another agent exposing the same capabilities witho
 
 Do **not** start Phase 1 yet.
 
-The next sprint is Phase -1 and should contain only evaluation work:
+The next sprint is the rest of Phase -1, and it should contain only evaluation work:
 
-### 1. External-command runtime spike
+### 1. Live plan backends
 
-Build the smallest disposable probe necessary to measure whether an external
-command can execute Agent Bus-owned work without taking over governance. The
-tested Orca revision failed preflight and is recorded separately.
+Plan contract version 1, the static planner, and mock Hermes parity are recorded.
+On 2026-09-24, `qwen2.5:1.5b` and `smollm2:135m` running on CPU failed to publish
+a valid plan. Repeat the same request on backends that emit a valid DAG before
+calling the planner interchangeable in production.
 
-### 2. Planner abstraction spike
+### 2. Unsigned completion
 
-Define the plan contract against today's `TaskBreakdownPlan`, then demonstrate
-interchangeable inference backends and a non-Hermes planner against it.
+The external-command probe passed restart, timeout, cancel, and candidate
+provenance. Unsigned `done`, `review` and `block` now require `agent_id`, and
+that agent must own the task. An empty completion returns 422.
 
-### 3. Adoption decision record
+### 3. Remaining source revisions
 
-Update `LANDSCAPE_AND_ADOPTION.md` and ADRs with measured conclusions.
+Cite tested revisions for Pact, Hydra, Orka and multiagents, and measure an
+OpenHands sandbox separately from the Agent Server. Do not turn the command
+probe into an adapter.
 
 After Phase -1 exits successfully, the first implementation sprint should contain only three technical objectives:
 

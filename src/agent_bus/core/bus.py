@@ -542,17 +542,13 @@ class MessageBus:
 
         @self.app.post("/tasks/{task_id}/done")
         async def complete_task(task_id: str, request: Request):
+            body = await self._json_object(request)
+            actor, error = self._transition_actor(request, body)
+            if error is not None:
+                return error
             principal = request.state.principal
-            actor = None if (principal and principal.is_admin) else (principal.agent_id if principal else None)
             session_id = principal.session_id if principal else None
-            evidence = None
-            if request.headers.get("content-type", "").startswith("application/json"):
-                try:
-                    body = await request.json()
-                    if isinstance(body, dict):
-                        evidence = body.get("evidence")
-                except Exception:
-                    pass
+            evidence = body.get("evidence")
             if evidence is not None:
                 task = await self.tasks.complete(task_id, actor=actor, evidence=evidence, session_id=session_id)
             else:
@@ -572,8 +568,12 @@ class MessageBus:
 
         @self.app.post("/tasks/{task_id}/review")
         async def review_task(task_id: str, request: Request):
+            body = await self._json_object(request)
+            actor, error = self._transition_actor(request, body)
+            if error is not None:
+                return error
             principal = request.state.principal
-            task = await self.tasks.submit_review(task_id, actor=principal.agent_id if principal else None)
+            task = await self.tasks.submit_review(task_id, actor=actor)
             if not task:
                 return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
@@ -588,11 +588,15 @@ class MessageBus:
             return task.model_dump(mode="json")
 
         @self.app.post("/tasks/{task_id}/block")
-        async def block_task(task_id: str, request: Request, req: dict | None = None):
-            reason = req.get("reason") if req else None
-            task = await self.tasks.block(task_id, reason=reason)
+        async def block_task(task_id: str, request: Request):
+            body = await self._json_object(request)
+            actor, error = self._transition_actor(request, body)
+            if error is not None:
+                return error
+            reason = body.get("reason") if isinstance(body.get("reason"), str) else None
+            task = await self.tasks.block(task_id, reason=reason, actor=actor)
             if not task:
-                return JSONResponse({"error": "Task not found"}, status_code=404)
+                return await self._task_failure(task_id, request.state.principal)
             return task.model_dump(mode="json")
 
         # --- Review endpoints ---
@@ -1161,6 +1165,32 @@ class MessageBus:
         if scheme.lower() != "bearer" or not token or " " in token:
             raise AuthenticationError("Valid bearer session required")
         return await self.sessions.authenticate(token), token
+
+    @staticmethod
+    async def _json_object(request: Request) -> dict:
+        if not request.headers.get("content-type", "").startswith("application/json"):
+            return {}
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    @staticmethod
+    def _transition_actor(request: Request, body: dict) -> tuple[str | None, JSONResponse | None]:
+        """Name the agent for done, review and block.
+
+        Admins stay unrestricted. Unsigned callers must name the owner.
+        """
+        principal = request.state.principal
+        if principal and principal.is_admin:
+            return None, None
+        if principal:
+            return principal.agent_id, None
+        agent_id = body.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id.strip():
+            return None, JSONResponse({"error": "agent_id is required"}, status_code=422)
+        return agent_id, None
 
     @staticmethod
     def _actor(request: Request, legacy_actor: str | None) -> str:

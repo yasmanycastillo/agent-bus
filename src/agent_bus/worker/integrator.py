@@ -497,10 +497,23 @@ class BranchIntegrator:
             except Exception as exc:
                 logger.error(f"Failed to post blocker for {task_id}: {exc}")
 
+    async def _task_owner(self, task_id: str) -> str:
+        try:
+            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+                response = await client.get(f"/tasks/{task_id}")
+                if response.status_code == 200:
+                    owner = response.json().get("owner")
+                    if isinstance(owner, str) and owner:
+                        return owner
+        except Exception as exc:
+            logger.debug(f"Could not fetch owner for {task_id}: {exc}")
+        return self.agent_id
+
     async def _mark_task_completed(self, task_id: str) -> None:
+        owner = await self._task_owner(task_id)
         async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
             try:
-                await client.post(f"/tasks/{task_id}/done")
+                await client.post(f"/tasks/{task_id}/done", json={"agent_id": owner})
             except Exception as exc:
                 logger.error(f"Failed to mark task {task_id} done: {exc}")
 
@@ -523,8 +536,9 @@ class BranchIntegrator:
 
     async def _mark_task_blocked(self, task_id: str, reason: str = "") -> None:
         try:
+            owner = await self._task_owner(task_id)
             async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
-                await client.post(f"/tasks/{task_id}/block", json={"reason": reason})
+                await client.post(f"/tasks/{task_id}/block", json={"reason": reason, "agent_id": owner})
         except Exception as exc:
             logger.error(f"Failed to mark task {task_id} blocked: {exc}")
 

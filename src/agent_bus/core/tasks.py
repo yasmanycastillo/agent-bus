@@ -418,12 +418,15 @@ class TaskManager:
         await self._db.conn.commit()
         return self._row_to_task(rows[0]) if rows else None
 
-    async def block(self, task_id: str, reason: str | None = None) -> Task | None:
-        """Mark a task as blocked."""
+    async def block(self, task_id: str, reason: str | None = None, actor: str | None = None) -> Task | None:
+        """Mark a task as blocked. A named actor must own it; admins pass no actor."""
         now = datetime.now(timezone.utc).isoformat()
+        condition = " AND owner = ?" if actor else ""
+        params: tuple = (now, task_id, actor) if actor else (now, task_id)
         rows = await self._db.conn.execute_fetchall(
-            "UPDATE tasks SET status = 'blocked', updated_at = ? WHERE task_id = ? AND status != 'done' RETURNING *",
-            (now, task_id),
+            "UPDATE tasks SET status = 'blocked', updated_at = ? WHERE task_id = ? AND status != 'done'"
+            + condition + " RETURNING *",
+            params,
         )
         await self._db.conn.commit()
         return self._row_to_task(rows[0]) if rows else None

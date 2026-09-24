@@ -381,6 +381,29 @@ The feature:
 
 ---
 
+## Phase -1 scorecard, 2026-09-23
+
+Commands and raw gates are in [docs/spikes/2026-09-23-phase-minus-one.md](docs/spikes/2026-09-23-phase-minus-one.md).
+`pytest` for the new checks: 9 passed.
+
+| Gate | Revision / command | Result |
+|---|---|---|
+| Orca launch, status, cancel | `orca-cli/orca` `5beeefc`, pinned checkout | **FAIL** preflight; not the first adapter |
+| External command, restart without duplicate execution | `tests/spikes/test_external_command_probe.py` | **PASS** |
+| External command, timeout reconciled before retry | same | **PASS** |
+| External command, cancellation terminal state | same | **PASS** |
+| Candidate SHA reaches Gatekeeper; command does not merge or complete | same | **PASS** |
+| Hub refuses completion by a non-owner | unsigned `POST /tasks/{id}/done` without `agent_id` returns 422; a stranger returns 409. Authenticated coverage remains `tests/integration/test_authorization.py` | **PASS** |
+| Maintenance versus keeping the probe | one test module, no core runtime type | **PASS** as a spike; do not adopt it as an adapter yet |
+| Plan contract version 1 and static planner | `tests/unit/test_plan_contract.py` | **PASS** |
+| Two live inference backends | Ollama CPU, `qwen2.5:1.5b` on `:11434` and `smollm2:135m` on `:11435`, 2026-09-24 | **FAIL** |
+| OpenHands sandbox lifecycle | SDK `5b36cac`, source only | **unknown**; adoption deferred |
+| Pact, Hydra, Orka, multiagents executable compatibility | names only, no tested revision | **unknown** |
+
+`NativeRuntime` remains the current worker and watch path. Nothing in the worker
+is deleted or frozen. Phase 1 still must not add an Orca adapter, an OpenHands
+adapter, or a second task owner inside a terminal UI.
+
 ## Phase -1 Deliverables
 
 Before Phase 1 implementation:

@@ -445,7 +445,7 @@ def work_reassign(task_id: str, new_owner: str):
 def work_review(task_id: str):
     """Enviar tarea propia a revisión para integración."""
     with _client() as client:
-        resp = client.post(f"/tasks/{task_id}/review")
+        resp = client.post(f"/tasks/{task_id}/review", json={"agent_id": _require_agent()})
         if resp.status_code == 200:
             click.echo(f"Tarea {task_id} enviada a revisión")
         else:
@@ -457,7 +457,9 @@ def work_review(task_id: str):
 @click.option("--evidence", default=None, help="Evidencia o resumen del trabajo completado")
 def work_done(task_id: str, evidence: str | None = None):
     """Marcar tarea como completada."""
-    payload = {"evidence": {"summary": evidence}} if evidence else {}
+    payload: dict = {"agent_id": _require_agent()}
+    if evidence:
+        payload["evidence"] = {"summary": evidence}
     with _client() as client:
         resp = client.post(f"/tasks/{task_id}/done", json=payload)
         if resp.status_code == 200:

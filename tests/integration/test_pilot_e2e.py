@@ -287,13 +287,13 @@ async def test_pilot_integration_rejection_and_feedback_cycle(
     _git(wt_info.path, "commit", "-m", "feat(agent): complete TASK-FAIL-01")
 
     task_id = "TASK-FAIL-01"
-    async with async_bus_client(integrator_agent, base_url=live_bus_url) as client:
+    async with async_bus_client(worker_agent, base_url=live_bus_url) as client:
         await client.post(
             "/tasks",
             json={"task_id": task_id, "title": "Failing Task", "owner": worker_agent},
         )
-        # Move to review
-        await client.post(f"/tasks/{task_id}/review")
+        review = await client.post(f"/tasks/{task_id}/review", json={"agent_id": worker_agent})
+        assert review.status_code == 200
 
     integrator = BranchIntegrator(
         repo_dir=pilot_git_repo,

@@ -356,7 +356,9 @@ class WorkerDaemon:
             if commit.returncode != 0:
                 raise RuntimeError((err or out).decode(errors="replace")[-500:])
             if self._client:
-                response = await self._client.post(f"/tasks/{task_id}/review")
+                response = await self._client.post(
+                    f"/tasks/{task_id}/review", json={"agent_id": self.agent_id},
+                )
                 response.raise_for_status()
         except Exception as exc:
             logger.error("Could not submit task %s for review: %s", task_id, exc)

@@ -78,9 +78,72 @@ async def main():
 asyncio.run(main())
 ```
 
-Result: **PASS for existing schema compatibility only**. A `Planner`
-interface, two live inference backends, contract versioning and publication
-through the same bus path remain unproven.
+Result: **PASS for existing schema compatibility only**. Two live inference
+backends remain unproven.
+
+## Plan contract version 1
+
+`TaskBreakdownPlan.plan_version` is `"1"`. Payloads that omit it stay valid and
+default to version 1. Any other version fails validation. `StaticPlanner` has
+no inference client. Two mock Hermes backends and that static planner produce
+equal plans, and the static plan publishes through `publish_breakdown` with an
+idempotent `operation_key`.
+
+Command:
+
+```sh
+uv run pytest tests/unit/test_plan_contract.py tests/unit/test_orchestrator.py::test_schema_valid_breakdown -q
+```
+
+Result: **PASS for contract version 1, static planner, and bus publication**.
+
+Live backends, measured 2026-09-24 with both servers on CPU because Docker
+reported `no known GPU vendor found`:
+
+```sh
+HERMES_LIVE_A_URL=http://127.0.0.1:11434/v1 HERMES_LIVE_A_MODEL=qwen2.5:1.5b \
+HERMES_LIVE_B_URL=http://127.0.0.1:11435/v1 HERMES_LIVE_B_MODEL=smollm2:135m \
+uv run pytest tests/unit/test_plan_contract.py::test_live_backends_publish_plan_version_1 -q
+```
+
+Result: **FAIL**.
+
+- `qwen2.5:1.5b` returned malformed JSON (`Unterminated string` around line 423).
+- `smollm2:135m` copied the prompt placeholders. The bus rejected the batch:
+  task `<unique-kebab-case-id>` depends on `<prerequisite-task-id>`.
+
+The same test skips when those four variables are unset, so the mock contract
+checks stay green. These two small CPU models do not establish interchangeable
+live planners.
+
+## Generic external-command probe
+
+The probe lives in `tests/spikes/external_command_probe.py`. It is a disposable
+measurement, not a runtime adapter and not `NativeRuntime`. Attempt state is a
+bus message. The child process environment drops `AGENT_BUS*` variables.
+
+Command:
+
+```sh
+uv run pytest tests/spikes/test_external_command_probe.py -q
+```
+
+Observed on 2026-09-23:
+
+| Gate | Result |
+|---|---|
+| Hub restart does not execute a completed attempt again | **PASS** |
+| Timeout stays `unknown` and blocks another launch until reconcile | **PASS** |
+| Cancel ends in one `cancelled` state and the process is dead | **PASS** |
+| Candidate SHA is the Gatekeeper input; the command does not move `main` or mark the task done | **PASS** |
+| Unsigned `POST /tasks/{id}/done` is refused | **PASS** after the actor requirement |
+
+The command itself has no bus credential. A later change requires `agent_id`
+for unsigned `done`, `review` and `block`. An empty `POST /done` returns 422.
+A stranger receives 409, and the task stays not done. Authenticated non-owner
+completion remains covered by `tests/integration/test_authorization.py`.
+Maintenance cost of this probe is one test module. It does not replace the
+worker. Orca at `5beeefc` remains rejected and was not given this role.
 
 ## OpenHands source feasibility
 
@@ -93,13 +156,14 @@ separate in a later executable spike.
 
 ## Remaining exit gates
 
-1. Define a versioned plan contract compatible with `TaskBreakdownPlan` and
-   run the same request through two actual inference backends plus a static
-   planner, including publication to Agent Bus.
-2. Run a generic external-command attempt with bus-owned task state, restart
-   reconciliation, cancellation, immutable candidate and Gatekeeper review.
-3. Record measured OpenHands sandbox feasibility and the remaining pattern
-   decisions with source revisions and the [adoption scorecard](../../LANDSCAPE_AND_ADOPTION.md).
+1. Repeat the version 1 plan on inference backends that emit a valid DAG.
+   `qwen2.5:1.5b` and `smollm2:135m` on CPU failed on 2026-09-24. Mock backends
+   and the static planner already pass.
+2. Keep the external-command probe disposable. Do not promote it to an adapter
+   before the runtime contract exists. Unsigned `done`, `review` and `block`
+   now require `agent_id`, and that agent must own the task.
+3. Record measured OpenHands sandbox feasibility and cite revisions for Pact,
+   Hydra, Orka and multiagents on the [adoption scorecard](../../LANDSCAPE_AND_ADOPTION.md).
 
 Until those gates pass, Phase 0 and Phase 1 remain proposed work rather than
 validated follow-on implementation.

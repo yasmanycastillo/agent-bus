@@ -138,14 +138,18 @@ def test_work_review_and_work_done_with_evidence(monkeypatch):
             return resp
 
     monkeypatch.setattr(main, "_client", lambda: FakeClient())
+    monkeypatch.setattr(main, "get_current_agent", lambda: "worker")
     runner = CliRunner()
 
     res_rev = runner.invoke(main.app, ["work", "review", "T101"])
     assert res_rev.exit_code == 0
     assert "enviada a revisión" in res_rev.output
-    assert posted[-1] == ("/tasks/T101/review", None)
+    assert posted[-1] == ("/tasks/T101/review", {"agent_id": "worker"})
 
     res_done = runner.invoke(main.app, ["work", "done", "T101", "--evidence", "pytest green and diff verified"])
     assert res_done.exit_code == 0
     assert "completada" in res_done.output
-    assert posted[-1] == ("/tasks/T101/done", {"evidence": {"summary": "pytest green and diff verified"}})
+    assert posted[-1] == ("/tasks/T101/done", {
+        "agent_id": "worker",
+        "evidence": {"summary": "pytest green and diff verified"},
+    })

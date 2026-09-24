@@ -131,6 +131,20 @@ Rejected because Agent Bus has a different architectural goal: durable coordinat
 
 Rejected for V2 Alpha because routing and planning decisions must remain observable and deterministic where possible.
 
+## Phase -1 measurement, 2026-09-23
+
+A static planner produces plan contract version 1 and publishes it through the
+existing batch path. Two mock Hermes backends match that plan. On 2026-09-24,
+`qwen2.5:1.5b` and `smollm2:135m` on local Ollama failed to publish a valid
+plan, so live interchangeability remains unproven. A disposable external-command probe kept attempt state
+on the bus, survived a hub restart without a second execution, reconciled a
+timeout, cancelled to one terminal state, and submitted the command's commit
+SHA to Gatekeeper. The command could not move the target branch or mark the
+task done. With unsigned requests enabled, `POST /tasks/{id}/done` still
+completed the task. That probe is not an adapter. `NativeRuntime` stays the
+current worker until the runtime contract exists. No worker code is deleted on
+this evidence.
+
 ## Validation
 
 This ADR is validated when:
