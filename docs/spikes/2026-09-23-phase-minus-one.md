@@ -188,6 +188,8 @@ in `/tmp` and was not added to the repository.
 | A new container after `docker stop` | **PASS** as isolation; the marker is gone |
 | Credentials for this local workspace | **PASS**; none were required |
 | Kubernetes `AgentSandboxWorkspace` | **UNKNOWN**; this host has no kubeconfig or warm pool |
+| `OpenHandsCloudWorkspace` with no arguments | **FAIL** closed; validation requires `cloud_api_url` and `cloud_api_key` before any request |
+| `APIRemoteWorkspace` with no arguments | **FAIL** closed; validation requires `runtime_api_url`, `runtime_api_key` and `server_image` |
 
 The image logs a warning when it binds `0.0.0.0` without `SESSION_API_KEY`.
 `OH_SECRET_KEY` was unset, so the server said secrets do not survive its own
@@ -203,9 +205,10 @@ adapter candidate. The Kubernetes and cloud workspaces stay unmeasured.
 2. Keep the external-command probe disposable. Do not promote it to an adapter
    before the runtime contract exists. Unsigned `done`, `review` and `block`
    now require `agent_id`, and that agent must own the task.
-3. The local Docker workspace is measured above. Kubernetes and cloud
-   OpenHands workspaces remain unknown. Pact `demo`, Hydra `init` and the
-   multiagents CLI `status` were run on 2026-09-24. Orka was not executed.
+3. The local Docker workspace is measured above. Cloud and remote API
+   workspaces fail closed without credentials. The Kubernetes sandbox remains
+   unknown. Pact `demo`, Hydra `init`, multiagents `status` and the Orka CLI
+   `version`/`status` were run on 2026-09-24. No Orka task was submitted.
 
 Until those gates pass, Phase 0 and Phase 1 remain proposed work rather than
 validated follow-on implementation.

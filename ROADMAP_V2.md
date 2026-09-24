@@ -696,10 +696,11 @@ that agent must own the task. An empty completion returns 422.
 
 ### 3. Remaining source revisions
 
-Pact `demo`, Hydra `init` and multiagents `status` were run on 2026-09-24 at
-the cited revisions. Orka `80bfc20` was not executed. The OpenHands Docker
-workspace was measured and is not an adapter. Its Kubernetes and cloud
-workspaces remain unmeasured. Do not turn the command probe into an adapter.
+Pact `demo`, Hydra `init`, multiagents `status` and the Orka CLI `version` and
+`status` were run on 2026-09-24 at the cited revisions. Orka had no server.
+The OpenHands Docker workspace was measured. Its cloud and remote API
+constructors fail closed without credentials, and the Kubernetes sandbox was
+not run. None of these is an adapter. Do not turn the command probe into one.
 
 After Phase -1 exits successfully, the first implementation sprint should contain only three technical objectives:
 

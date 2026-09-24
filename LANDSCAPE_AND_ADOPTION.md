@@ -137,7 +137,11 @@ On 2026-09-24 the Docker workspace at SDK `5b36cac` / package `1.49.5` started
 file, survived `docker pause`, and lost that file in a new container. No API
 key was required, and the server warned that it was listening on `0.0.0.0`
 without `SESSION_API_KEY`. `AgentSandboxWorkspace` was not run: this host has
-no kubeconfig. That measurement does not adopt an adapter.
+no kubeconfig. Constructing `OpenHandsCloudWorkspace` without arguments fails
+validation before any request, requiring `cloud_api_url` and `cloud_api_key`.
+`APIRemoteWorkspace` likewise requires `runtime_api_url`, `runtime_api_key` and
+`server_image`. No cloud sandbox was created. That measurement does not adopt
+an adapter.
 
 ---
 
@@ -189,7 +193,7 @@ Routing should initially be explainable and policy-driven. Model-assisted routin
 
 ## Orka
 
-Cited source: [orka-agents/orka](https://github.com/orka-agents/orka) `80bfc20b17c68e82a8a763881d4b0ff65f7baa2a` (2026-09-24, MIT). The README describes Kubernetes tasks for model calls, coding agents and commands, and says the project is experimental. The CLI source at `cmd/cli` talks to a server and a kubeconfig. This host has no Go toolchain and no kubeconfig, so the binary was not executed. The published `v0.2.0` release is older than this commit and was not substituted for it.
+Cited source: [orka-agents/orka](https://github.com/orka-agents/orka) `80bfc20b17c68e82a8a763881d4b0ff65f7baa2a` (2026-09-24, MIT). The README describes Kubernetes tasks for model calls, coding agents and commands, and says the project is experimental. On 2026-09-24 the CLI was built with a temporary Go 1.27.0 toolchain from that commit. `orka version` printed `orka dev`. `orka status` with no server exited after `connection refused` on `http://localhost:8080`. No cluster was started and no task was submitted. The published `v0.2.0` release is older than this commit and was not substituted for it.
 
 ### What to study
 
@@ -412,10 +416,10 @@ Commands and raw gates are in [docs/spikes/2026-09-23-phase-minus-one.md](docs/s
 | Maintenance versus keeping the probe | one test module, no core runtime type | **PASS** as a spike; do not adopt it as an adapter yet |
 | Plan contract version 1 and static planner | `tests/unit/test_plan_contract.py` | **PASS** |
 | Two live inference backends | Runpod pod `k5wdcmxdszmb4t`, H100 80GB, `Qwen2.5-7B-Instruct-AWQ` and `Qwen2.5-Coder-7B-Instruct-AWQ`, 2026-09-24. Earlier CPU `qwen2.5:1.5b` / `smollm2:135m` run failed. | **PASS** |
-| OpenHands sandbox lifecycle | SDK `5b36cac`, `DockerWorkspace` plus image `1.49.5-python` on local Docker, 2026-09-24 | **PASS** for local Docker; Kubernetes/cloud **unknown**; do not adopt an adapter yet |
+| OpenHands sandbox lifecycle | SDK `5b36cac`, local Docker image `1.49.5-python`; cloud and remote API constructors, 2026-09-24 | **PASS** for local Docker; cloud and remote API **FAIL** closed without credentials; Kubernetes **UNKNOWN**; do not adopt an adapter yet |
 | Pact local loop | `0b3d882`, `pact demo` | **PASS** for the simulated worktree merge; not adopted |
 | Hydra CLI | `c4377f4`, `--help` and `init` | **PASS** for file generation; daemon and model routing not run |
-| Orka CLI | `80bfc20`, source only | **UNKNOWN**; no Go toolchain and no kubeconfig |
+| Orka CLI | `80bfc20`, `go build ./cmd/cli`, `version` and `status` | **PASS** for the binary; **FAIL** closed with no server on `:8080`; no task was submitted |
 | multiagents CLI | `03fcf6e`, Bun `--help` and `status` | **PASS** for the CLI; broker stayed down |
 
 `NativeRuntime` remains the current worker and watch path. Nothing in the worker
