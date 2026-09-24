@@ -30,6 +30,22 @@ class RuntimeMessage:
     text: str
 
 
+@dataclass(frozen=True)
+class RuntimeStatus:
+    attempt_id: str
+    state: str
+    outcome: str | None = None
+    candidate_sha: str | None = None
+    log_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RuntimeResult:
+    outcome: str
+    candidate_sha: str | None = None
+    log_refs: tuple[str, ...] = ()
+
+
 class AttemptConflict(RuntimeError):
     """An unknown attempt must be reconciled before another start."""
 
@@ -41,4 +57,6 @@ class AgentRuntime(Protocol):
 
     async def cancel(self, session: RuntimeSession) -> None: ...
 
-    async def status(self, attempt_id: str) -> RuntimeSession: ...
+    async def status(self, session: RuntimeSession) -> RuntimeStatus: ...
+
+    async def complete(self, session: RuntimeSession, result: RuntimeResult) -> RuntimeStatus: ...

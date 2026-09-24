@@ -5,6 +5,7 @@ import logging
 import hashlib
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,7 @@ class WorkerDaemon:
             enable_desktop=os.environ.get("AGENT_BUS_NOTIFY_DESKTOP") == "1"
         )
         self._running = False
+        self._epoch = uuid.uuid4().hex
         self._task_turn_counts: dict[str, int] = {}
         self._client: httpx.AsyncClient | None = None
         self._sse_client: BusEventClient | None = None
@@ -312,6 +314,10 @@ class WorkerDaemon:
             # Do not loop infinitely on stuck tasks
             return RunnerResult(success=False, output="", error=f"Task {task_id} exceeded max turn limit.")
 
+        if not await self._runtime_allows_execution(task_id):
+            logger.info("Task %s has no executable runtime attempt", task_id)
+            return RunnerResult(success=False, output="", error=f"Task {task_id} is waiting on its runtime attempt")
+
         logger.info(f"Agent '{self.agent_id}' executing task {task_id} (turn {turns}/{self.max_turns_per_task})")
         await self._set_agent_status(AgentStatus.BUSY, work={"type": "task", "task_id": task_id})
 
@@ -320,12 +326,73 @@ class WorkerDaemon:
         prompt = self.runner.assemble_prompt(task=task, decisions=decisions)
 
         result = await self.runner.execute_turn(prompt)
+        await self._finish_attempt(task_id, "completed" if result.success else "failed")
 
         if result.success:
             await self._commit_and_submit_review(task_id)
 
         await self._set_agent_status(AgentStatus.ONLINE, work=None)
         return result
+
+    async def _runtime_allows_execution(self, task_id: str) -> bool:
+        if not self._client or not task_id:
+            return True
+        try:
+            started = await self._client.post("/runtime/native/start", json={
+                "task_id": task_id,
+                "idempotency_key": f"native:{task_id}",
+                "agent_id": self.agent_id,
+            })
+            if started.status_code == 409:
+                return False
+            if started.status_code != 200:
+                return True
+            body = started.json()
+            if body.get("state") in {"completed", "failed", "cancelled", "unknown"}:
+                return False
+            claim = await self._client.post(
+                f"/runtime/native/{body['attempt_id']}/execution", json={"epoch": self._epoch},
+            )
+            if claim.status_code != 200:
+                return True
+            return bool(claim.json().get("execute"))
+        except Exception as exc:
+            logger.debug("Runtime gate skipped: %s", exc)
+            return True
+
+    async def _finish_attempt(self, task_id: str, outcome: str) -> None:
+        if not self._client:
+            return
+        try:
+            started = await self._client.post("/runtime/native/start", json={
+                "task_id": task_id,
+                "idempotency_key": f"native:{task_id}",
+                "agent_id": self.agent_id,
+            })
+            if started.status_code != 200:
+                return
+            attempt_id = started.json()["attempt_id"]
+            sha = await self._candidate_sha()
+            await self._client.post(f"/runtime/native/{attempt_id}/complete", json={
+                "outcome": outcome,
+                "candidate_sha": sha,
+                "log_refs": [f"worker:{self.agent_id}:{task_id}"],
+            })
+        except Exception as exc:
+            logger.debug("Runtime result was not recorded: %s", exc)
+
+    async def _candidate_sha(self) -> str | None:
+        checkout = self.runner.worktree_dir
+        if checkout is None or not (checkout / ".git").exists():
+            return None
+        process = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "HEAD", cwd=str(checkout),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, _ = await process.communicate()
+        if process.returncode != 0:
+            return None
+        return out.decode().strip() or None
 
     async def _runtime_messages(self, task_id: str) -> list[str]:
         if not self._client or not task_id:

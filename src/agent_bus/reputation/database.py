@@ -440,9 +440,22 @@ class Database:
                     state TEXT NOT NULL,
                     external_ref TEXT,
                     workspace_ref TEXT,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    outcome TEXT,
+                    candidate_sha TEXT,
+                    log_refs TEXT DEFAULT '[]',
+                    execution_epoch TEXT
                 )"""
             )
+            columns = {row["name"] for row in await self.conn.execute_fetchall("PRAGMA table_info(runtime_attempts)")}
+            for name, definition in (
+                ("outcome", "TEXT"),
+                ("candidate_sha", "TEXT"),
+                ("log_refs", "TEXT DEFAULT '[]'"),
+                ("execution_epoch", "TEXT"),
+            ):
+                if name not in columns:
+                    await self.conn.execute(f"ALTER TABLE runtime_attempts ADD COLUMN {name} {definition}")
             await self.conn.commit()
         except BaseException:
             await self.conn.rollback()

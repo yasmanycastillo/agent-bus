@@ -628,8 +628,10 @@ class MessageBus:
                 )
             except KeyError as exc:
                 return JSONResponse({"error": f"{exc.args[0]} is required"}, status_code=422)
+            runtime = NativeRuntime(self.db)
             try:
-                session = await NativeRuntime(self.db).start(start)
+                prior = await runtime._by_key(start.idempotency_key)
+                session = await runtime.start(start)
             except AttemptConflict as exc:
                 return JSONResponse({"error": str(exc)}, status_code=409)
             return {
@@ -638,16 +640,65 @@ class MessageBus:
                 "external_ref": session.external_ref,
                 "workspace_ref": session.workspace_ref,
                 "state": session.state,
+                "created": prior is None,
             }
 
         @self.app.get("/runtime/native/{attempt_id}")
         async def native_status(attempt_id: str):
             from agent_bus.runtimes.native import NativeRuntime
+            runtime = NativeRuntime(self.db)
             try:
-                session = await NativeRuntime(self.db).status(attempt_id)
+                report = await runtime._status_by_id(attempt_id)
             except KeyError:
                 return JSONResponse({"error": "Attempt not found"}, status_code=404)
-            return {"attempt_id": session.attempt_id, "state": session.state, "task_id": session.task_id}
+            return {
+                "attempt_id": report.attempt_id,
+                "state": report.state,
+                "outcome": report.outcome,
+                "candidate_sha": report.candidate_sha,
+                "log_refs": list(report.log_refs),
+            }
+
+        @self.app.post("/runtime/native/{attempt_id}/execution")
+        async def native_execution(attempt_id: str, request: Request):
+            from agent_bus.runtimes.native import NativeRuntime
+            body = await self._json_object(request)
+            epoch = body.get("epoch")
+            if not isinstance(epoch, str) or not epoch:
+                return JSONResponse({"error": "epoch is required"}, status_code=422)
+            runtime = NativeRuntime(self.db)
+            try:
+                execute = await runtime.claim_execution(attempt_id, epoch)
+                report = await runtime._status_by_id(attempt_id)
+            except KeyError:
+                return JSONResponse({"error": "Attempt not found"}, status_code=404)
+            return {"execute": execute, "attempt_id": report.attempt_id, "state": report.state}
+
+        @self.app.post("/runtime/native/{attempt_id}/complete")
+        async def native_complete(attempt_id: str, request: Request):
+            from agent_bus.runtimes.native import NativeRuntime
+            from agent_bus.runtimes.protocol import RuntimeResult, RuntimeSession
+            body = await self._json_object(request)
+            outcome = body.get("outcome")
+            if outcome not in {"completed", "failed", "cancelled"}:
+                return JSONResponse({"error": "outcome must be completed, failed or cancelled"}, status_code=422)
+            refs = body.get("log_refs") or []
+            runtime = NativeRuntime(self.db)
+            try:
+                current = await runtime._status_by_id(attempt_id)
+            except KeyError:
+                return JSONResponse({"error": "Attempt not found"}, status_code=404)
+            report = await runtime.complete(
+                RuntimeSession(attempt_id, body.get("task_id") or "", "", None, current.state),
+                RuntimeResult(outcome, body.get("candidate_sha"), tuple(refs)),
+            )
+            return {
+                "attempt_id": report.attempt_id,
+                "state": report.state,
+                "outcome": report.outcome,
+                "candidate_sha": report.candidate_sha,
+                "log_refs": list(report.log_refs),
+            }
 
         @self.app.post("/runtime/native/{attempt_id}/send")
         async def native_send(attempt_id: str, request: Request):
@@ -656,12 +707,13 @@ class MessageBus:
             text = body.get("text")
             if not isinstance(text, str) or not text:
                 return JSONResponse({"error": "text is required"}, status_code=422)
+            from agent_bus.runtimes.protocol import RuntimeSession
             runtime = NativeRuntime(self.db)
             try:
-                session = await runtime.status(attempt_id)
+                report = await runtime._status_by_id(attempt_id)
             except KeyError:
                 return JSONResponse({"error": "Attempt not found"}, status_code=404)
-            message = await runtime.send(session, text)
+            message = await runtime.send(RuntimeSession(attempt_id, "", "", None, report.state), text)
             return {"attempt_id": message.attempt_id, "text": message.text}
 
         @self.app.get("/runtime/native/by-task/{task_id}/messages")

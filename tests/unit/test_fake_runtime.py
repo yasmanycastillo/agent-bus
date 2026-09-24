@@ -17,5 +17,6 @@ async def test_fake_runtime_covers_the_protocol():
     with pytest.raises(AttemptConflict):
         await runtime.start(RuntimeStartRequest("att-2", "T1", "key-2", "worker"))
     await runtime.reconcile("att-1", "cancelled")
-    await runtime.cancel(await runtime.start(RuntimeStartRequest("att-2", "T1", "key-2", "worker")))
-    assert (await runtime.status("att-2")).state == "cancelled"
+    second = await runtime.start(RuntimeStartRequest("att-2", "T1", "key-2", "worker"))
+    await runtime.cancel(second)
+    assert (await runtime.status(second)).state == "cancelled"

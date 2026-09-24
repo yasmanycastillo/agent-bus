@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 
@@ -9,8 +10,10 @@ from agent_bus.reputation.database import Database
 from agent_bus.runtimes.protocol import (
     AttemptConflict,
     RuntimeMessage,
+    RuntimeResult,
     RuntimeSession,
     RuntimeStartRequest,
+    RuntimeStatus,
 )
 
 TERMINAL = {"completed", "failed", "cancelled"}
@@ -71,24 +74,61 @@ class NativeRuntime:
     async def cancel(self, session: RuntimeSession) -> None:
         await self._set_state(session.attempt_id, "cancelled")
 
-    async def status(self, attempt_id: str) -> RuntimeSession:
+    async def status(self, session: RuntimeSession) -> RuntimeStatus:
+        return await self._status_by_id(session.attempt_id)
+
+    async def complete(self, session: RuntimeSession, result: RuntimeResult) -> RuntimeStatus:
+        if result.outcome not in TERMINAL:
+            raise ValueError(f"outcome must be one of {sorted(TERMINAL)}")
+        current = await self._status_by_id(session.attempt_id)
+        if current.state in TERMINAL:
+            return current
+        await self._db.conn.execute(
+            """UPDATE runtime_attempts
+               SET state = ?, outcome = ?, candidate_sha = ?, log_refs = ?, updated_at = ?
+               WHERE attempt_id = ?""",
+            (result.outcome, result.outcome, result.candidate_sha, json.dumps(list(result.log_refs)), _now(), session.attempt_id),
+        )
+        await self._db.conn.commit()
+        return await self._status_by_id(session.attempt_id)
+
+    async def claim_execution(self, attempt_id: str, epoch: str) -> bool:
+        current = await self._status_by_id(attempt_id)
+        if current.state in TERMINAL or current.state == "unknown":
+            return False
+        rows = await self._db.conn.execute_fetchall(
+            "SELECT execution_epoch FROM runtime_attempts WHERE attempt_id = ?", (attempt_id,),
+        )
+        owner = rows[0]["execution_epoch"]
+        if owner and owner != epoch:
+            await self.mark_unknown(attempt_id)
+            return False
+        if not owner:
+            await self._db.conn.execute(
+                "UPDATE runtime_attempts SET execution_epoch = ?, updated_at = ? WHERE attempt_id = ?",
+                (epoch, _now(), attempt_id),
+            )
+            await self._db.conn.commit()
+        return True
+
+    async def _status_by_id(self, attempt_id: str) -> RuntimeStatus:
         row = await self._db.conn.execute_fetchall(
             "SELECT * FROM runtime_attempts WHERE attempt_id = ?", (attempt_id,),
         )
         if not row:
             raise KeyError(attempt_id)
-        return _session(row[0])
+        return _status(row[0])
 
     async def reconcile(self, attempt_id: str, outcome: str) -> RuntimeSession:
         if outcome not in TERMINAL:
             raise ValueError(f"outcome must be one of {sorted(TERMINAL)}")
-        current = await self.status(attempt_id)
+        current = await self._status_by_id(attempt_id)
         if current.state != "unknown" and current.state not in TERMINAL:
             raise AttemptConflict(f"attempt {attempt_id} is {current.state}")
         if current.state in TERMINAL:
             return current
         await self._set_state(attempt_id, outcome)
-        return await self.status(attempt_id)
+        return await self._status_by_id(attempt_id)
 
     async def mark_unknown(self, attempt_id: str) -> None:
         await self._set_state(attempt_id, "unknown")
@@ -121,4 +161,16 @@ def _now() -> str:
 def _session(row) -> RuntimeSession:
     return RuntimeSession(
         row["attempt_id"], row["task_id"], row["external_ref"], row["workspace_ref"], row["state"],
+    )
+
+
+def _status(row) -> RuntimeStatus:
+    raw = row["log_refs"] if "log_refs" in row.keys() else "[]"
+    refs = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    return RuntimeStatus(
+        row["attempt_id"],
+        row["state"],
+        row["outcome"] if "outcome" in row.keys() else None,
+        row["candidate_sha"] if "candidate_sha" in row.keys() else None,
+        tuple(refs),
     )

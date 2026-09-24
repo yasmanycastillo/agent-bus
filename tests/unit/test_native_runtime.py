@@ -18,7 +18,10 @@ async def test_native_attempt_survives_a_new_runtime_and_blocks_unknown(tmp_path
     again = NativeRuntime(db)
     same = await again.start(request)
     assert same.attempt_id == "att-1"
-    assert (await again.status("att-1")).state == "started"
+    assert (await again.status(same)).state == "started"
+    assert await again.claim_execution("att-1", "epoch-a")
+    assert not await again.claim_execution("att-1", "epoch-b")
+    assert (await again.status(same)).state == "unknown"
 
     await again.mark_unknown("att-1")
     with pytest.raises(AttemptConflict):
