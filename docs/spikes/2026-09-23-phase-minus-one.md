@@ -204,9 +204,8 @@ adapter candidate. The Kubernetes and cloud workspaces stay unmeasured.
    before the runtime contract exists. Unsigned `done`, `review` and `block`
    now require `agent_id`, and that agent must own the task.
 3. The local Docker workspace is measured above. Kubernetes and cloud
-   OpenHands workspaces remain unknown. Pact, Hydra, Orka and multiagents have
-   cited revisions on the [adoption scorecard](../../LANDSCAPE_AND_ADOPTION.md)
-   and still have no local run.
+   OpenHands workspaces remain unknown. Pact `demo`, Hydra `init` and the
+   multiagents CLI `status` were run on 2026-09-24. Orka was not executed.
 
 Until those gates pass, Phase 0 and Phase 1 remain proposed work rather than
 validated follow-on implementation.

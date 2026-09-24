@@ -143,7 +143,7 @@ no kubeconfig. That measurement does not adopt an adapter.
 
 ## Pact
 
-Cited source: [zekariasasaminew/pact](https://github.com/zekariasasaminew/pact) `0b3d882b79ea7fa0a8be14b6ae44820f51c6852d` (2026-08-31, MIT). The README describes per-agent git worktrees and a risk-sequenced `merge-all`. File claims are advisory. No executable compatibility test was run.
+Cited source: [zekariasasaminew/pact](https://github.com/zekariasasaminew/pact) `0b3d882b79ea7fa0a8be14b6ae44820f51c6852d` (2026-08-31, MIT). The README describes per-agent git worktrees and a risk-sequenced `merge-all`. File claims are advisory. On 2026-09-24 `cargo run -p pact-cli --bin pact -- --help` produced pact 0.5.0, and `pact demo` merged two simulated workspaces onto a disposable branch with no agent CLI and no model call. That confirms the worktree loop. It does not adopt Pact.
 
 ### What to study
 
@@ -166,7 +166,7 @@ Parallelism is useful, but worktrees should remain a workspace backend, not an a
 
 ## Hydra
 
-Cited source: [krowxx/hydra](https://github.com/krowxx/hydra) `c4377f499ad6d6b41a51e49824e96fe24140b595` (2026-03-07, MIT, branch `master`). The README describes heuristic routing across Claude, Gemini and Codex, plus optional multi-round deliberation. The README badge names PrimeLocus/Hydra; this citation is the `krowxx/hydra` repository. No executable compatibility test was run.
+Cited source: [krowxx/hydra](https://github.com/krowxx/hydra) `c4377f499ad6d6b41a51e49824e96fe24140b595` (2026-03-07, MIT, branch `master`). The README describes heuristic routing across Claude, Gemini and Codex, plus optional multi-round deliberation. The README badge names PrimeLocus/Hydra; this citation is the `krowxx/hydra` repository. On 2026-09-24 `node bin/hydra-cli.mjs --help` listed setup, init and prompt modes. After `npm ci`, `hydra init` wrote `HYDRA.md` and synced `CLAUDE.md`, `GEMINI.md` and `AGENTS.md` in a throwaway directory. The daemon and any model route were not started.
 
 ### What to study
 
@@ -189,7 +189,7 @@ Routing should initially be explainable and policy-driven. Model-assisted routin
 
 ## Orka
 
-Cited source: [orka-agents/orka](https://github.com/orka-agents/orka) `80bfc20b17c68e82a8a763881d4b0ff65f7baa2a` (2026-09-24, MIT). The README describes Kubernetes tasks for model calls, coding agents and commands, and says the project is experimental. No executable compatibility test was run.
+Cited source: [orka-agents/orka](https://github.com/orka-agents/orka) `80bfc20b17c68e82a8a763881d4b0ff65f7baa2a` (2026-09-24, MIT). The README describes Kubernetes tasks for model calls, coding agents and commands, and says the project is experimental. The CLI source at `cmd/cli` talks to a server and a kubeconfig. This host has no Go toolchain and no kubeconfig, so the binary was not executed. The published `v0.2.0` release is older than this commit and was not substituted for it.
 
 ### What to study
 
@@ -213,7 +213,7 @@ Agent Bus already has a strong integration invariant. Extend the current Gatekee
 
 ## multiagents
 
-Cited source: [zetbrush/multiagents](https://github.com/zetbrush/multiagents) `03fcf6e875804a21650ed4e45eb9b6624460f7fb` (2026-04-26, release v0.5.0, no SPDX license in the repository metadata). The README describes MCP peer discovery, a local broker, and review loops. No executable compatibility test was run.
+Cited source: [zetbrush/multiagents](https://github.com/zetbrush/multiagents) `03fcf6e875804a21650ed4e45eb9b6624460f7fb` (2026-04-26, release v0.5.0, no SPDX license in the repository metadata). The README describes MCP peer discovery, a local broker, and review loops. Node cannot run the CLI because it uses TypeScript parameter properties. On 2026-09-24 `bun ./cli.ts --help` listed setup, session, broker and MCP commands, and `bun ./cli.ts status` printed `Broker is not running.` The broker was not started and no MCP client was configured.
 
 ### What to study
 
@@ -413,7 +413,10 @@ Commands and raw gates are in [docs/spikes/2026-09-23-phase-minus-one.md](docs/s
 | Plan contract version 1 and static planner | `tests/unit/test_plan_contract.py` | **PASS** |
 | Two live inference backends | Runpod pod `k5wdcmxdszmb4t`, H100 80GB, `Qwen2.5-7B-Instruct-AWQ` and `Qwen2.5-Coder-7B-Instruct-AWQ`, 2026-09-24. Earlier CPU `qwen2.5:1.5b` / `smollm2:135m` run failed. | **PASS** |
 | OpenHands sandbox lifecycle | SDK `5b36cac`, `DockerWorkspace` plus image `1.49.5-python` on local Docker, 2026-09-24 | **PASS** for local Docker; Kubernetes/cloud **unknown**; do not adopt an adapter yet |
-| Pact, Hydra, Orka, multiagents executable compatibility | README at `0b3d882`, `c4377f4`, `80bfc20`, `03fcf6e` | **unknown**; revisions cited, no local run |
+| Pact local loop | `0b3d882`, `pact demo` | **PASS** for the simulated worktree merge; not adopted |
+| Hydra CLI | `c4377f4`, `--help` and `init` | **PASS** for file generation; daemon and model routing not run |
+| Orka CLI | `80bfc20`, source only | **UNKNOWN**; no Go toolchain and no kubeconfig |
+| multiagents CLI | `03fcf6e`, Bun `--help` and `status` | **PASS** for the CLI; broker stayed down |
 
 `NativeRuntime` remains the current worker and watch path. Nothing in the worker
 is deleted or frozen. Phase 1 still must not add an Orca adapter, an OpenHands
