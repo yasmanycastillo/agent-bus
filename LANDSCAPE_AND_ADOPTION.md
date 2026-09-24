@@ -136,6 +136,8 @@ sandbox provisioning, recovery or artifact export works.
 
 ## Pact
 
+Cited source: [zekariasasaminew/pact](https://github.com/zekariasasaminew/pact) `0b3d882b79ea7fa0a8be14b6ae44820f51c6852d` (2026-08-31, MIT). The README describes per-agent git worktrees and a risk-sequenced `merge-all`. File claims are advisory. No executable compatibility test was run.
+
 ### What to study
 
 - parallel execution in isolated Git worktrees,
@@ -156,6 +158,8 @@ Parallelism is useful, but worktrees should remain a workspace backend, not an a
 ---
 
 ## Hydra
+
+Cited source: [krowxx/hydra](https://github.com/krowxx/hydra) `c4377f499ad6d6b41a51e49824e96fe24140b595` (2026-03-07, MIT, branch `master`). The README describes heuristic routing across Claude, Gemini and Codex, plus optional multi-round deliberation. The README badge names PrimeLocus/Hydra; this citation is the `krowxx/hydra` repository. No executable compatibility test was run.
 
 ### What to study
 
@@ -178,6 +182,8 @@ Routing should initially be explainable and policy-driven. Model-assisted routin
 
 ## Orka
 
+Cited source: [orka-agents/orka](https://github.com/orka-agents/orka) `80bfc20b17c68e82a8a763881d4b0ff65f7baa2a` (2026-09-24, MIT). The README describes Kubernetes tasks for model calls, coding agents and commands, and says the project is experimental. No executable compatibility test was run.
+
 ### What to study
 
 - implementation -> review -> security review -> merge pipelines,
@@ -199,6 +205,8 @@ Agent Bus already has a strong integration invariant. Extend the current Gatekee
 ---
 
 ## multiagents
+
+Cited source: [zetbrush/multiagents](https://github.com/zetbrush/multiagents) `03fcf6e875804a21650ed4e45eb9b6624460f7fb` (2026-04-26, release v0.5.0, no SPDX license in the repository metadata). The README describes MCP peer discovery, a local broker, and review loops. No executable compatibility test was run.
 
 ### What to study
 
@@ -398,7 +406,7 @@ Commands and raw gates are in [docs/spikes/2026-09-23-phase-minus-one.md](docs/s
 | Plan contract version 1 and static planner | `tests/unit/test_plan_contract.py` | **PASS** |
 | Two live inference backends | Ollama CPU, `qwen2.5:1.5b` on `:11434` and `smollm2:135m` on `:11435`, 2026-09-24 | **FAIL** |
 | OpenHands sandbox lifecycle | SDK `5b36cac`, source only | **unknown**; adoption deferred |
-| Pact, Hydra, Orka, multiagents executable compatibility | names only, no tested revision | **unknown** |
+| Pact, Hydra, Orka, multiagents executable compatibility | README at `0b3d882`, `c4377f4`, `80bfc20`, `03fcf6e` | **unknown**; revisions cited, no local run |
 
 `NativeRuntime` remains the current worker and watch path. Nothing in the worker
 is deleted or frozen. Phase 1 still must not add an Orca adapter, an OpenHands

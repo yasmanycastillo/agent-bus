@@ -162,8 +162,9 @@ separate in a later executable spike.
 2. Keep the external-command probe disposable. Do not promote it to an adapter
    before the runtime contract exists. Unsigned `done`, `review` and `block`
    now require `agent_id`, and that agent must own the task.
-3. Record measured OpenHands sandbox feasibility and cite revisions for Pact,
-   Hydra, Orka and multiagents on the [adoption scorecard](../../LANDSCAPE_AND_ADOPTION.md).
+3. Record measured OpenHands sandbox feasibility. Pact, Hydra, Orka and
+   multiagents now have cited revisions on the
+   [adoption scorecard](../../LANDSCAPE_AND_ADOPTION.md); none has a local run.
 
 Until those gates pass, Phase 0 and Phase 1 remain proposed work rather than
 validated follow-on implementation.
