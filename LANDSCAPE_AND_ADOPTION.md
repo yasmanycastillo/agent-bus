@@ -404,7 +404,7 @@ Commands and raw gates are in [docs/spikes/2026-09-23-phase-minus-one.md](docs/s
 | Hub refuses completion by a non-owner | unsigned `POST /tasks/{id}/done` without `agent_id` returns 422; a stranger returns 409. Authenticated coverage remains `tests/integration/test_authorization.py` | **PASS** |
 | Maintenance versus keeping the probe | one test module, no core runtime type | **PASS** as a spike; do not adopt it as an adapter yet |
 | Plan contract version 1 and static planner | `tests/unit/test_plan_contract.py` | **PASS** |
-| Two live inference backends | Ollama CPU, `qwen2.5:1.5b` on `:11434` and `smollm2:135m` on `:11435`, 2026-09-24 | **FAIL** |
+| Two live inference backends | Runpod pod `k5wdcmxdszmb4t`, H100 80GB, `Qwen2.5-7B-Instruct-AWQ` and `Qwen2.5-Coder-7B-Instruct-AWQ`, 2026-09-24. Earlier CPU `qwen2.5:1.5b` / `smollm2:135m` run failed. | **PASS** |
 | OpenHands sandbox lifecycle | SDK `5b36cac`, source only | **unknown**; adoption deferred |
 | Pact, Hydra, Orka, multiagents executable compatibility | README at `0b3d882`, `c4377f4`, `80bfc20`, `03fcf6e` | **unknown**; revisions cited, no local run |
 

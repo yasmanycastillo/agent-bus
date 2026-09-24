@@ -135,15 +135,16 @@ Rejected for V2 Alpha because routing and planning decisions must remain observa
 
 A static planner produces plan contract version 1 and publishes it through the
 existing batch path. Two mock Hermes backends match that plan. On 2026-09-24,
-`qwen2.5:1.5b` and `smollm2:135m` on local Ollama failed to publish a valid
-plan, so live interchangeability remains unproven. A disposable external-command probe kept attempt state
-on the bus, survived a hub restart without a second execution, reconciled a
-timeout, cancelled to one terminal state, and submitted the command's commit
-SHA to Gatekeeper. The command could not move the target branch or mark the
-task done. With unsigned requests enabled, `POST /tasks/{id}/done` still
-completed the task. That probe is not an adapter. `NativeRuntime` stays the
-current worker until the runtime contract exists. No worker code is deleted on
-this evidence.
+`Qwen2.5-7B-Instruct-AWQ` and `Qwen2.5-Coder-7B-Instruct-AWQ` on one Runpod H100
+also published valid version 1 plans (`1 passed in 8.89s`). An earlier CPU run
+of `qwen2.5:1.5b` and `smollm2:135m` failed. A disposable external-command probe
+kept attempt state on the bus, survived a hub restart without a second
+execution, reconciled a timeout, cancelled to one terminal state, and submitted
+the command's commit SHA to Gatekeeper. The command could not move the target
+branch or mark the task done. Unsigned `done`, `review` and `block` now require
+a named owner. That probe is not an adapter. `NativeRuntime` stays the current
+worker until the runtime contract exists. No worker code is deleted on this
+evidence.
 
 ## Validation
 

@@ -116,6 +116,27 @@ The same test skips when those four variables are unset, so the mock contract
 checks stay green. These two small CPU models do not establish interchangeable
 live planners.
 
+A later pair did. On 2026-09-24 Claude provisioned two vLLM servers on one
+Runpod H100 80GB (`k5wdcmxdszmb4t`, image `vllm/vllm-openai:latest`). A local
+forwarder published them on the loopback ports the test allows. Grok reran the
+same test against those servers and observed `1 passed in 8.89s`.
+
+```sh
+HERMES_LIVE_A_URL=http://127.0.0.1:11434/v1 \
+HERMES_LIVE_A_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ \
+HERMES_LIVE_B_URL=http://127.0.0.1:11435/v1 \
+HERMES_LIVE_B_MODEL=Qwen/Qwen2.5-Coder-7B-Instruct-AWQ \
+uv run pytest tests/unit/test_plan_contract.py::test_live_backends_publish_plan_version_1 -q
+```
+
+Both models reported `max_model_len` 16384. The public proxies were
+`https://k5wdcmxdszmb4t-8000.proxy.runpod.net/v1` and
+`https://k5wdcmxdszmb4t-8001.proxy.runpod.net/v1`, without authentication.
+The pod billed $3.49/h and is not required for the remaining OpenHands gate,
+so it should be stopped after this record. The two plans were valid version 1
+publications. They were not byte-identical, and this run does not make Hermes
+the only planner.
+
 ## Generic external-command probe
 
 The probe lives in `tests/spikes/external_command_probe.py`. It is a disposable
@@ -156,9 +177,9 @@ separate in a later executable spike.
 
 ## Remaining exit gates
 
-1. Repeat the version 1 plan on inference backends that emit a valid DAG.
-   `qwen2.5:1.5b` and `smollm2:135m` on CPU failed on 2026-09-24. Mock backends
-   and the static planner already pass.
+1. The version 1 plan has now been published by two live 7B AWQ backends on
+   2026-09-24. The earlier `qwen2.5:1.5b` and `smollm2:135m` CPU run remains a
+   recorded failure. Mock backends and the static planner also pass.
 2. Keep the external-command probe disposable. Do not promote it to an adapter
    before the runtime contract exists. Unsigned `done`, `review` and `block`
    now require `agent_id`, and that agent must own the task.

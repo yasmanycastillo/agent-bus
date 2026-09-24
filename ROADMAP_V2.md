@@ -684,9 +684,9 @@ The next sprint is the rest of Phase -1, and it should contain only evaluation w
 ### 1. Live plan backends
 
 Plan contract version 1, the static planner, and mock Hermes parity are recorded.
-On 2026-09-24, `qwen2.5:1.5b` and `smollm2:135m` running on CPU failed to publish
-a valid plan. Repeat the same request on backends that emit a valid DAG before
-calling the planner interchangeable in production.
+On 2026-09-24 the same request passed on `Qwen2.5-7B-Instruct-AWQ` and
+`Qwen2.5-Coder-7B-Instruct-AWQ` (`1 passed in 8.89s`). The earlier 1.5B and
+135M CPU run remains a failure. The H100 pod is not needed for the next gate.
 
 ### 2. Unsigned completion
 
