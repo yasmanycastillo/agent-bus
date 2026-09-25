@@ -197,6 +197,21 @@ TOOLS_DEFINITIONS = [
         },
     },
     {
+        "name": "record_verdict",
+        "description": "Registrar approve o changes_requested sobre el SHA del intento de implementación.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "verdict": {"type": "string", "enum": ["approve", "changes_requested"]},
+                "sha": {"type": "string"},
+                "reason": {"type": "string"},
+                "agent_id": {"type": "string"},
+            },
+            "required": ["task_id", "verdict", "sha", "agent_id"],
+        },
+    },
+    {
         "name": "complete_task",
         "description": "Marcar una tarea como completada (done).",
         "inputSchema": {
@@ -429,6 +444,16 @@ class McpServer:
 
             elif name == "get_artifact_metadata":
                 resp = await client.get(f"/artifacts/{args['artifact_id']}")
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "record_verdict":
+                resp = await client.post(f"/tasks/{args['task_id']}/verdict", json={
+                    "agent_id": args["agent_id"],
+                    "verdict": args["verdict"],
+                    "sha": args["sha"],
+                    "reason": args.get("reason") or "",
+                })
                 resp.raise_for_status()
                 return resp.json()
 

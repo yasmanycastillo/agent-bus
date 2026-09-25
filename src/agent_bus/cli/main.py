@@ -556,6 +556,22 @@ def work_reassign(task_id: str, new_owner: str):
             click.echo(f"Error: {_explain_error(resp)}")
 
 
+@work.command("verdict")
+@click.argument("task_id")
+@click.option("--verdict", type=click.Choice(["approve", "changes_requested"]), required=True)
+@click.option("--sha", required=True)
+@click.option("--reason", default="")
+def work_verdict(task_id: str, verdict: str, sha: str, reason: str):
+    """Registrar el veredicto del dueño de la tarea de review."""
+    payload = {"agent_id": _require_agent(), "verdict": verdict, "sha": sha, "reason": reason}
+    with _client() as client:
+        resp = client.post(f"/tasks/{task_id}/verdict", json=payload)
+        if resp.status_code == 200:
+            click.echo(f"Veredicto {verdict} registrado para {task_id} en {sha}")
+        else:
+            click.echo(f"Error: {_explain_error(resp)}")
+
+
 @work.command("review")
 @click.argument("task_id")
 def work_review(task_id: str):

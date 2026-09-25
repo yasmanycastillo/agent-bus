@@ -1041,6 +1041,31 @@ class MessageBus:
             saved = await self.reviews.add(decision)
             return saved.model_dump(mode="json")
 
+        @self.app.post("/tasks/{task_id}/verdict")
+        async def record_task_verdict(task_id: str, request: Request):
+            from agent_bus.core.reviews import VerdictError
+            body = await self._json_object(request)
+            principal = request.state.principal
+            if principal:
+                actor = principal.agent_id
+            else:
+                actor = body.get("agent_id")
+                if not isinstance(actor, str) or not actor.strip():
+                    return JSONResponse({"error": "agent_id is required"}, status_code=422)
+                actor = actor.strip()
+            verdict = body.get("verdict")
+            sha = body.get("sha")
+            if verdict not in ("approve", "changes_requested"):
+                return JSONResponse({"error": "verdict must be approve or changes_requested"}, status_code=422)
+            if not isinstance(sha, str) or not sha.strip():
+                return JSONResponse({"error": "sha is required"}, status_code=422)
+            reason = body.get("reason") if isinstance(body.get("reason"), str) else ""
+            try:
+                saved = await self.reviews.record_task_verdict(task_id, actor, sha.strip(), verdict, reason)
+            except VerdictError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+            return saved.model_dump(mode="json")
+
         @self.app.get("/reviews")
         async def list_reviews(task_id: str | None = Query(default=None)):
             reviews = await self.reviews.list_all(task_id=task_id)

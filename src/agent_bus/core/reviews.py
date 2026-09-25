@@ -8,9 +8,51 @@ from agent_bus.reputation.database import Database
 from agent_bus.worker.gatekeeper import ReviewDecision, Verdict
 
 
+class VerdictError(ValueError):
+    def __init__(self, message: str, status_code: int = 409) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class ReviewLog:
     def __init__(self, db: Database) -> None:
         self._db = db
+
+    async def record_task_verdict(
+        self, task_id: str, reviewer: str, sha: str, verdict: str, reason: str = "",
+    ) -> ReviewDecision:
+        rows = await self._db.conn.execute_fetchall(
+            "SELECT owner, independent_from FROM tasks WHERE task_id = ?", (task_id,),
+        )
+        if not rows:
+            raise VerdictError("Task not found", 404)
+        if rows[0]["owner"] != reviewer:
+            raise VerdictError("only the review task owner can record the verdict")
+        raw = rows[0]["independent_from"] or "[]"
+        independent = json.loads(raw) if isinstance(raw, str) else list(raw or [])
+        if not independent:
+            raise VerdictError("review task has no independent implementation")
+        for dependency_id in independent:
+            dependency = await self._db.conn.execute_fetchall(
+                "SELECT owner FROM tasks WHERE task_id = ?", (dependency_id,),
+            )
+            if dependency and dependency[0]["owner"] == reviewer:
+                raise VerdictError("the implementer cannot record the independent review")
+        placeholders = ",".join("?" * len(independent))
+        attempts = await self._db.conn.execute_fetchall(
+            f"""SELECT candidate_sha FROM runtime_attempts
+                WHERE task_id IN ({placeholders}) AND state = 'completed' AND candidate_sha IS NOT NULL
+                ORDER BY updated_at DESC LIMIT 1""",
+            tuple(independent),
+        )
+        if not attempts:
+            raise VerdictError("implementation attempt is missing")
+        if attempts[0]["candidate_sha"] != sha:
+            raise VerdictError("sha does not match the implementation candidate")
+        return await self.add(ReviewDecision(
+            task_id=task_id, sha=sha, verdict=Verdict(verdict), reason=reason or verdict,
+            reviewer_agent_id=reviewer, reviewer_session_id="",
+        ))
 
     async def add(self, review: ReviewDecision) -> ReviewDecision:
         evidence_json = json.dumps(review.evidence)

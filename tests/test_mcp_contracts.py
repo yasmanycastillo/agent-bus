@@ -31,6 +31,12 @@ TOOL_ARGUMENTS = {
     "renew_lock": {"file_path": "module.py", "acquisition_id": "token"},
     "get_project_status": {},
     "record_decision": {"title": "Storage", "what": "Use SQLite"},
+    "register_capabilities": {"declared": ["code-review"]},
+    "route_task": {"task_id": "T1"},
+    "publish_artifact": {"task_id": "T1", "producer": "alice", "kind": "test-report", "content": "ok"},
+    "list_task_artifacts": {"task_id": "T1"},
+    "get_artifact_metadata": {"artifact_id": "artifact-1"},
+    "record_verdict": {"task_id": "T1", "verdict": "approve", "sha": "abc"},
 }
 
 
