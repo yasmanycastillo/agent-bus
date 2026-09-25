@@ -710,6 +710,23 @@ class MessageBus:
                 return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
             return Response(content, media_type=artifact.media_type, headers={"X-Artifact-SHA256": artifact.sha256})
 
+        @self.app.post("/workflows/advance")
+        async def advance_workflow_route(request: Request):
+            from agent_bus.workflows.runner import advance_workflow
+            body = await self._json_object(request)
+            workflow = body.get("workflow") or body.get("name")
+            instance_id = body.get("instance_id")
+            if not workflow or not instance_id:
+                return JSONResponse({"error": "workflow and instance_id are required"}, status_code=422)
+            try:
+                return await advance_workflow(
+                    self, workflow, instance_id,
+                    workspace_ref=body.get("workspace_ref"),
+                    timeout=float(body.get("timeout") or 30),
+                )
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
+
         @self.app.post("/workflows/compile")
         async def compile_workflow(request: Request):
             from agent_bus.core.evidence import EvidenceLog
