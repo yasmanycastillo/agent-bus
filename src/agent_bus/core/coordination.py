@@ -65,6 +65,10 @@ La identidad y el proyecto provienen de tu sesión autenticada: no inventes agen
 no compartas credenciales ni cambies de proyecto mediante argumentos de las herramientas.
 1. Lee las instrucciones y el estado devueltos por bootstrap_agent. Si necesitas releer
    este protocolo sin cambiar estado, usa get_agent_instructions({}).
+   Si coordinas a otros agentes, no inventes el encargo. Repite la instrucción al humano
+   y, sólo cuando la confirme, llama submit_instruction con confirmed=true. Después
+   assign_work reparte cada parte. Quien revisa no puede ser quien implementa.
+   Los proveedores son hermes, grok, claude, codex y agy.
 2. Usa my_pending_items({}) para atender mensajes y tareas propios antes de editar.
 3. Conserva next_cursor para paginar mensajes; leer no confirma. Confirma sólo lo procesado.
 4. Reclama una tarea libre con claim_task antes de trabajar; get_project_status permite

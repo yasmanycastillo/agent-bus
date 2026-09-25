@@ -61,6 +61,8 @@ TOOL_GUIDANCE = {
     "get_project_status": "Para incorporarte al proyecto usa primero bootstrap_agent. Después selecciona una tarea disponible o consulta tus pendientes con my_pending_items.",
     "record_decision": "Antes: bootstrap_agent y revisión de decisiones recientes. Registra sólo un acuerdo alcanzado; después comunica el resultado si corresponde.",
     "record_verdict": "Sólo el dueño de la tarea de review. Sin SHA usa el último intento de implementación. approve autoriza la integración. changes_requested reabre la implementación y deja la integración pendiente.",
+    "submit_instruction": "Sólo después de que el humano confirme el texto. confirmed=true. Lista los agentes reales y su proveedor: hermes, grok, claude, codex o agy. No empieces el trabajo aquí.",
+    "assign_work": "Reparte una parte de una instrucción ya guardada. El título lo escribes tú a partir del encargo confirmado. Quien revisa no puede ser quien implementa.",
 }
 
 

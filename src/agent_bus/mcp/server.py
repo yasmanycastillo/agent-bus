@@ -197,6 +197,44 @@ TOOLS_DEFINITIONS = [
         },
     },
     {
+        "name": "submit_instruction",
+        "description": "Guardar la instrucción que el humano ya confirmó y los agentes disponibles. No inventa el trabajo ni lo empieza.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "instruction": {"type": "string"},
+                "confirmed": {"type": "boolean"},
+                "agents": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "agent_id": {"type": "string"},
+                            "provider": {"type": "string", "enum": ["hermes", "grok", "claude", "codex", "agy"]},
+                        },
+                        "required": ["agent_id", "provider"],
+                    },
+                },
+                "agent_id": {"type": "string"},
+            },
+            "required": ["instruction", "confirmed", "agents", "agent_id"],
+        },
+    },
+    {
+        "name": "assign_work",
+        "description": "Repartir una parte de una instrucción confirmada a un agente disponible. Quien revisa no puede ser quien implementa.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "instruction_id": {"type": "string"},
+                "assignee": {"type": "string"},
+                "role": {"type": "string", "enum": ["plan", "implement", "review"]},
+                "title": {"type": "string"},
+            },
+            "required": ["instruction_id", "assignee", "role", "title"],
+        },
+    },
+    {
         "name": "record_verdict",
         "description": "Registrar approve o changes_requested sobre el SHA del intento de implementación.",
         "inputSchema": {
@@ -444,6 +482,25 @@ class McpServer:
 
             elif name == "get_artifact_metadata":
                 resp = await client.get(f"/artifacts/{args['artifact_id']}")
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "submit_instruction":
+                resp = await client.post("/instructions", json={
+                    "agent_id": args["agent_id"],
+                    "instruction": args["instruction"],
+                    "confirmed": args["confirmed"],
+                    "agents": args["agents"],
+                })
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "assign_work":
+                resp = await client.post(f"/instructions/{args['instruction_id']}/assignments", json={
+                    "assignee": args["assignee"],
+                    "role": args["role"],
+                    "title": args["title"],
+                })
                 resp.raise_for_status()
                 return resp.json()
 

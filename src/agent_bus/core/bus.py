@@ -770,6 +770,34 @@ class MessageBus:
                 created.append(stored.model_dump(mode="json"))
             return {"workflow": document["workflow"], "tasks": created}
 
+        @self.app.post("/instructions")
+        async def submit_instruction(request: Request):
+            from agent_bus.core.instructions import InstructionError, InstructionLog
+            body = await self._json_object(request)
+            principal = request.state.principal
+            coordinator = principal.agent_id if principal else body.get("agent_id")
+            if not isinstance(coordinator, str) or not coordinator.strip():
+                return JSONResponse({"error": "agent_id is required"}, status_code=422)
+            try:
+                return await InstructionLog(self.db).submit(
+                    coordinator.strip(), str(body.get("instruction") or ""),
+                    bool(body.get("confirmed")), body.get("agents") or [],
+                )
+            except InstructionError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+        @self.app.post("/instructions/{instruction_id}/assignments")
+        async def assign_instruction(instruction_id: str, request: Request):
+            from agent_bus.core.instructions import InstructionError, assign_work
+            body = await self._json_object(request)
+            try:
+                return await assign_work(
+                    self, instruction_id, str(body.get("assignee") or body.get("agent_id") or ""),
+                    str(body.get("role") or ""), str(body.get("title") or ""),
+                )
+            except InstructionError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
         @self.app.post("/usage")
         async def record_usage(request: Request):
             from agent_bus.core.usage import UsageError, UsageLedger

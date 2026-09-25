@@ -235,6 +235,8 @@ class Database:
             await self._migrate_evidence()
             await self._migrate_usage()
             await self._migrate_runtime_registry()
+            from agent_bus.core.instructions import InstructionLog
+            await InstructionLog(self).ensure_schema()
         except BaseException:
             await self.close()
             self._restore_snapshot(snapshot)

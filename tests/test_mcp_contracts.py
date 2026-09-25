@@ -37,6 +37,14 @@ TOOL_ARGUMENTS = {
     "list_task_artifacts": {"task_id": "T1"},
     "get_artifact_metadata": {"artifact_id": "artifact-1"},
     "record_verdict": {"task_id": "T1", "verdict": "approve", "sha": "abc"},
+    "submit_instruction": {
+        "instruction": "Corregir el cálculo del impuesto",
+        "confirmed": True,
+        "agents": [{"agent_id": "claude-01", "provider": "claude"}],
+    },
+    "assign_work": {
+        "instruction_id": "ins-1", "assignee": "claude-01", "role": "implement", "title": "Corregir el cálculo",
+    },
 }
 
 
