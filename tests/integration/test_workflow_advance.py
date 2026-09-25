@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 
@@ -131,6 +132,12 @@ async def test_integration_uses_the_implementation_sha(tmp_path):
             assert advanced.status_code == 200, advanced.text
             assert advanced.json()["task_id"].endswith(expected)
             assert advanced.json()["task_status"] == "done"
+        import json
+        await db.conn.execute(
+            "UPDATE tasks SET test_cmd = ? WHERE task_id = ?",
+            (json.dumps([sys.executable, "-c", "print('suite ok')"]), "feature-development-run-2-implementation"),
+        )
+        await db.conn.commit()
         baseline = git(repo, "rev-parse", "HEAD")
         mismatched = await client.post("/workflows/advance", json={
             "workflow": "feature-development", "instance_id": "run-2",
@@ -151,6 +158,9 @@ async def test_integration_uses_the_implementation_sha(tmp_path):
         assert integrated.status_code == 200, integrated.text
         assert integrated.json()["status"] == "integrated"
         assert git(repo, "rev-parse", "HEAD^2") == git(work, "rev-parse", "HEAD")
+        report = (await client.get("/tasks/feature-development-run-2-integration/artifacts")).json()
+        content = await client.get(f"/artifacts/{report[0]['artifact_id']}/content")
+        assert b"suite ok" in content.content
     await db.close()
 
 
@@ -207,4 +217,52 @@ async def test_review_cannot_be_done_by_the_implementer(tmp_path):
         assert reviewed.status_code == 200, reviewed.text
         assert reviewed.json()["selected_agent"] == "reviewer-01"
         assert reviewed.json()["task_status"] == "done"
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_failing_suite_blocks_integration(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-b", "main")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "config", "user.email", "test@example.invalid")
+    (repo / "base").write_text("base\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "base")
+    sha = git(repo, "rev-parse", "HEAD")
+    db = Database(str(tmp_path / "bus.db"))
+    await db.initialize()
+    bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+    async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        assert (await client.post("/workflows/compile", json={"name": "feature-development", "instance_id": "run-4"})).status_code == 200
+        await db.conn.execute(
+            """UPDATE tasks SET status = 'done', test_cmd = ?
+               WHERE task_id = 'feature-development-run-4-implementation'""",
+            (json.dumps([sys.executable, "-c", "raise SystemExit('suite failed')"]),),
+        )
+        await db.conn.execute(
+            """UPDATE tasks SET status = 'done'
+               WHERE task_id LIKE 'feature-development-run-4-%'
+                 AND task_id != 'feature-development-run-4-integration'""",
+        )
+        await db.conn.execute(
+            "UPDATE tasks SET status = 'pending' WHERE task_id = ?",
+            ("feature-development-run-4-integration",),
+        )
+        await db.conn.execute(
+            """INSERT INTO runtime_attempts
+               (attempt_id, task_id, idempotency_key, state, external_ref, workspace_ref, updated_at, outcome, candidate_sha, log_refs)
+               VALUES ('att-impl', 'feature-development-run-4-implementation', 'dispatch:impl', 'completed', 'external:1', ?, ?, 'completed', ?, '[]')""",
+            (str(repo), "2026-01-01T00:00:00+00:00", sha),
+        )
+        await db.conn.commit()
+        blocked = await client.post("/workflows/advance", json={
+            "workflow": "feature-development", "instance_id": "run-4",
+            "workspace_ref": str(repo), "repo_dir": str(repo), "candidate_branch": "main",
+        })
+        assert blocked.json()["status"] == "blocked"
+        assert "tests failed" in blocked.json()["error"]
+        assert "suite failed" in blocked.json()["error"]
+        assert git(repo, "rev-parse", "HEAD") == sha
     await db.close()

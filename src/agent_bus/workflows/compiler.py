@@ -75,6 +75,9 @@ def validate_workflow(document: dict[str, Any], *, advisory: bool = False) -> di
             raise WorkflowError(f"{step_id} depends on a step that is not defined earlier")
         if not isinstance(requires, list) or not all(isinstance(item, str) and item for item in requires):
             raise WorkflowError(f"{step_id} requires must be a list of capabilities")
+        test_cmd = step.get("test_cmd") or []
+        if test_cmd and (not isinstance(test_cmd, list) or not all(isinstance(item, str) and item for item in test_cmd)):
+            raise WorkflowError(f"{step_id} test_cmd must be a list of strings")
         gate = step.get("gate") or {}
         if gate and not isinstance(gate, dict):
             raise WorkflowError(f"{step_id} gate must be a mapping")
@@ -88,7 +91,14 @@ def validate_workflow(document: dict[str, Any], *, advisory: bool = False) -> di
         if any(item not in seen for item in independent):
             raise WorkflowError(f"{step_id} independent_from names an unknown step")
         seen.add(step_id)
-        steps.append({**step, "depends_on": depends, "requires": requires, "gate": gate, "independent_from": independent})
+        steps.append({
+            **step,
+            "depends_on": depends,
+            "requires": requires,
+            "gate": gate,
+            "independent_from": independent,
+            "test_cmd": test_cmd,
+        })
     return {"workflow": workflow, "version": 1, "steps": steps}
 
 
@@ -112,6 +122,7 @@ def compile_tasks(document: dict[str, Any], instance_id: str) -> list[dict[str, 
             "description": description,
             "depends_on": [f"{document['workflow']}-{instance_id}-{item}" for item in step["depends_on"]],
             "requirements": list(step["requires"]),
+            "test_cmd": list(step["test_cmd"]) or None,
             "acceptance_criteria": acceptance,
             "independent_from": [f"{document['workflow']}-{instance_id}-{item}" for item in step["independent_from"]],
             "strict_review": step["gate"].get("review") == "approved",

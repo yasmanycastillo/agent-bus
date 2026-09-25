@@ -103,13 +103,20 @@ async def _integrate(
     existing = await bus.db.conn.execute_fetchall(
         "SELECT evidence_id FROM task_evidence WHERE task_id = ?", (task_id,),
     )
+    implementation = await bus.tasks.get(implementation_task_id)
+    test_cmd = list(implementation.test_cmd) if implementation and implementation.test_cmd else ["uv", "run", "pytest", "-q"]
+    passed, output = await _run_tests(test_cmd, workspace_ref)
+    if not passed:
+        reason = f"tests failed\n{output[-1000:]}"
+        await bus.tasks.block(task_id, reason=reason)
+        return {"status": "blocked", "task_id": task_id, "error": reason}
     if not existing:
         artifact = await ArtifactStore(bus.db, bus.project_id).publish(
             task_id=task_id,
             producer="workflow",
             kind="test-report",
             media_type="text/plain",
-            content=f"tests passed\ncandidate {attempt['candidate_sha']}\n".encode(),
+            content=f"candidate {attempt['candidate_sha']}\n{output}".encode(),
             summary="Implementation tests",
             attempt_id=attempt["attempt_id"],
         )
@@ -128,7 +135,7 @@ async def _integrate(
     from agent_bus.worker.integrator import BranchIntegrator
     integrator = BranchIntegrator(repo_dir=Path(repo_dir), bus_url="http://127.0.0.1:9", require_approval=True)
     result = await integrator.integrate_task(
-        task_id, "workflow", Path(workspace_ref), branch, test_cmd=["python", "-c", "raise SystemExit(0)"],
+        task_id, "workflow", Path(workspace_ref), branch, test_cmd=test_cmd,
     )
     if not result.success:
         return {"status": "blocked", "task_id": task_id, "error": result.error}
@@ -143,6 +150,15 @@ async def _implementation_attempt(bus: MessageBus, task_id: str) -> dict | None:
         (task_id,),
     )
     return dict(rows[0]) if rows else None
+
+
+async def _run_tests(cmd: list[str], cwd: str) -> tuple[bool, str]:
+    process = await asyncio.create_subprocess_exec(
+        *cmd, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await process.communicate()
+    output = out.decode(errors="replace") + err.decode(errors="replace")
+    return process.returncode == 0, output
 
 
 async def _rev_parse(cwd: str, *args: str) -> str:
