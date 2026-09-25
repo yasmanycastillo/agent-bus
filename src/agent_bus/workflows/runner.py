@@ -104,6 +104,15 @@ async def _integrate(
         await bus.tasks.block(task_id, reason=reason)
         await _notify_blocked(bus, task_id, reason)
         return {"status": "blocked", "task_id": task_id, "error": reason}
+    review_gap = await _independent_review_gap(bus, task_id, implementation_task_id, attempt["candidate_sha"])
+    if review_gap:
+        stored = await bus.tasks.get(task_id)
+        return {
+            "status": "waiting_for_review",
+            "task_id": task_id,
+            "error": review_gap,
+            "task_status": stored.status.value if stored else "pending",
+        }
     target_sha = await _rev_parse(repo_dir, "HEAD")
     candidate_sha = await _rev_parse(workspace_ref, "HEAD")
     branch = candidate_branch or await _rev_parse(workspace_ref, "--abbrev-ref", "HEAD")
@@ -166,6 +175,39 @@ async def _integrate(
     if stored is None or stored.status.value != "done":
         await bus.tasks.complete(task_id)
     return {"status": "integrated", "task_id": task_id, "candidate_sha": candidate_sha}
+
+
+async def _independent_review_gap(
+    bus: MessageBus, task_id: str, implementation_task_id: str, candidate_sha: str,
+) -> str | None:
+    integration = await bus.tasks.get(task_id)
+    review_task = None
+    for dependency_id in integration.depends_on if integration else []:
+        dependency = await bus.tasks.get(dependency_id)
+        if dependency is not None and "code-review" in dependency.requirements:
+            review_task = dependency
+            break
+    if review_task is None:
+        return "independent review is missing"
+    implementation = await bus.tasks.get(implementation_task_id)
+    implementer = None
+    if implementation is not None and implementation.owner not in (None, "free"):
+        implementer = implementation.owner
+    matching = [
+        review for review in await bus.reviews.list_for_task(review_task.task_id)
+        if review.sha == candidate_sha
+    ]
+    if not matching:
+        return "independent review is missing"
+    latest = matching[0]
+    verdict = latest.verdict.value if hasattr(latest.verdict, "value") else str(latest.verdict)
+    if verdict != "approve":
+        return "independent review is not approved"
+    if implementer is not None and latest.reviewer_agent_id == implementer:
+        return "independent review was recorded by the implementer"
+    if review_task.owner not in (None, "free") and latest.reviewer_agent_id != review_task.owner:
+        return "independent review is not from the assigned reviewer"
+    return None
 
 
 async def _notify_blocked(bus: MessageBus, task_id: str, reason: str) -> None:

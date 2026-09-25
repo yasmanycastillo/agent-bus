@@ -139,6 +139,40 @@ async def test_integration_uses_the_implementation_sha(tmp_path):
         )
         await db.conn.commit()
         baseline = git(repo, "rev-parse", "HEAD")
+        candidate = git(work, "rev-parse", "HEAD")
+        held = await client.post("/workflows/advance", json={
+            "workflow": "feature-development", "instance_id": "run-2",
+            "workspace_ref": str(work), "repo_dir": str(repo), "candidate_branch": "agent/impl",
+        })
+        assert held.json()["status"] == "waiting_for_review"
+        assert held.json()["error"] == "independent review is not from the assigned reviewer"
+        assert held.json()["task_status"] == "pending"
+        assert git(repo, "rev-parse", "HEAD") == baseline
+        review_task = "feature-development-run-2-review"
+        for reviewer_id, verdict, sha, expected in (
+            ("impl-01", "approve", candidate, "independent review was recorded by the implementer"),
+            ("stranger-01", "approve", candidate, "independent review is not from the assigned reviewer"),
+            ("analyst-01", "changes_requested", candidate, "independent review is not approved"),
+            ("analyst-01", "approve", baseline, "independent review is not approved"),
+        ):
+            posted = await client.post("/reviews", json={
+                "task_id": review_task, "sha": sha, "verdict": verdict,
+                "reason": "independent review", "reviewer_agent_id": reviewer_id,
+            })
+            assert posted.status_code == 200, posted.text
+            refused = await client.post("/workflows/advance", json={
+                "workflow": "feature-development", "instance_id": "run-2",
+                "workspace_ref": str(work), "repo_dir": str(repo), "candidate_branch": "agent/impl",
+            })
+            assert refused.json()["status"] == "waiting_for_review"
+            assert refused.json()["error"] == expected
+            assert (await client.get("/tasks/feature-development-run-2-integration")).json()["status"] == "pending"
+            assert git(repo, "rev-parse", "HEAD") == baseline
+        approved = await client.post("/reviews", json={
+            "task_id": review_task, "sha": candidate, "verdict": "approve",
+            "reason": "independent review", "reviewer_agent_id": "analyst-01",
+        })
+        assert approved.status_code == 200, approved.text
         mismatched = await client.post("/workflows/advance", json={
             "workflow": "feature-development", "instance_id": "run-2",
             "workspace_ref": str(repo), "repo_dir": str(repo), "candidate_branch": "main",
@@ -164,7 +198,6 @@ async def test_integration_uses_the_implementation_sha(tmp_path):
         })
         assert integrated.status_code == 200, integrated.text
         assert integrated.json()["status"] == "integrated"
-        candidate = git(work, "rev-parse", "HEAD")
         assert git(repo, "rev-parse", "HEAD^2") == candidate
         done = (await client.get("/tasks/feature-development-run-2-integration")).json()
         assert done["status"] == "done"
@@ -268,7 +301,28 @@ async def test_failing_suite_blocks_integration(tmp_path):
                VALUES ('att-impl', 'feature-development-run-4-implementation', 'dispatch:impl', 'completed', 'external:1', ?, ?, 'completed', ?, '[]')""",
             (str(repo), "2026-01-01T00:00:00+00:00", sha),
         )
+        await db.conn.execute(
+            """UPDATE tasks SET owner = 'impl-01'
+               WHERE task_id = 'feature-development-run-4-implementation'""",
+        )
+        await db.conn.execute(
+            """UPDATE tasks SET owner = 'reviewer-01'
+               WHERE task_id = 'feature-development-run-4-review'""",
+        )
         await db.conn.commit()
+        waiting = await client.post("/workflows/advance", json={
+            "workflow": "feature-development", "instance_id": "run-4",
+            "workspace_ref": str(repo), "repo_dir": str(repo), "candidate_branch": "main",
+        })
+        assert waiting.json()["status"] == "waiting_for_review"
+        assert waiting.json()["error"] == "independent review is missing"
+        assert (await client.get("/tasks/feature-development-run-4-integration")).json()["status"] == "pending"
+        assert git(repo, "rev-parse", "HEAD") == sha
+        approved = await client.post("/reviews", json={
+            "task_id": "feature-development-run-4-review", "sha": sha, "verdict": "approve",
+            "reason": "independent review", "reviewer_agent_id": "reviewer-01",
+        })
+        assert approved.status_code == 200, approved.text
         blocked = await client.post("/workflows/advance", json={
             "workflow": "feature-development", "instance_id": "run-4",
             "workspace_ref": str(repo), "repo_dir": str(repo), "candidate_branch": "main",
