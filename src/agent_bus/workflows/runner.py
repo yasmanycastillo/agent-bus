@@ -48,10 +48,18 @@ async def advance_workflow(
     ready.sort(key=lambda task: (len(task.depends_on), task.task_id))
     task = ready[0]
     decision = await bus._decide(task.requirements)
-    if decision.selected_agent is None:
-        return {"status": "unroutable", "task_id": task.task_id, "reasons": decision.reasons}
+    excluded = set()
+    for dependency_id in task.independent_from:
+        dependency = await bus.tasks.get(dependency_id)
+        if dependency is not None and dependency.owner != "free":
+            excluded.add(dependency.owner)
+    eligible = [agent_id for agent_id in decision.eligible if agent_id not in excluded]
+    if not eligible:
+        reasons = dict(decision.reasons)
+        reasons.update({agent_id: "completed an independent step" for agent_id in excluded})
+        return {"status": "unroutable", "task_id": task.task_id, "reasons": reasons}
     registry = RuntimeRegistry(bus.db, bus.project_id)
-    spec = await registry.get(decision.selected_agent)
+    spec = await registry.get(eligible[0])
     if spec is None:
         return {"status": "no_runtime", "task_id": task.task_id, "selected_agent": decision.selected_agent}
     claimed = await bus.tasks.claim(task.task_id, spec["agent_id"])

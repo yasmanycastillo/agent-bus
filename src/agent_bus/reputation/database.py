@@ -350,6 +350,7 @@ class Database:
                 ("depends_on", "TEXT DEFAULT '[]'"),
                 ("operation_key", "TEXT"),
                 ("requirements", "TEXT DEFAULT '[]'"),
+                ("independent_from", "TEXT DEFAULT '[]'"),
             ]
             for name, col_def in new_cols:
                 if name not in columns:

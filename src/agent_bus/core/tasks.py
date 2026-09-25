@@ -99,6 +99,7 @@ class TaskManager:
         test_cmd: list[str] | None = None,
         depends_on: list[str] | None = None,
         requirements: list[str] | None = None,
+        independent_from: list[str] | None = None,
         operation_key: str | None = None,
     ) -> Task:
         if operation_key:
@@ -122,6 +123,7 @@ class TaskManager:
             "test_cmd": test_cmd,
             "depends_on": depends_on or [],
             "requirements": requirements or [],
+            "independent_from": independent_from or [],
             "operation_key": operation_key,
         }
         res = await self.create_batch([task_dict], operation_key=operation_key)
@@ -176,6 +178,7 @@ class TaskManager:
                 test_cmd = t.get("test_cmd")
                 depends_on = t.get("depends_on") or []
                 requirements = t.get("requirements") or []
+                independent_from = t.get("independent_from") or []
                 op_key = operation_key or t.get("operation_key")
 
                 deps_satisfied = all(dep in done_task_ids for dep in depends_on)
@@ -189,8 +192,8 @@ class TaskManager:
                 await self._db.conn.execute(
                     """INSERT OR IGNORE INTO tasks
                        (task_id, title, description, owner, status, locked_files, created_at, updated_at,
-                        acceptance_criteria, test_cmd, depends_on, operation_key, requirements)
-                       VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?)""",
+                        acceptance_criteria, test_cmd, depends_on, operation_key, requirements, independent_from)
+                       VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         task_id,
                         title,
@@ -204,6 +207,7 @@ class TaskManager:
                         json.dumps(depends_on),
                         op_key,
                         json.dumps(requirements),
+                        json.dumps(independent_from),
                     ),
                 )
             await self._db.conn.commit()
@@ -538,6 +542,7 @@ class TaskManager:
             depends_on_raw = row["depends_on"] if "depends_on" in keys else "[]"
             operation_key = row["operation_key"] if "operation_key" in keys else None
             requirements_raw = row["requirements"] if "requirements" in keys else "[]"
+            independent_raw = row["independent_from"] if "independent_from" in keys else "[]"
         else:
             task_id = row[0]
             title = row[1]
@@ -552,6 +557,7 @@ class TaskManager:
             depends_on_raw = row[10] if len(row) > 10 else "[]"
             operation_key = row[11] if len(row) > 11 else None
             requirements_raw = row[12] if len(row) > 12 else "[]"
+            independent_raw = row[13] if len(row) > 13 else "[]"
 
         if isinstance(created_at, str):
             created_at = datetime.fromisoformat(created_at)
@@ -570,6 +576,7 @@ class TaskManager:
 
         depends_on = json.loads(depends_on_raw) if isinstance(depends_on_raw, str) else (depends_on_raw or [])
         requirements = json.loads(requirements_raw) if isinstance(requirements_raw, str) else (requirements_raw or [])
+        independent_from = json.loads(independent_raw) if isinstance(independent_raw, str) else (independent_raw or [])
         locked = json.loads(locked_files) if isinstance(locked_files, str) else (locked_files or [])
 
         return Task(
@@ -583,6 +590,7 @@ class TaskManager:
             test_cmd=test_cmd,
             depends_on=depends_on,
             requirements=requirements,
+            independent_from=independent_from,
             operation_key=operation_key,
             created_at=created_at,
             updated_at=updated_at,

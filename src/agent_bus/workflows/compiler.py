@@ -113,6 +113,7 @@ def compile_tasks(document: dict[str, Any], instance_id: str) -> list[dict[str, 
             "depends_on": [f"{document['workflow']}-{instance_id}-{item}" for item in step["depends_on"]],
             "requirements": list(step["requires"]),
             "acceptance_criteria": acceptance,
+            "independent_from": [f"{document['workflow']}-{instance_id}-{item}" for item in step["independent_from"]],
             "strict_review": step["gate"].get("review") == "approved",
         })
     return tasks

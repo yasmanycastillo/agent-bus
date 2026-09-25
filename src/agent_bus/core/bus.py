@@ -1574,7 +1574,12 @@ class MessageBus:
 
     async def _claim_refusal(self, task_id: str, agent_id: str) -> JSONResponse | None:
         task = await self.tasks.get(task_id)
-        if task is None or not task.requirements:
+        if task is None:
+            return None
+        conflict = await self._independence_conflict(task, agent_id)
+        if conflict:
+            return JSONResponse({"error": conflict}, status_code=409)
+        if not task.requirements:
             return None
         decision = await self._decide(task.requirements)
         if agent_id in decision.eligible:
@@ -1584,6 +1589,13 @@ class MessageBus:
             {"error": reason, "eligible": list(decision.eligible), "reasons": decision.reasons},
             status_code=409,
         )
+
+    async def _independence_conflict(self, task, agent_id: str) -> str | None:
+        for dependency_id in task.independent_from:
+            dependency = await self.tasks.get(dependency_id)
+            if dependency is not None and dependency.owner == agent_id:
+                return f"{agent_id} completed {dependency_id}, which this task must be independent from"
+        return None
 
     async def _decide(self, requires: list[str]):
         from agent_bus.routing import AgentCandidate, route
