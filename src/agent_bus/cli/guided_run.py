@@ -1,0 +1,315 @@
+"""Camino interactivo: agentes, capacidades y avance hasta el veredicto."""
+
+from __future__ import annotations
+
+import json
+import shlex
+import subprocess
+import time
+from pathlib import Path
+
+import click
+
+CAPABILITIES = (
+    "repository-analysis",
+    "long-context",
+    "architecture",
+    "implementation",
+    "tests",
+    "python",
+    "odoo",
+    "code-review",
+)
+IMPLEMENTER_PRESET = (
+    "repository-analysis",
+    "long-context",
+    "architecture",
+    "implementation",
+    "tests",
+    "python",
+    "odoo",
+)
+REVIEWER_PRESET = ("code-review", "odoo")
+IMPLEMENTER_REQUIRED = ("repository-analysis", "long-context", "architecture", "implementation", "tests")
+
+
+def collect_answers(prompt, confirm) -> dict:
+    """Pregunta la corrida. prompt(text, default=, type=) y confirm(text, default=)."""
+    instance = prompt("Nombre de la corrida", default="odoo-1")
+    implementer = prompt("Implementador", default="impl")
+    reviewer = prompt("Revisor", default="reviewer")
+    if not instance or not implementer or not reviewer:
+        raise click.ClickException("La corrida, el implementador y el revisor tienen nombre")
+    if implementer == reviewer:
+        raise click.ClickException("El revisor tiene que ser otro agente")
+    impl_caps = _caps(prompt, confirm, "implementador", IMPLEMENTER_PRESET, IMPLEMENTER_REQUIRED)
+    review_caps = _caps(prompt, confirm, "revisor", REVIEWER_PRESET, ("code-review",))
+    if "code-review" in impl_caps and impl_caps == review_caps and implementer == reviewer:
+        raise click.ClickException("El revisor tiene que ser otro agente")
+    impl_runtime, impl_command = _runtime(prompt, "implementador")
+    review_runtime, review_command = _runtime(prompt, "revisor")
+    test_text = prompt("Comando de test del módulo. Vacío usa uv run pytest -q", default="")
+    return {
+        "instance": instance,
+        "implementer": implementer,
+        "reviewer": reviewer,
+        "impl_caps": impl_caps,
+        "review_caps": review_caps,
+        "impl_runtime": impl_runtime,
+        "impl_command": impl_command,
+        "review_runtime": review_runtime,
+        "review_command": review_command,
+        "test_cmd": shlex.split(test_text) if test_text else [],
+    }
+
+
+def _caps(prompt, confirm, role: str, preset: tuple[str, ...], required: tuple[str, ...]) -> list[str]:
+    mode = prompt(
+        f"Capacidades del {role}",
+        default="preset",
+        type=click.Choice(["preset", "elegir"]),
+    )
+    if mode == "preset":
+        return list(preset)
+    chosen = [name for name in CAPABILITIES if confirm(f"  {role}: {name}", default=name in preset)]
+    missing = [name for name in required if name not in chosen]
+    if missing:
+        raise click.ClickException(f"Al {role} le falta: {', '.join(missing)}")
+    return chosen
+
+
+def _runtime(prompt, role: str) -> tuple[str, list[str]]:
+    kind = prompt(f"Runtime del {role}", default="external", type=click.Choice(["external", "native"]))
+    if kind == "native":
+        return "native", []
+    tool = prompt(f"CLI del {role}", default="claude", type=click.Choice(["claude", "codex", "otro"]))
+    default = {"claude": "claude", "codex": "codex"}.get(tool, "")
+    text = prompt(f"Comando del {role}", default=default)
+    command = shlex.split(text)
+    if not command:
+        raise click.ClickException(f"El {role} necesita un comando")
+    return "external", command
+
+
+def workflow_yaml(test_cmd: list[str]) -> str:
+    rendered = ""
+    if test_cmd:
+        rendered = "\n    test_cmd: [" + ", ".join(json.dumps(part) for part in test_cmd) + "]"
+    return f"""workflow: feature-development
+version: 1
+steps:
+  - id: discovery
+    requires: [repository-analysis, long-context]
+  - id: design
+    requires: [architecture]
+    depends_on: [discovery]
+  - id: implementation
+    requires: [implementation, tests]
+    depends_on: [design]{rendered}
+  - id: review
+    requires: [code-review]
+    depends_on: [implementation]
+    policy:
+      independent_from: [implementation]
+  - id: integration
+    depends_on: [review]
+    gate:
+      tests: passed
+      review: approved
+"""
+
+
+def _ok(response, allowed: tuple[int, ...] = (200,)) -> dict:
+    if response.status_code not in allowed:
+        try:
+            detail = response.json().get("error", response.text)
+        except ValueError:
+            detail = response.text
+        raise click.ClickException(detail)
+    if not response.content:
+        return {}
+    return response.json()
+
+
+def ensure_worktree(repo: Path, agent: str) -> tuple[Path, str]:
+    branch = f"agent/{agent}"
+    path = repo / ".worktrees" / agent
+    common = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"], cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    exclude = Path(common)
+    if not exclude.is_absolute():
+        exclude = repo / exclude
+    exclude = exclude / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    current = exclude.read_text() if exclude.exists() else ""
+    if ".worktrees/" not in current:
+        exclude.write_text(current + "\n.worktrees/\n")
+    if (path / ".git").exists() or path.exists():
+        return path, branch
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = subprocess.run(["git", "show-ref", "--verify", f"refs/heads/{branch}"], cwd=repo, capture_output=True)
+    command = ["git", "worktree", "add", str(path), branch] if exists.returncode == 0 else [
+        "git", "worktree", "add", "-b", branch, str(path),
+    ]
+    subprocess.run(command, cwd=repo, check=True, capture_output=True, text=True)
+    return path, branch
+
+
+def _register_agent(client, agent_id: str, caps: list[str], runtime: str, command: list[str], *, edit: bool) -> None:
+    created = client.post("/register", json={"agent_id": agent_id, "display_name": agent_id, "capabilities": caps})
+    if created.status_code not in (200, 201, 409):
+        _ok(created)
+    _ok(client.post(f"/agents/{agent_id}/route-profile", json={
+        "declared": caps, "approved": caps, "priority": 1, "can_edit": edit,
+    }))
+    _ok(client.post(f"/agents/{agent_id}/runtime", json={"runtime": runtime, "command": command}))
+
+
+def advance_once(client, instance: str, workspace: Path, agents: list[str], *, repo: Path | None, branch: str | None) -> dict:
+    for agent_id in agents:
+        _ok(client.post(f"/agents/{agent_id}/heartbeat"))
+    body: dict = {
+        "workflow": "feature-development",
+        "instance_id": instance,
+        "workspace_ref": str(workspace),
+        "timeout": 30,
+    }
+    if repo is not None and branch:
+        body["repo_dir"] = str(repo)
+        body["candidate_branch"] = branch
+    return _ok(client.post("/workflows/advance", json=body), allowed=(200, 409))
+
+
+def drive_run(client, answers: dict, *, repo: Path, ask) -> dict:
+    """Registra, compila y avanza. ask devuelve (approve|changes_requested, motivo)."""
+    workspace, branch = ensure_worktree(repo, answers["implementer"])
+    agents = [answers["implementer"], answers["reviewer"]]
+    _register_agent(client, answers["implementer"], answers["impl_caps"], answers["impl_runtime"], answers["impl_command"], edit=True)
+    _register_agent(client, answers["reviewer"], answers["review_caps"], answers["review_runtime"], answers["review_command"], edit=False)
+    compiled = _ok(client.post("/workflows/compile", json={
+        "yaml": workflow_yaml(answers["test_cmd"]), "instance_id": answers["instance"],
+    }))
+    click.echo(f"Tareas: {', '.join(task['task_id'] for task in compiled.get('tasks') or [])}")
+    review_id = f"feature-development-{answers['instance']}-review"
+    for _ in range(20):
+        result = advance_once(client, answers["instance"], workspace, agents, repo=None, branch=None)
+        status = result.get("status")
+        click.echo(f"Avance: {status} {result.get('task_id', '')} {result.get('task_status', '')}".strip())
+        if status == "dispatched" and result.get("task_status") == "in_progress":
+            _wait_done(client, result["task_id"])
+            continue
+        if status == "dispatched" and result.get("task_status") == "done":
+            continue
+        if status in ("waiting_for_integration", "waiting_for_review"):
+            verdict, reason = ask()
+            _ok(client.post(f"/tasks/{review_id}/verdict", json={
+                "agent_id": answers["reviewer"], "verdict": verdict, "reason": reason,
+            }))
+            if verdict != "approve":
+                click.echo("Cambios pedidos. La implementación se reabre.")
+                continue
+            merged = advance_once(client, answers["instance"], workspace, agents, repo=repo, branch=branch)
+            click.echo(f"Integración: {merged.get('status')} {merged.get('error', '')}".strip())
+            if merged.get("status") == "blocked":
+                raise click.ClickException(merged.get("error") or "integración bloqueada")
+            if merged.get("status") != "integrated":
+                raise click.ClickException(merged.get("error") or merged.get("status") or "la integración no terminó")
+            return merged
+        if status == "blocked":
+            raise click.ClickException(result.get("error") or "bloqueado")
+        if status in ("unroutable", "no_runtime", "idle", "not_claimed"):
+            raise click.ClickException(result.get("error") or status or "no hay paso para avanzar")
+        if result.get("error"):
+            raise click.ClickException(result["error"])
+    raise click.ClickException("La corrida no terminó")
+
+
+def _wait_done(client, task_id: str) -> None:
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        stored = _ok(client.get(f"/tasks/{task_id}"))
+        if stored.get("status") == "done":
+            return
+        time.sleep(1)
+    raise click.ClickException(f"{task_id} sigue en curso. Revisa el worker de ese agente.")
+
+
+def git_root(start: Path | None = None) -> Path:
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=start or Path.cwd(), capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise click.ClickException("Este directorio no es un repositorio Git")
+    return Path(result.stdout.strip())
+
+
+def run_interactive() -> None:
+    from urllib.parse import urlsplit
+
+    from agent_bus.cli.main import _client, _start_daemon
+    from agent_bus.config import get_bus_url
+
+    repo = git_root()
+    answers = collect_answers(click.prompt, click.confirm)
+    endpoint = urlsplit(get_bus_url())
+    with _client() as client:
+        try:
+            client.get("/health").raise_for_status()
+        except Exception:
+            host = endpoint.hostname or "127.0.0.1"
+            if host not in ("127.0.0.1", "localhost", "::1"):
+                raise click.ClickException("El hub no responde. Arranca el servidor de este proyecto.") from None
+            _start_daemon(host, endpoint.port or 80)
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    client.get("/health").raise_for_status()
+                    break
+                except Exception:
+                    if time.monotonic() > deadline:
+                        raise click.ClickException("El hub no arrancó") from None
+                    time.sleep(0.2)
+        if answers["impl_runtime"] == "native":
+            _start_worker(answers["implementer"], repo / ".worktrees" / answers["implementer"])
+        if answers["review_runtime"] == "native":
+            _start_worker(answers["reviewer"], repo / ".worktrees" / answers["implementer"])
+
+        def ask():
+            choice = click.prompt("Veredicto", type=click.Choice(["aprobar", "cambios"]))
+            if choice == "aprobar":
+                return "approve", "aprobado"
+            return "changes_requested", click.prompt("Qué hay que cambiar")
+
+        drive_run(client, answers, repo=repo, ask=ask)
+    click.echo("Corrida integrada")
+
+
+def _start_worker(agent_id: str, worktree: Path) -> None:
+    from agent_bus.cli.worker_cmds import worker_start
+
+    worker_start.callback(
+        agent_id=agent_id, provider=None, model=None, worktree_dir=str(worktree), bus_url=None, foreground=False,
+    )
+
+
+@click.command("advance")
+@click.option("--instance", required=True, help="Identificador de la corrida")
+@click.option("--workspace", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--repo", default=None, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--branch", default=None)
+@click.option("--agent", "agents", multiple=True, help="Agente al que latir antes de avanzar")
+def workflow_advance(instance: str, workspace: Path, repo: Path | None, branch: str | None, agents: tuple[str, ...]) -> None:
+    """Avanzar un paso del workflow. Late a los agentes indicados."""
+    from agent_bus.cli.main import _client
+
+    with _client() as client:
+        body = advance_once(client, instance, workspace, list(agents), repo=repo, branch=branch)
+    click.echo(json.dumps(body, ensure_ascii=False))
+
+
+@click.command("run")
+def run_command() -> None:
+    """Preguntar agentes, capacidades y test, y correr feature-development."""
+    run_interactive()

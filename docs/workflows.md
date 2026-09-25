@@ -1,6 +1,8 @@
 # Operar feature-development
 
-`feature-development` es el workflow incluido. Compilarlo crea cinco tareas: discovery, design, implementation, review e integration. No las ejecuta. El avance las despacha en ese orden. La integración no es otro runtime: espera un `approve` del revisor asignado y entonces corre la suite y fusiona.
+Para una corrida, usa `agent-bus run` en la raíz del repositorio. Pregunta el nombre, el implementador, el revisor, las capacidades (preset o una lista) y el comando de test. Si el test se deja vacío, la integración usa `uv run pytest -q`. Levanta el hub si hace falta, registra a los dos agentes y avanza solo. Cuando la review terminó, pregunta si apruebas ese commit o pides cambios. Aprobar integra. Pedir cambios reabre la implementación.
+
+`feature-development` compilado a mano crea cinco tareas: discovery, design, implementation, review e integration. No las ejecuta. El avance las despacha en ese orden. La integración no es otro runtime: espera un `approve` del revisor asignado y entonces corre la suite y fusiona.
 
 La definición no cambia entre corridas. Cambian el `instance` y los agentes que tienen las capacidades de cada paso.
 
@@ -30,7 +32,7 @@ El revisor no puede ser el dueño de implementation. Si nadie más tiene `code-r
 
 ## Avanzar
 
-No hay un subcomando `workflow advance`. El avance es `POST /workflows/advance`, con la misma sesión que los otros comandos: `Authorization: Bearer` y `X-Agent-Bus-Project`.
+`agent-bus workflow advance --instance run-1 --workspace /ruta/al/worktree --agent impl --agent reviewer` avanza un paso y late a esos agentes. Para integrar, añade `--repo` y `--branch`. El mismo cuerpo sigue existiendo como `POST /workflows/advance`.
 
 ```json
 {

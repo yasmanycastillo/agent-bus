@@ -384,6 +384,12 @@ def workflow_compile(yaml_file: str | None, name: str | None, instance: str, adv
             click.echo(task["task_id"])
 
 
+from agent_bus.cli.guided_run import run_command, workflow_advance  # noqa: E402
+
+app.add_command(run_command)
+workflow.add_command(workflow_advance)
+
+
 @app.command()
 def status():
     """Health check del servidor."""
