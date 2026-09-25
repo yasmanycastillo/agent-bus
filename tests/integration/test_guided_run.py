@@ -23,22 +23,27 @@ def git(path, *args):
 
 def test_prompts_keep_reviewer_apart():
     def prompt(text, default=None, type=None):
-        answers = {
-            "Nombre de la corrida": "odoo-1",
-            "Implementador": "impl",
-            "Revisor": "reviewer",
-            "Capacidades del implementador": "preset",
-            "Capacidades del revisor": "preset",
-            "Runtime del implementador": "external",
-            "Runtime del revisor": "native",
-            "CLI del implementador": "otro",
-            "Comando del implementador": "echo impl",
-            "Comando de test del módulo. Vacío usa uv run pytest -q": "",
-        }
-        assert text in answers
-        return answers[text]
+        if "Nombre de esta corrida" in text:
+            return "odoo-1"
+        if "escribe el código" in text:
+            return "impl"
+        if "quien revisa" in text and "otro nombre" in text:
+            return "reviewer"
+        if text.startswith("Para "):
+            return "recomendado"
+        if "Cómo trabaja quien programa" in text:
+            return "comando"
+        if "Cómo trabaja quien revisa" in text:
+            return "worker"
+        if "Qué programa usa quien programa" in text:
+            return "otro"
+        if "Comando exacto de quien programa" in text:
+            return "echo impl"
+        if "prueba el módulo" in text:
+            return ""
+        raise AssertionError(text)
 
-    answers = collect_answers(prompt, lambda text, default=False: default)
+    answers = collect_answers(prompt, lambda text, default=False: default, echo=lambda text: None)
     assert "code-review" not in answers["impl_caps"]
     assert "implementation" not in answers["review_caps"]
     assert answers["test_cmd"] == []
@@ -46,8 +51,9 @@ def test_prompts_keep_reviewer_apart():
     assert answers["review_runtime"] == "native"
     with pytest.raises(click.ClickException, match="otro agente"):
         collect_answers(
-            lambda text, default=None, type=None: {"Implementador": "impl", "Revisor": "impl"}.get(text, default),
+            lambda text, default=None, type=None: "impl" if "Nombre de" in text else default,
             lambda text, default=False: default,
+            echo=lambda text: None,
         )
 
 

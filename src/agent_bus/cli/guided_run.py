@@ -31,24 +31,42 @@ IMPLEMENTER_PRESET = (
 )
 REVIEWER_PRESET = ("code-review", "odoo")
 IMPLEMENTER_REQUIRED = ("repository-analysis", "long-context", "architecture", "implementation", "tests")
+CAPABILITY_HELP = {
+    "repository-analysis": "leer el repositorio y decir qué hay",
+    "long-context": "leer mucho código de una vez",
+    "architecture": "proponer cómo se hace el cambio",
+    "implementation": "escribir el código",
+    "tests": "ocuparse de las pruebas",
+    "python": "trabajar en Python",
+    "odoo": "trabajar en un módulo de Odoo",
+    "code-review": "revisar el cambio de otro, sin programarlo",
+}
 
 
-def collect_answers(prompt, confirm) -> dict:
+def collect_answers(prompt, confirm, echo=None) -> dict:
     """Pregunta la corrida. prompt(text, default=, type=) y confirm(text, default=)."""
-    instance = prompt("Nombre de la corrida", default="odoo-1")
-    implementer = prompt("Implementador", default="impl")
-    reviewer = prompt("Revisor", default="reviewer")
+    say = echo or click.echo
+    say("Vamos a preparar una corrida. Tú respondes. Si aceptas lo sugerido, pulsa Enter.")
+    say("Hacen falta dos papeles distintos: uno escribe el código y otro solo dice si ese commit se puede unir.")
+    instance = prompt("Nombre de esta corrida. Sirve para no mezclarla con otras. Ejemplo: praxia", default="odoo-1")
+    implementer = prompt("Nombre de quien escribe el código. Ejemplo: impl", default="impl")
+    reviewer = prompt("Nombre de quien revisa. Tiene que ser otro nombre, no el de quien programa", default="reviewer")
     if not instance or not implementer or not reviewer:
         raise click.ClickException("La corrida, el implementador y el revisor tienen nombre")
     if implementer == reviewer:
         raise click.ClickException("El revisor tiene que ser otro agente")
-    impl_caps = _caps(prompt, confirm, "implementador", IMPLEMENTER_PRESET, IMPLEMENTER_REQUIRED)
-    review_caps = _caps(prompt, confirm, "revisor", REVIEWER_PRESET, ("code-review",))
-    if "code-review" in impl_caps and impl_caps == review_caps and implementer == reviewer:
-        raise click.ClickException("El revisor tiene que ser otro agente")
-    impl_runtime, impl_command = _runtime(prompt, "implementador")
-    review_runtime, review_command = _runtime(prompt, "revisor")
-    test_text = prompt("Comando de test del módulo. Vacío usa uv run pytest -q", default="")
+    say("Paquete de quien programa: leer el repo, diseñar, escribir el código y probar, incluido Odoo.")
+    say("Si pulsas Enter, se usa ese paquete. Escribe elegir solo si quieres marcar habilidad por habilidad.")
+    impl_caps = _caps(prompt, confirm, "quien programa", IMPLEMENTER_PRESET, IMPLEMENTER_REQUIRED)
+    say("Paquete de quien revisa: solo revisar el cambio. No escribe código.")
+    say("Si pulsas Enter, se usa ese paquete. Escribe elegir solo si quieres marcar habilidad por habilidad.")
+    review_caps = _caps(prompt, confirm, "quien revisa", REVIEWER_PRESET, ("code-review",))
+    impl_runtime, impl_command = _runtime(prompt, "quien programa")
+    review_runtime, review_command = _runtime(prompt, "quien revisa")
+    test_text = prompt(
+        "Comando que prueba el módulo antes de unirlo a main. Enter lo deja vacío y se usa uv run pytest -q",
+        default="",
+    )
     return {
         "instance": instance,
         "implementer": implementer,
@@ -65,29 +83,44 @@ def collect_answers(prompt, confirm) -> dict:
 
 def _caps(prompt, confirm, role: str, preset: tuple[str, ...], required: tuple[str, ...]) -> list[str]:
     mode = prompt(
-        f"Capacidades del {role}",
-        default="preset",
-        type=click.Choice(["preset", "elegir"]),
+        f"Para {role}: escribe recomendado o elegir",
+        default="recomendado",
+        type=click.Choice(["recomendado", "elegir"]),
     )
-    if mode == "preset":
+    if mode == "recomendado":
         return list(preset)
-    chosen = [name for name in CAPABILITIES if confirm(f"  {role}: {name}", default=name in preset)]
+    chosen = [
+        name for name in CAPABILITIES
+        if confirm(f"¿{role} puede {CAPABILITY_HELP[name]}?", default=name in preset)
+    ]
     missing = [name for name in required if name not in chosen]
     if missing:
-        raise click.ClickException(f"Al {role} le falta: {', '.join(missing)}")
+        plain = ", ".join(CAPABILITY_HELP[name] for name in missing)
+        raise click.ClickException(f"A {role} le falta poder: {plain}")
     return chosen
 
 
 def _runtime(prompt, role: str) -> tuple[str, list[str]]:
-    kind = prompt(f"Runtime del {role}", default="external", type=click.Choice(["external", "native"]))
-    if kind == "native":
+    kind = prompt(
+        f"Cómo trabaja {role}: comando (se lanza un programa y se espera) o worker (queda un proceso del bus abierto)",
+        default="comando",
+        type=click.Choice(["comando", "worker"]),
+    )
+    if kind == "worker":
         return "native", []
-    tool = prompt(f"CLI del {role}", default="claude", type=click.Choice(["claude", "codex", "otro"]))
+    tool = prompt(
+        f"Qué programa usa {role}: claude, codex u otro",
+        default="claude",
+        type=click.Choice(["claude", "codex", "otro"]),
+    )
     default = {"claude": "claude", "codex": "codex"}.get(tool, "")
-    text = prompt(f"Comando del {role}", default=default)
+    text = prompt(
+        f"Comando exacto de {role}. Si elegiste claude o codex, Enter deja ese nombre",
+        default=default,
+    )
     command = shlex.split(text)
     if not command:
-        raise click.ClickException(f"El {role} necesita un comando")
+        raise click.ClickException(f"{role} necesita un comando")
     return "external", command
 
 
