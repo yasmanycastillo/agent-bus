@@ -62,6 +62,21 @@
         <div><strong>${review}</strong><span>Tareas en revisión</span></div>
         <div><strong>${overview.agents.length}</strong><span>Agentes registrados</span></div>
       </section>
+      <section className="card"><h2>Sesiones en este proyecto</h2>
+        <p className="muted">Lectura local. Un valor vacío no es cero: el proveedor no lo informó.</p>
+        ${!(overview.provider_sessions || []).length && html`<p className="muted">Sin observación de sesiones.</p>`}
+        <ul>
+          ${(overview.provider_sessions || []).map(item => html`<li key=${item.provider}>
+            <b>${item.provider}</b>
+            ${item.executable ? "" : " · sin ejecutable"}
+            ${item.session_in_project === true ? " · hay sesión" : item.session_in_project === false ? " · no hay sesión aquí" : " · sesión no observada"}
+            ${item.active_seconds == null ? "" : ` · activo ${Math.round(item.active_seconds)} s`}
+            ${item.input_tokens == null ? "" : ` · entrada ${item.input_tokens}`}
+            ${item.output_tokens == null ? "" : ` · salida ${item.output_tokens}`}
+            ${item.finished === true ? " · terminó" : item.finished === false ? " · en curso" : ""}
+          </li>`)}
+        </ul>
+      </section>
       <main className="layout"><div>
         <${C.ApprovalsPanel} approvals=${approvals} onChanged=${refresh} />
         <${C.TasksPanel} overview=${overview} onChanged=${refresh} />

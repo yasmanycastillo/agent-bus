@@ -297,6 +297,18 @@ class MessageBus:
             agents = await self.registry.list_all()
             return [a.model_dump(mode="json") for a in agents]
 
+        @self.app.get("/project/provider-sessions")
+        async def provider_sessions():
+            from agent_bus.config import load_config
+            from agent_bus.observe.sessions import remember_on_latest_attempt, scan_providers
+
+            root = load_config().project_root
+            if not root:
+                return {"providers": []}
+            providers = scan_providers(Path(root))
+            await remember_on_latest_attempt(self.db.conn, providers)
+            return {"providers": providers}
+
         @self.app.get("/status")
         async def status():
             agents = await self.registry.list_all()
@@ -1397,6 +1409,7 @@ class MessageBus:
                 "decisions": [d.model_dump(mode="json") for d in decisions],
                 "paused_workers": sorted(paused),
                 "pending_approvals": len([m for m in human_inbox if m.reply_needed]),
+                "provider_sessions": (await provider_sessions())["providers"],
             }
 
         @self.app.get("/room/api/usage")

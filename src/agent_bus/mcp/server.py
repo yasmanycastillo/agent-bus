@@ -558,11 +558,16 @@ class McpServer:
                 tasks = await get_json("/tasks")
                 locks = await get_json("/locks")
                 agents = await get_json("/agents")
+                try:
+                    providers = await get_json("/project/provider-sessions")
+                except Exception:
+                    providers = {"providers": []}
                 return {
                     "server": status,
                     "tasks": tasks,
                     "locks": locks,
                     "agents": agents,
+                    "provider_sessions": providers.get("providers", []),
                 }
 
             elif name == "record_decision":

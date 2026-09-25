@@ -488,6 +488,7 @@ class Database:
                 ("candidate_sha", "TEXT"),
                 ("log_refs", "TEXT DEFAULT '[]'"),
                 ("execution_epoch", "TEXT"),
+                ("observation_json", "TEXT"),
             ):
                 if name not in columns:
                     await self.conn.execute(f"ALTER TABLE runtime_attempts ADD COLUMN {name} {definition}")
