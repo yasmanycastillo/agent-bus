@@ -90,17 +90,17 @@ class _SyncApp:
     def __init__(self, app) -> None:
         self.app = app
 
-    def _request(self, method: str, url: str, payload: dict | None = None):
+    def _request(self, method: str, url: str, payload: dict | None = None, params: dict | None = None):
         async def once():
             async with httpx.AsyncClient(transport=ASGITransport(app=self.app), base_url="http://test") as client:
-                return await client.request(method, url, json=payload)
+                return await client.request(method, url, json=payload, params=params)
         return asyncio.run(once())
 
     def post(self, url: str, json: dict | None = None):
-        return self._request("POST", url, json)
+        return self._request("POST", url, payload=json)
 
-    def get(self, url: str):
-        return self._request("GET", url)
+    def get(self, url: str, params: dict | None = None):
+        return self._request("GET", url, params=params)
 
 
 def test_run_asks_for_a_verdict_and_integrates(tmp_path):

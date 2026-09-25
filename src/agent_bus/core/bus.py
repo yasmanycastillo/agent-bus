@@ -522,6 +522,17 @@ class MessageBus:
                 return JSONResponse({"error": "Task not found"}, status_code=404)
             return task.model_dump(mode="json")
 
+        @self.app.post("/tasks/{task_id}/release")
+        async def release_task(task_id: str, request: Request):
+            principal = request.state.principal
+            if principal and not principal.is_admin:
+                return JSONResponse({"error": "Administrator role required"}, status_code=403)
+            released = await self.tasks.release_if_idle(task_id)
+            task = await self.tasks.get(task_id)
+            if task is None:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            return {"released": released, "status": task.status.value}
+
         @self.app.post("/tasks/{task_id}/claim")
         async def claim_task(task_id: str, req: ClaimRequest, request: Request):
             req.agent_id = self._actor(request, req.agent_id)

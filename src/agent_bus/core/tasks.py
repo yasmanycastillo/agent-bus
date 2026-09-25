@@ -391,6 +391,27 @@ class TaskManager:
         await self._db.conn.commit()
         return self._row_to_task(row) if row is not None else None
 
+    async def release_if_idle(self, task_id: str) -> bool:
+        """Free the task when its latest attempt is not still running."""
+        rows = await self._db.conn.execute_fetchall(
+            "SELECT state FROM runtime_attempts WHERE task_id = ? ORDER BY updated_at DESC LIMIT 1",
+            (task_id,),
+        )
+        if rows and rows[0]["state"] == "started":
+            return False
+        await self.release(task_id)
+        return True
+
+    async def release(self, task_id: str) -> None:
+        """Return an in-progress task to the free pool after a launch that did not finish."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.conn.execute(
+            """UPDATE tasks SET status = 'pending', owner = 'free', updated_at = ?
+               WHERE task_id = ? AND status = 'in_progress'""",
+            (now, task_id),
+        )
+        await self._db.conn.commit()
+
     async def finish_integration(self, task_id: str) -> Task | None:
         """Mark a merged integration done from any status other than done."""
         now = datetime.now(timezone.utc).isoformat()

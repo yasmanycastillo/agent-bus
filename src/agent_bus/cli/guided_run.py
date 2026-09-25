@@ -223,6 +223,7 @@ def drive_run(client, answers: dict, *, repo: Path, ask, verdict_client=None) ->
     compiled = _ok(client.post("/workflows/compile", json={
         "yaml": workflow_yaml(answers["test_cmd"]), "instance_id": answers["instance"],
     }))
+    _release_stale_steps(client, agents)
     click.echo(f"Tareas: {', '.join(task['task_id'] for task in compiled.get('tasks') or [])}")
     review_id = f"feature-development-{answers['instance']}-review"
     for _ in range(20):
@@ -255,11 +256,39 @@ def drive_run(client, answers: dict, *, repo: Path, ask, verdict_client=None) ->
             return merged
         if status == "blocked":
             raise click.ClickException(result.get("error") or "bloqueado")
-        if status in ("unroutable", "no_runtime", "idle", "not_claimed"):
+        if status == "unroutable":
+            raise click.ClickException(_why_unroutable(result))
+        if status in ("no_runtime", "idle", "not_claimed"):
             raise click.ClickException(result.get("error") or status or "no hay paso para avanzar")
         if result.get("error"):
             raise click.ClickException(result["error"])
     raise click.ClickException("La corrida no terminó")
+
+
+def _release_stale_steps(client, agents: list[str]) -> None:
+    """Free a slot when an older step is still in progress but its program already stopped."""
+    for agent_id in agents:
+        listed = _ok(client.get("/tasks", params={"owner": agent_id, "status": "in_progress"}))
+        for task in listed:
+            released = _ok(client.post(f"/tasks/{task['task_id']}/release"))
+            if released.get("released"):
+                click.echo(f"Dejé libre {task['task_id']}: el programa ya no estaba trabajando.")
+
+
+def _why_unroutable(result: dict) -> str:
+    text = {
+        "missing declared capability": "no tiene esa habilidad",
+        "capability is not project-approved": "el proyecto no le aprobó esa habilidad",
+        "heartbeat is not recent": "no ha dado señales hace poco",
+        "execution capacity is full": "ya tiene un paso a medias",
+        "policy does not allow implementation": "no puede escribir código",
+    }
+    reasons = result.get("reasons") or {}
+    if not reasons:
+        return "Nadie puede tomar este paso."
+    return "Nadie puede tomar este paso. " + "; ".join(
+        f"{agent_id}: {text.get(reason, reason)}" for agent_id, reason in reasons.items()
+    )
 
 
 def _unfinished(result: dict) -> str:

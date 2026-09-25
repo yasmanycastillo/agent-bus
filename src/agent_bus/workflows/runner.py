@@ -80,6 +80,8 @@ async def advance_workflow(
         await bus.tasks.complete(task.task_id, actor=spec["agent_id"])
         if launched.get("candidate_sha"):
             await bus._notify_reviewers_of_candidate(task.task_id, launched["candidate_sha"])
+    elif launched["state"] in ("failed", "unknown"):
+        await bus.tasks.release(task.task_id)
     stored = await bus.tasks.get(task.task_id)
     return {
         "status": "dispatched",
