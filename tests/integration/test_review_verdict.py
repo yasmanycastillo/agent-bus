@@ -13,6 +13,7 @@ from agent_bus.core.inbox import InboxManager
 from agent_bus.core.registry import AgentRegistry
 from agent_bus.mcp.server import McpServer
 from agent_bus.reputation.database import Database
+from agent_bus.types import AgentInfo
 
 
 def git(path, *args):
@@ -67,9 +68,9 @@ async def test_assigned_reviewer_records_the_verdict(tmp_path, monkeypatch):
         )
         await db.conn.commit()
 
-        async def verdict(agent, verdict_name, candidate):
+        async def verdict(agent, verdict_name, candidate, verdict_reason="reviewed"):
             return await client.post(f"/tasks/{review_id}/verdict", json={
-                "agent_id": agent, "verdict": verdict_name, "sha": candidate, "reason": "reviewed",
+                "agent_id": agent, "verdict": verdict_name, "sha": candidate, "reason": verdict_reason,
             })
 
         stranger = await verdict("stranger-01", "approve", sha)
@@ -89,18 +90,57 @@ async def test_assigned_reviewer_records_the_verdict(tmp_path, monkeypatch):
         assert "sha" in wrong.json()["error"]
         assert git(repo, "rev-parse", "HEAD") == sha
 
-        requested = await verdict("reviewer-01", "changes_requested", sha)
+        await db.conn.execute("UPDATE tasks SET status = 'blocked' WHERE task_id = ?", (integration_id,))
+        await db.conn.commit()
+        requested = await verdict("reviewer-01", "changes_requested", sha, "please fix")
         assert requested.status_code == 200, requested.text
+        reopened = (await client.get(f"/tasks/{implementation_id}")).json()
+        assert reopened["status"] == "pending"
+        assert reopened["owner"] == "free"
+        assert (await client.get(f"/tasks/{integration_id}")).json()["status"] == "pending"
+        inbox = (await client.get("/inbox/impl-01/messages")).json()
+        assert any("please fix" in ((message.get("body") or {}).get("text") or "") for message in inbox["messages"])
+        assert git(repo, "rev-parse", "HEAD") == sha
+
+        await bus.registry.register(AgentInfo(agent_id="impl-02", display_name="Impl"))
+        await client.post("/agents/impl-02/route-profile", json={
+            "declared": ["implementation", "tests"],
+            "approved": ["implementation", "tests"],
+            "priority": 1, "can_edit": True,
+        })
+        await client.post("/agents/impl-02/runtime", json={
+            "runtime": "external", "command": [sys.executable, "-c", "print('revised')"],
+        })
+        dispatched = await client.post("/workflows/advance", json={
+            "workflow": "feature-development", "instance_id": "run-5",
+            "workspace_ref": str(repo), "timeout": 10,
+        })
+        assert dispatched.status_code == 200, dispatched.text
+        assert dispatched.json()["task_id"] == implementation_id
+        assert dispatched.json()["status"] == "dispatched"
+        assert dispatched.json()["task_status"] == "done"
+        assert git(repo, "rev-parse", "HEAD") == sha
+
+        new_sha = "b" * 40
+        await db.conn.execute(
+            """INSERT INTO runtime_attempts
+               (attempt_id, task_id, idempotency_key, state, external_ref, workspace_ref, updated_at, outcome, candidate_sha, log_refs)
+               VALUES ('att-new', ?, 'dispatch:new', 'completed', 'external:2', ?, '2099-01-01T00:00:00+00:00', 'completed', ?, '[]')""",
+            (implementation_id, str(repo), new_sha),
+        )
+        await db.conn.commit()
+        stale = await verdict("reviewer-01", "approve", sha)
+        assert stale.status_code == 409
         held = await client.post("/workflows/advance", json={
             "workflow": "feature-development", "instance_id": "run-5",
             "workspace_ref": str(repo), "repo_dir": str(repo), "candidate_branch": "main",
         })
         assert held.json()["status"] == "waiting_for_review"
-        assert held.json()["error"] == "independent review is not approved"
+        assert held.json()["error"] == "independent review is missing"
         assert (await client.get(f"/tasks/{integration_id}")).json()["status"] == "pending"
         assert git(repo, "rev-parse", "HEAD") == sha
 
-        approved = await verdict("reviewer-01", "approve", sha)
+        approved = await verdict("reviewer-01", "approve", new_sha)
         assert approved.status_code == 200, approved.text
         blocked = await client.post("/workflows/advance", json={
             "workflow": "feature-development", "instance_id": "run-5",

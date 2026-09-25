@@ -1064,6 +1064,8 @@ class MessageBus:
                 saved = await self.reviews.record_task_verdict(task_id, actor, sha.strip(), verdict, reason)
             except VerdictError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+            if verdict == "changes_requested":
+                await self._reopen_rejected_implementation(task_id, actor, sha.strip(), reason or verdict)
             return saved.model_dump(mode="json")
 
         @self.app.get("/reviews")
@@ -1677,6 +1679,45 @@ class MessageBus:
         except (ValueError, UnicodeDecodeError):
             return {}
         return body if isinstance(body, dict) else {}
+
+    async def _reopen_rejected_implementation(
+        self, review_task_id: str, reviewer: str, sha: str, reason: str,
+    ) -> None:
+        review = await self.tasks.get(review_task_id)
+        if review is None:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        for implementation_id in review.independent_from:
+            implementation = await self.tasks.get(implementation_id)
+            if implementation is None:
+                continue
+            previous = implementation.owner
+            if implementation.status != TaskStatus.PENDING or previous != "free":
+                await self.db.conn.execute(
+                    """UPDATE tasks SET status = 'pending', owner = 'free', updated_at = ?
+                       WHERE task_id = ?""",
+                    (now, implementation_id),
+                )
+            if previous not in (None, "free"):
+                await self.inbox.send(Envelope(
+                    from_agent=reviewer,
+                    to_agent=previous,
+                    message_type=MessageType.INBOX,
+                    reply_needed=True,
+                    related_task=implementation_id,
+                    body={
+                        "text": f"Changes requested on {sha}: {reason[:300]}",
+                        "verdict": "changes_requested",
+                        "sha": sha,
+                    },
+                ), [previous])
+        for task in await self.tasks.list_all():
+            if review_task_id in task.depends_on and task.status == TaskStatus.BLOCKED:
+                await self.db.conn.execute(
+                    "UPDATE tasks SET status = 'pending', updated_at = ? WHERE task_id = ?",
+                    (now, task.task_id),
+                )
+        await self.db.conn.commit()
 
     @staticmethod
     def _transition_actor(request: Request, body: dict) -> tuple[str | None, JSONResponse | None]:
