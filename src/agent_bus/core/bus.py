@@ -227,7 +227,11 @@ class MessageBus:
                 if admin_only and not principal.is_admin:
                     return JSONResponse({"error": "Administrator role required"}, status_code=403)
                 if len(parts) >= 2 and parts[0] in ("inbox", "events", "agents"):
-                    if path not in ("/events/all", "/events/all/cursor") and parts[1] != principal.agent_id:
+                    if (
+                        not principal.is_admin
+                        and path not in ("/events/all", "/events/all/cursor")
+                        and parts[1] != principal.agent_id
+                    ):
                         return JSONResponse({"error": "Identity does not own this resource"}, status_code=403)
                 # Legacy actor arguments are accepted only when consistent with
                 # the verified session. They never confer authority.
@@ -242,10 +246,12 @@ class MessageBus:
                             actors.append("from_agent")
                         if path == "/decisions":
                             actors.append("decided_by")
-                        if path == "/register" or path.startswith("/locks/") or (
+                        if path.startswith("/locks/") or (
                             len(parts) == 3 and parts[0] == "tasks"
                             and parts[2] in ("claim", "done", "review", "lock-files")
                         ):
+                            actors.append("agent_id")
+                        if path == "/register" and not principal.is_admin:
                             actors.append("agent_id")
                         if path.startswith("/kickoff/step/"):
                             actors.append("completed_by")
