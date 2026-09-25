@@ -677,9 +677,10 @@ Replace any one provider with another agent exposing the same capabilities witho
 
 # Immediate Next Sprint
 
-Phases 1–10, the feature-development loop, hardened migrations, and the
-operator guide are on `main` (`1816faa`). There is no Phase 1 sprint left.
-This line still does not add an Orca adapter or become a terminal UI.
+Phases 1–10, the feature-development loop, hardened migrations, the
+operator guide, and the injected sandbox runtime are on `main` (`1f1755e`).
+There is no Phase 1 sprint left. This line still does not add an Orca adapter
+or become a terminal UI.
 
 The executable Phase -1 checks for this host stay in
 [the spike](docs/spikes/2026-09-23-phase-minus-one.md). Operator steps are in
@@ -703,7 +704,8 @@ Landed on `main`:
 - a native agent reaches `done` on that same definition (`tests/integration/test_workflow_native.py`): `advance` leaves the attempt started, and the worker marks discovery, design, and implementation `done`
 - a legacy database keeps its tasks, messages, and reviews while gaining `requirements`, `independent_from`, and `blocked_reason`; a failed `initialize` restores the snapshot from the start of that attempt
 
-Orca stays out. `RuntimeRegistry` still accepts only `native` and `external`.
+Orca stays out. `RuntimeRegistry` accepts `native`, `external`, and `sandbox`.
+`sandbox` launches only when an opener is injected.
 
 ### External sandbox runtime
 
