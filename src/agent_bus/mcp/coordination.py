@@ -143,4 +143,9 @@ async def execute(server, name, args):
         else:
             response = await client.post("/coordination/" + routes[name], json=payload)
         response.raise_for_status()
-        return response.json()
+        body = response.json()
+        if name == "bootstrap_agent" and isinstance(body, dict):
+            # The connected package is the protocol. A hub started earlier must not
+            # replace it with the instructions it had when it booted.
+            body["instructions"] = INSTRUCTIONS
+        return body

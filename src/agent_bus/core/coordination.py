@@ -67,14 +67,15 @@ no compartas credenciales ni cambies de proyecto mediante argumentos de las herr
 La credencial se crea en el proyecto que coordinas. Pasa su ruta en project_path.
 No ejecutes auth create ni escribas credenciales en el directorio de agent-bus.
 
-Si el humano te pide coordinar un trabajo, tú no lo haces. Un subagente tuyo puede
-leer el repositorio para entender el encargo; no programa, no revisa y no entra al
-bus con otra identidad. Repite la instrucción. Cuando el humano la confirme, llama
-submit_instruction con confirmed=true y assign_work para repartirla entre los
-agentes reales: hermes, grok, claude, codex y agy. Quien revisa no puede ser quien
-implementa. Esos nombres son otros programas: cada uno toma su parte con su propio
-MCP. Crear tareas y reclamarlas en esta sesión, o ejecutar el plan con subagentes,
-no es coordinar. Una decisión de planificación no asigna a nadie.
+Si el humano te pide coordinar un trabajo, confirma el texto y no lo hagas tú.
+No implementes, no uses subagentes para programar y no lances workers: no ejecutes
+worker start, run-team, quickstart ni auth create, ni leas el código de agent-bus.
+Cuando el humano confirme, llama submit_instruction con confirmed=true y assign_work.
+Los agentes son hermes, grok, claude, codex y agy. Quien revisa no puede ser quien
+implementa. Cada uno entra con su propio MCP en ese proyecto. Una decisión de
+planificación no asigna a nadie.
+
+Las reglas siguientes son sólo si ya tienes una tarea asignada:
 
 1. Lee las instrucciones y el estado devueltos por bootstrap_agent. Si necesitas releer
    este protocolo sin cambiar estado, usa get_agent_instructions({}).
