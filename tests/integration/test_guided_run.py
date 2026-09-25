@@ -51,20 +51,22 @@ def test_prompts_keep_reviewer_apart():
         if text.startswith("Para "):
             return "recomendado"
         if "Cómo trabaja quien programa" in text:
-            return "comando"
+            return "agente"
         if "Cómo trabaja quien revisa" in text:
             return "worker"
         if "Qué programa usa quien programa" in text:
             return "otro"
         if "Comando exacto de quien programa" in text:
             return "echo impl"
-        if "prueba el módulo" in text:
+        if "prueba el proyecto" in text:
             return ""
         raise AssertionError(text)
 
     answers = collect_answers(prompt, lambda text, default=False: default, echo=lambda text: None)
     assert "code-review" not in answers["impl_caps"]
     assert "implementation" not in answers["review_caps"]
+    assert "odoo" not in answers["impl_caps"]
+    assert "odoo" not in answers["review_caps"]
     assert answers["test_cmd"] == []
     assert answers["impl_command"] == ["echo", "impl"]
     assert answers["review_runtime"] == "native"

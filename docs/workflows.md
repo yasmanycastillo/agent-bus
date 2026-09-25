@@ -1,6 +1,6 @@
 # Operar feature-development
 
-Para una corrida, usa `agent-bus run` en la raíz del repositorio. Pregunta el nombre, el implementador, el revisor, las capacidades (preset o una lista) y el comando de test. Si el test se deja vacío, la integración usa `uv run pytest -q`. Levanta el hub si hace falta, registra a los dos agentes y avanza solo. Cuando la review terminó, pregunta si apruebas ese commit o pides cambios. Aprobar integra. Pedir cambios reabre la implementación.
+Para una corrida, usa `agent-bus run` en la raíz del repositorio. Pregunta el nombre, quién programa, quién revisa y cómo trabaja cada uno. `agente` lanza su programa y espera: trabaja bajo la coordinación del bus. `worker` deja un proceso del bus abierto. Si el test se deja vacío, la integración usa `uv run pytest -q`. Levanta el hub si hace falta, registra a los dos y avanza solo. Cuando la review terminó, pregunta si apruebas ese commit o pides cambios. Aprobar integra. Pedir cambios reabre la implementación.
 
 `feature-development` compilado a mano crea cinco tareas: discovery, design, implementation, review e integration. No las ejecuta. El avance las despacha en ese orden. La integración no es otro runtime: espera un `approve` del revisor asignado y entonces corre la suite y fusiona.
 

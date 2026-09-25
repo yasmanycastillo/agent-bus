@@ -17,7 +17,6 @@ CAPABILITIES = (
     "implementation",
     "tests",
     "python",
-    "odoo",
     "code-review",
 )
 IMPLEMENTER_PRESET = (
@@ -27,9 +26,8 @@ IMPLEMENTER_PRESET = (
     "implementation",
     "tests",
     "python",
-    "odoo",
 )
-REVIEWER_PRESET = ("code-review", "odoo")
+REVIEWER_PRESET = ("code-review",)
 IMPLEMENTER_REQUIRED = ("repository-analysis", "long-context", "architecture", "implementation", "tests")
 CAPABILITY_HELP = {
     "repository-analysis": "leer el repositorio y decir qué hay",
@@ -38,7 +36,6 @@ CAPABILITY_HELP = {
     "implementation": "escribir el código",
     "tests": "ocuparse de las pruebas",
     "python": "trabajar en Python",
-    "odoo": "trabajar en un módulo de Odoo",
     "code-review": "revisar el cambio de otro, sin programarlo",
 }
 
@@ -48,14 +45,14 @@ def collect_answers(prompt, confirm, echo=None) -> dict:
     say = echo or click.echo
     say("Vamos a preparar una corrida. Tú respondes. Si aceptas lo sugerido, pulsa Enter.")
     say("Hacen falta dos papeles distintos: uno escribe el código y otro solo dice si ese commit se puede unir.")
-    instance = prompt("Nombre de esta corrida. Sirve para no mezclarla con otras. Ejemplo: praxia", default="odoo-1")
+    instance = prompt("Nombre de esta corrida. Sirve para no mezclarla con otras. Ejemplo: feature-1", default="run-1")
     implementer = prompt("Nombre de quien escribe el código. Ejemplo: impl", default="impl")
     reviewer = prompt("Nombre de quien revisa. Tiene que ser otro nombre, no el de quien programa", default="reviewer")
     if not instance or not implementer or not reviewer:
         raise click.ClickException("La corrida, el implementador y el revisor tienen nombre")
     if implementer == reviewer:
         raise click.ClickException("El revisor tiene que ser otro agente")
-    say("Paquete de quien programa: leer el repo, diseñar, escribir el código y probar, incluido Odoo.")
+    say("Paquete de quien programa: leer el repo, diseñar, escribir el código y probar.")
     say("Si pulsas Enter, se usa ese paquete. Escribe elegir solo si quieres marcar habilidad por habilidad.")
     impl_caps = _caps(prompt, confirm, "quien programa", IMPLEMENTER_PRESET, IMPLEMENTER_REQUIRED)
     say("Paquete de quien revisa: solo revisar el cambio. No escribe código.")
@@ -64,7 +61,7 @@ def collect_answers(prompt, confirm, echo=None) -> dict:
     impl_runtime, impl_command = _runtime(prompt, "quien programa")
     review_runtime, review_command = _runtime(prompt, "quien revisa")
     test_text = prompt(
-        "Comando que prueba el módulo antes de unirlo a main. Enter lo deja vacío y se usa uv run pytest -q",
+        "Comando que prueba el proyecto antes de unirlo a main. Enter lo deja vacío y se usa uv run pytest -q",
         default="",
     )
     return {
@@ -102,9 +99,9 @@ def _caps(prompt, confirm, role: str, preset: tuple[str, ...], required: tuple[s
 
 def _runtime(prompt, role: str) -> tuple[str, list[str]]:
     kind = prompt(
-        f"Cómo trabaja {role}: comando (se lanza un programa y se espera) o worker (queda un proceso del bus abierto)",
-        default="comando",
-        type=click.Choice(["comando", "worker"]),
+        f"Cómo trabaja {role}: agente (se lanza su programa y se espera; trabaja bajo la coordinación del bus) o worker (queda un proceso del bus abierto)",
+        default="agente",
+        type=click.Choice(["agente", "worker"]),
     )
     if kind == "worker":
         return "native", []
