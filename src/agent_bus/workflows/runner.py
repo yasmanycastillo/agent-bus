@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -108,6 +109,7 @@ async def _integrate(
         return {"status": "blocked", "task_id": task_id, "error": reason}
     review_gap = await _independent_review_gap(bus, task_id, implementation_task_id, attempt["candidate_sha"])
     if review_gap:
+        await _notify_review_wait(bus, task_id, implementation_task_id, attempt["candidate_sha"], review_gap)
         stored = await bus.tasks.get(task_id)
         return {
             "status": "waiting_for_review",
@@ -210,6 +212,32 @@ async def _independent_review_gap(
     if review_task.owner not in (None, "free") and latest.reviewer_agent_id != review_task.owner:
         return "independent review is not from the assigned reviewer"
     return None
+
+
+async def _notify_review_wait(
+    bus: MessageBus, task_id: str, implementation_task_id: str, candidate_sha: str, reason: str,
+) -> None:
+    integration = await bus.tasks.get(task_id)
+    review_task = None
+    for dependency_id in integration.depends_on if integration else []:
+        dependency = await bus.tasks.get(dependency_id)
+        if dependency is not None and "code-review" in dependency.requirements:
+            review_task = dependency
+            break
+    if review_task is None or review_task.owner in (None, "free"):
+        return
+    implementation = await bus.tasks.get(implementation_task_id)
+    if implementation is not None and implementation.owner == review_task.owner:
+        return
+    digest = hashlib.sha256(f"{review_task.task_id}:{candidate_sha}:{reason}".encode()).hexdigest()[:32]
+    await bus.inbox.send(Envelope(
+        from_agent="workflow",
+        to_agent=review_task.owner,
+        message_type=MessageType.INBOX,
+        reply_needed=True,
+        related_task=review_task.task_id,
+        body={"text": f"Review {candidate_sha}: {reason[:300]}", "sha": candidate_sha, "reason": reason[:300]},
+    ), [review_task.owner], idempotency_key=f"review-wait:{digest}")
 
 
 async def _notify_blocked(bus: MessageBus, task_id: str, reason: str) -> None:

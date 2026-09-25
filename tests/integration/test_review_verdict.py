@@ -133,6 +133,17 @@ async def test_assigned_reviewer_records_the_verdict(tmp_path, monkeypatch):
             (implementation_id, str(repo), new_sha),
         )
         await db.conn.commit()
+        await db.conn.execute("UPDATE tasks SET owner = 'impl-02' WHERE task_id = ?", (review_id,))
+        await db.conn.commit()
+        skipped = await client.post("/workflows/advance", json={
+            "workflow": "feature-development", "instance_id": "run-5",
+            "workspace_ref": str(repo), "repo_dir": str(repo), "candidate_branch": "main",
+        })
+        assert skipped.json()["status"] == "waiting_for_review"
+        skipped_inbox = (await client.get("/inbox/impl-02/messages")).json()
+        assert not any((message.get("body") or {}).get("sha") == new_sha for message in skipped_inbox["messages"])
+        await db.conn.execute("UPDATE tasks SET owner = 'reviewer-01' WHERE task_id = ?", (review_id,))
+        await db.conn.commit()
         stale = await verdict("reviewer-01", "approve", sha)
         assert stale.status_code == 409
         held = await client.post("/workflows/advance", json={
@@ -143,6 +154,17 @@ async def test_assigned_reviewer_records_the_verdict(tmp_path, monkeypatch):
         assert held.json()["error"] == "independent review is missing"
         assert (await client.get(f"/tasks/{integration_id}")).json()["status"] == "pending"
         assert git(repo, "rev-parse", "HEAD") == sha
+        repeated = await client.post("/workflows/advance", json={
+            "workflow": "feature-development", "instance_id": "run-5",
+            "workspace_ref": str(repo), "repo_dir": str(repo), "candidate_branch": "main",
+        })
+        assert repeated.json()["status"] == "waiting_for_review"
+        notices = [
+            message for message in (await client.get("/inbox/reviewer-01/messages")).json()["messages"]
+            if (message.get("body") or {}).get("sha") == new_sha
+            and (message.get("body") or {}).get("reason") == "independent review is missing"
+        ]
+        assert len(notices) == 1
 
         approved = await client.post(f"/tasks/{review_id}/verdict", json={
             "agent_id": "reviewer-01", "verdict": "approve", "reason": "reviewed",
