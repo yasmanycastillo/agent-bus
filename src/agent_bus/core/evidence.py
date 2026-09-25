@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
 from agent_bus.core.artifacts import ArtifactError, ArtifactStore
@@ -89,7 +90,7 @@ class EvidenceLog:
             )
             if not attempt:
                 return f"runtime attempt {row['attempt_id']} is missing"
-            if attempt[0]["task_id"] != task_id:
+            if not await self._attempt_task_is_in_scope(task_id, attempt[0]["task_id"]):
                 return "runtime attempt belongs to another task"
             if attempt[0]["candidate_sha"] != candidate_sha:
                 return "evidence is not bound to the candidate SHA"
@@ -98,6 +99,28 @@ class EvidenceLog:
         if policy["require_review"] and verdict != "approve":
             return f"strict policy requires an approved verdict, got {verdict}"
         return None
+
+    async def _attempt_task_is_in_scope(self, task_id: str, attempt_task_id: str) -> bool:
+        if attempt_task_id == task_id:
+            return True
+        seen: set[str] = set()
+        stack = [task_id]
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            rows = await self._db.conn.execute_fetchall(
+                "SELECT depends_on FROM tasks WHERE task_id = ?", (current,),
+            )
+            if not rows:
+                continue
+            raw = rows[0]["depends_on"] or "[]"
+            deps = json.loads(raw) if isinstance(raw, str) else list(raw or [])
+            if attempt_task_id in deps:
+                return True
+            stack.extend(deps)
+        return False
 
     async def _require_task(self, task_id: str) -> None:
         rows = await self._db.conn.execute_fetchall("SELECT task_id FROM tasks WHERE task_id = ?", (task_id,))

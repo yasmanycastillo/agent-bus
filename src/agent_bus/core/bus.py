@@ -722,6 +722,8 @@ class MessageBus:
                 return await advance_workflow(
                     self, workflow, instance_id,
                     workspace_ref=body.get("workspace_ref"),
+                    repo_dir=body.get("repo_dir"),
+                    candidate_branch=body.get("candidate_branch"),
                     timeout=float(body.get("timeout") or 30),
                 )
             except Exception as exc:
