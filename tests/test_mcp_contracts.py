@@ -225,7 +225,7 @@ async def test_wait_business_error_sets_tool_error_flag(bound_server, monkeypatc
     ("prepare_edit", {"paths": ["a.py"], "operation_key": "edit"}, 409, "Detén la edición"),
     ("complete_handoff", {"task_id": "T1", "to_agent": "bob", "summary": "Ready", "operation_key": "handoff"}, 409, "resultado anterior"),
     ("claim_task", {"task_id": "T1"}, 409, "dependencias"),
-    ("bootstrap_agent", {}, 401, "credencial vigente"),
+    ("bootstrap_agent", {}, 401, "project_path"),
     ("bootstrap_agent", {}, 404, "hub incluya estas herramientas"),
     ("prepare_edit", {"paths": ["a.py"], "operation_key": "edit"}, 503, "misma clave"),
 ])

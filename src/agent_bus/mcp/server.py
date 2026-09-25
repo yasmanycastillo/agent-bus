@@ -300,7 +300,10 @@ class McpServer:
         self._event_cursors: dict[str, str] = {}
         self.session = None
         if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
-            self.session = load_session(agent_id)
+            try:
+                self.session = load_session(agent_id)
+            except AuthenticationError:
+                self.session = None
         self.agent_id = self.session["agent_id"] if self.session else agent_id
         self.tools = copy.deepcopy(TOOLS_DEFINITIONS + coordination.TOOLS)
         for tool in self.tools:

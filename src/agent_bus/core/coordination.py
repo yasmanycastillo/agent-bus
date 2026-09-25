@@ -26,6 +26,7 @@ class BootstrapRequest(BaseModel):
     display_name: Text = "Agent"
     capabilities: list[Text] = Field(default_factory=list, max_length=50)
     limit: int = Field(default=20, ge=1, le=100, strict=True)
+    project_path: StrictStr | None = None
 
 
 class PrepareEditRequest(BaseModel):
@@ -63,6 +64,8 @@ Al conectar, tu primera llamada debe ser bootstrap_agent({}); los argumentos son
 No necesitas un mensaje adicional del usuario para consultar tu contexto de coordinación.
 La identidad y el proyecto provienen de tu sesión autenticada: no inventes agent_id,
 no compartas credenciales ni cambies de proyecto mediante argumentos de las herramientas.
+La credencial se crea en el proyecto que coordinas. Pasa su ruta en project_path.
+No ejecutes auth create ni escribas credenciales en el directorio de agent-bus.
 
 Si el humano te pide coordinar un trabajo, tú no lo haces. Un subagente tuyo puede
 leer el repositorio para entender el encargo; no programa, no revisa y no entra al

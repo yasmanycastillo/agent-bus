@@ -27,7 +27,7 @@ MODELS = {
     "get_agent_instructions": InstructionsArguments,
 }
 DESCRIPTIONS = {
-    "bootstrap_agent": "Entrar con tu sesión existente y recibir instrucciones, pendientes, agentes y decisiones. No crea credenciales.",
+    "bootstrap_agent": "Entrar al proyecto. Pasa project_path del proyecto que coordinas. La credencial se crea allí. No la crees en el directorio de agent-bus.",
     "my_pending_items": "Consultar mensajes y tareas propios sin confirmar. Pagina con next_cursor y next_task_offset.",
     "prepare_edit": "Reservar todos los archivos o ninguno. Conserva operation_key, acquisition_id y expires_at; reintentar no renueva locks.",
     "complete_handoff": "Entregar tarea, evidencia declarada, ACK y liberaciones en una transacción. in_review por defecto; conserva operation_key al reintentar.",
@@ -38,7 +38,7 @@ TOOLS = [{"name": name, "description": DESCRIPTIONS[name], "inputSchema": model.
 
 
 TOOL_GUIDANCE = {
-    "bootstrap_agent": "Primera llamada al conectar: bootstrap_agent({}). Requiere una credencial provisionada. Después atiende my_pending_items.",
+    "bootstrap_agent": "Primera llamada: bootstrap_agent con project_path del proyecto abierto. No ejecutes auth create. Después atiende my_pending_items.",
     "get_agent_instructions": "Requiere sesión provisionada. Para incorporarte al proyecto, continúa con bootstrap_agent({}).",
     "my_pending_items": "Empieza con bootstrap_agent. Después procesa pendientes y usa ack_messages o reply_message según corresponda.",
     "prepare_edit": "Antes: bootstrap_agent y una tarea propia. Edita sólo tras authorized=true; después renueva con renew_lock o entrega con complete_handoff.",
@@ -71,10 +71,10 @@ def connection_instructions(authenticated: bool) -> str:
         return INSTRUCTIONS
     return (
         "agent-bus está en modo legacy sin sesión autenticada. Las operaciones compactas "
-        "requieren una credencial propia del proyecto. Solicita al operador provisionarla "
-        "con agent-bus auth create y configura el cliente según docs/authentication.md; "
-        "no inventes identidades ni muestres tokens. Reconecta MCP y ejecuta bootstrap_agent({}) "
-        "como primera llamada. Las herramientas legacy conservan sus argumentos de identidad."
+        "usan una credencial propia del proyecto, creada por bootstrap_agent. "
+        "Pasa project_path del proyecto que coordinas. No ejecutes auth create ni escribas "
+        "credenciales en el directorio de agent-bus. Reconecta MCP después de instalar. "
+        "No inventes identidades ni muestres tokens."
     )
 
 
@@ -84,8 +84,8 @@ def recovery_hint(name: str, code: str, http_status: int | None = None) -> str:
         return ("Recupera pendientes con read_messages sin cursor de paginación. Usa el event_cursor "
                 "de recuperación si se devuelve; si no, obtén uno nuevo con my_pending_items antes de esperar.")
     if code == "unauthenticated" or http_status == 401:
-        return ("Solicita al operador una credencial vigente del proyecto; configura su archivo "
-                "en el cliente, reconecta MCP y ejecuta bootstrap_agent({}). No muestres el token.")
+        return ("Llama bootstrap_agent con project_path del proyecto que coordinas. "
+                "La credencial se crea allí. No ejecutes auth create ni uses el directorio de agent-bus.")
     if http_status == 403:
         return ("La sesión no tiene permiso para esta operación. Comprueba tu identidad/proyecto "
                 "y trabaja sólo sobre recursos autorizados; no suplantes a otro agente.")
@@ -113,9 +113,15 @@ def recovery_hint(name: str, code: str, http_status: int | None = None) -> str:
 
 
 async def execute(server, name, args):
-    if not server.session:
-        raise AuthenticationError("Coordination workflows require a provisioned MCP session")
     payload = MODELS[name].model_validate(args).model_dump(exclude_none=True)
+    if name == "bootstrap_agent" and server.session is None:
+        from agent_bus.mcp.join import join_workspace
+        await join_workspace(server, payload.get("project_path"))
+    if server.session is None and name != "get_agent_instructions":
+        raise AuthenticationError(
+            "Llama bootstrap_agent con project_path del proyecto. No crees la credencial en agent-bus."
+        )
+    payload.pop("project_path", None)
     if name == "get_agent_instructions":
         return {"instructions": INSTRUCTIONS, "agent_id": server.agent_id, "project_id": server.project_id}
 

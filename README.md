@@ -9,7 +9,7 @@ agent-bus mcp install --scope global --client codex --agent codex
 agent-bus mcp install --scope global --client agy --agent agy
 ```
 
-Ese comando no crea credenciales, no elige un hub y no fija `AGENT_BUS_PROJECT_ROOT`, `AGENT_BUS_URL` ni `AGENT_BUS_SESSION_FILE`. No arranques `mcp-server`, no leas el código y no edites este repositorio. Reinicia el cliente.
+Ese comando no crea credenciales, no elige un hub y no fija `AGENT_BUS_PROJECT_ROOT`, `AGENT_BUS_URL` ni `AGENT_BUS_SESSION_FILE`. No arranques `mcp-server`, no ejecutes `auth create`, no leas el código y no edites este repositorio. Reinicia el cliente. La credencial aparece después, cuando el agente llama `bootstrap_agent` con `project_path` del proyecto que tiene abierto. No se escribe en el directorio de agent-bus.
 
 Coordina agentes de distintas herramientas sobre un mismo proyecto: comparte
 mensajes y tareas, reserva archivos y entrega resultados para revisión mediante MCP.
