@@ -705,9 +705,7 @@ OpenHands remains a runtime class behind an adapter. The router still selects on
 
 ### Still open
 
-1. One `native` agent completes the same `feature-development` definition through `done`. The two-provider test covers two external commands, not native. `advance` leaves a native attempt started; the worker is what marks a non-integration native step `done`.
-
-Operator steps for compile, verdict, advance, and integration are in [docs/workflows.md](docs/workflows.md).
+The V2 Stable items tracked in this section are on `main`. Operator steps are in [docs/workflows.md](docs/workflows.md). A native agent completes `feature-development` through `done` in `tests/integration/test_workflow_native.py`: `advance` leaves the native attempt started, and the worker marks discovery, design, and implementation `done`. Review stays with another agent. OpenHands is still not a routed runtime, and Orca stays out.
 
 A legacy database gains `requirements`, `independent_from`, and `blocked_reason` without dropping tasks, inbox messages, or reviews. If `initialize` fails halfway, it restores the snapshot taken at the start of that attempt.
 
