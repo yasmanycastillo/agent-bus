@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+
+import httpx
+from httpx import ASGITransport
 
 from agent_bus.core.artifacts import ArtifactStore
 from agent_bus.core.bus import MessageBus
 from agent_bus.core.evidence import EvidenceLog
 from agent_bus.runtimes.registry import RuntimeRegistry
+from agent_bus.types import Envelope, MessageType
 
 
 async def advance_workflow(
@@ -95,7 +100,10 @@ async def _integrate(
     del timeout
     attempt = await _implementation_attempt(bus, implementation_task_id)
     if attempt is None:
-        return {"status": "blocked", "task_id": task_id, "error": "implementation attempt is missing"}
+        reason = "implementation attempt is missing"
+        await bus.tasks.block(task_id, reason=reason)
+        await _notify_blocked(bus, task_id, reason)
+        return {"status": "blocked", "task_id": task_id, "error": reason}
     target_sha = await _rev_parse(repo_dir, "HEAD")
     candidate_sha = await _rev_parse(workspace_ref, "HEAD")
     branch = candidate_branch or await _rev_parse(workspace_ref, "--abbrev-ref", "HEAD")
@@ -109,6 +117,7 @@ async def _integrate(
     if not passed:
         reason = f"tests failed\n{output[-1000:]}"
         await bus.tasks.block(task_id, reason=reason)
+        await _notify_blocked(bus, task_id, reason)
         return {"status": "blocked", "task_id": task_id, "error": reason}
     if not existing:
         artifact = await ArtifactStore(bus.db, bus.project_id).publish(
@@ -131,15 +140,43 @@ async def _integrate(
     gap = await evidence.gap(task_id, candidate_sha=candidate_sha, target_sha=target_sha, verdict="approve")
     if gap:
         await bus.tasks.block(task_id, reason=gap)
+        await _notify_blocked(bus, task_id, gap)
         return {"status": "blocked", "task_id": task_id, "error": gap}
     from agent_bus.worker.integrator import BranchIntegrator
-    integrator = BranchIntegrator(repo_dir=Path(repo_dir), bus_url="http://127.0.0.1:9", require_approval=True)
+
+    def client_factory(timeout: float):
+        @asynccontextmanager
+        async def opener():
+            async with httpx.AsyncClient(
+                transport=ASGITransport(app=bus.app), base_url="http://bus.local", timeout=timeout,
+            ) as client:
+                yield client
+        return opener()
+
+    integrator = BranchIntegrator(
+        repo_dir=Path(repo_dir), bus_url="http://bus.local", require_approval=True, client_factory=client_factory,
+    )
     result = await integrator.integrate_task(
         task_id, "workflow", Path(workspace_ref), branch, test_cmd=test_cmd,
     )
     if not result.success:
+        await _notify_blocked(bus, task_id, result.error or "integration blocked")
         return {"status": "blocked", "task_id": task_id, "error": result.error}
+    stored = await bus.tasks.get(task_id)
+    if stored is None or stored.status.value != "done":
+        await bus.tasks.complete(task_id)
     return {"status": "integrated", "task_id": task_id, "candidate_sha": candidate_sha}
+
+
+async def _notify_blocked(bus: MessageBus, task_id: str, reason: str) -> None:
+    await bus.inbox.send(Envelope(
+        from_agent="integrator",
+        to_agent="workflow",
+        message_type=MessageType.BLOCKER,
+        reply_needed=True,
+        related_task=task_id,
+        body={"text": f"Task {task_id} blocked: {reason[:300]}", "details": reason[:300]},
+    ), ["workflow"])
 
 
 async def _implementation_attempt(bus: MessageBus, task_id: str) -> dict | None:

@@ -145,6 +145,13 @@ async def test_integration_uses_the_implementation_sha(tmp_path):
         })
         assert mismatched.json()["status"] == "blocked"
         assert "candidate SHA" in mismatched.json()["error"]
+        blocked_task = (await client.get("/tasks/feature-development-run-2-integration")).json()
+        assert blocked_task["status"] == "blocked"
+        inbox = (await client.get("/inbox/workflow/messages")).json()
+        assert any(
+            "candidate SHA" in ((message.get("body") or {}).get("text") or "")
+            for message in inbox["messages"]
+        )
         assert git(repo, "rev-parse", "HEAD") == baseline
         await db.conn.execute(
             "UPDATE tasks SET status = 'pending' WHERE task_id = ?",
@@ -157,7 +164,12 @@ async def test_integration_uses_the_implementation_sha(tmp_path):
         })
         assert integrated.status_code == 200, integrated.text
         assert integrated.json()["status"] == "integrated"
-        assert git(repo, "rev-parse", "HEAD^2") == git(work, "rev-parse", "HEAD")
+        candidate = git(work, "rev-parse", "HEAD")
+        assert git(repo, "rev-parse", "HEAD^2") == candidate
+        done = (await client.get("/tasks/feature-development-run-2-integration")).json()
+        assert done["status"] == "done"
+        reviews = (await client.get("/tasks/feature-development-run-2-integration/reviews")).json()
+        assert any(review["sha"] == candidate for review in reviews)
         report = (await client.get("/tasks/feature-development-run-2-integration/artifacts")).json()
         content = await client.get(f"/artifacts/{report[0]['artifact_id']}/content")
         assert b"suite ok" in content.content
@@ -264,5 +276,10 @@ async def test_failing_suite_blocks_integration(tmp_path):
         assert blocked.json()["status"] == "blocked"
         assert "tests failed" in blocked.json()["error"]
         assert "suite failed" in blocked.json()["error"]
+        blocked_task = (await client.get("/tasks/feature-development-run-4-integration")).json()
+        assert blocked_task["status"] == "blocked"
+        inbox = (await client.get("/inbox/workflow/messages")).json()
+        texts = [((message.get("body") or {}).get("text") or "") for message in inbox["messages"]]
+        assert any("tests failed" in text and "suite failed" in text for text in texts)
         assert git(repo, "rev-parse", "HEAD") == sha
     await db.close()

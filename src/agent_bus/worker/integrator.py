@@ -49,15 +49,22 @@ class BranchIntegrator:
         max_retries_per_task: int = 2,
         require_approval: bool = True,
         gatekeeper: Gatekeeper | None = None,
+        client_factory=None,
     ) -> None:
         self.repo_dir = repo_dir or Path.cwd()
         from agent_bus.config import get_bus_url
         self.bus_url = get_bus_url(bus_url)
+        self._client_factory = client_factory
         self.agent_id = agent_id
         self.max_retries_per_task = max_retries_per_task
         self.require_approval = require_approval
         self.gatekeeper = gatekeeper or CodeReviewGatekeeper()
-        self._retry_counts: dict[str, int] = {}  # task_id -> retry count
+        self._retry_counts: dict[str, int] = {}
+
+    def _open_bus(self, timeout: float):
+        if self._client_factory is not None:
+            return self._client_factory(timeout)
+        return async_bus_client(self.agent_id, base_url=self.bus_url, timeout=timeout)
 
     async def process_pending(
         self,
@@ -70,7 +77,7 @@ class BranchIntegrator:
         The resolver owns the project policy for mapping a task to its dedicated
         checkout; the integrator never guesses a worktree from an agent name.
         """
-        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=30.0) as client:
+        async with self._open_bus(30.0) as client:
             response = await client.get("/tasks", params={"status": "in_review"})
             response.raise_for_status()
             tasks = response.json()
@@ -484,7 +491,7 @@ class BranchIntegrator:
 
     async def _notify_author_failure(self, task_id: str, author_agent: str, details: str, retry: int) -> None:
         """Sends a high priority feedback message to author on the bus."""
-        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+        async with self._open_bus(10.0) as client:
             try:
                 # Ensure task stays in_progress for author
                 await client.post(f"/tasks/{task_id}/reassign", json={"new_owner": author_agent})
@@ -512,7 +519,7 @@ class BranchIntegrator:
         self, task_id: str, author_agent: str, reason: str, details: str = ""
     ) -> None:
         """Alert the author to a blocked integration with its specific reason."""
-        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+        async with self._open_bus(10.0) as client:
             try:
                 await client.post(
                     "/messages",
@@ -533,7 +540,7 @@ class BranchIntegrator:
 
     async def _task_owner(self, task_id: str) -> str:
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+            async with self._open_bus(10.0) as client:
                 response = await client.get(f"/tasks/{task_id}")
                 if response.status_code == 200:
                     owner = response.json().get("owner")
@@ -545,7 +552,7 @@ class BranchIntegrator:
 
     async def _mark_task_completed(self, task_id: str) -> None:
         owner = await self._task_owner(task_id)
-        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+        async with self._open_bus(10.0) as client:
             try:
                 await client.post(f"/tasks/{task_id}/done", json={"agent_id": owner})
             except Exception as exc:
@@ -553,7 +560,7 @@ class BranchIntegrator:
 
     async def _fetch_acceptance_criteria(self, task_id: str) -> list[str]:
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+            async with self._open_bus(10.0) as client:
                 resp = await client.get(f"/tasks/{task_id}")
                 if resp.status_code == 200:
                     return resp.json().get("acceptance_criteria", []) or []
@@ -563,7 +570,7 @@ class BranchIntegrator:
 
     async def _evidence_gap(self, task_id: str, candidate_sha: str, target_sha: str, verdict: str) -> str | None:
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=1.0) as client:
+            async with self._open_bus(1.0) as client:
                 policy = await client.get(f"/tasks/{task_id}/evidence-policy")
                 if policy.status_code == 404:
                     return None
@@ -587,7 +594,7 @@ class BranchIntegrator:
 
     async def _record_review(self, decision: ReviewDecision) -> None:
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+            async with self._open_bus(10.0) as client:
                 await client.post("/reviews", json=decision.model_dump(mode="json"))
         except Exception as exc:
             logger.error(f"Failed to record review for task {decision.task_id}: {exc}")
@@ -595,7 +602,7 @@ class BranchIntegrator:
     async def _mark_task_blocked(self, task_id: str, reason: str = "") -> None:
         try:
             owner = await self._task_owner(task_id)
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+            async with self._open_bus(10.0) as client:
                 await client.post(f"/tasks/{task_id}/block", json={"reason": reason, "agent_id": owner})
         except Exception as exc:
             logger.error(f"Failed to mark task {task_id} blocked: {exc}")
@@ -605,7 +612,7 @@ class BranchIntegrator:
     ) -> None:
         """Sends a high-priority feedback message to author on the bus with Gatekeeper evidence."""
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+            async with self._open_bus(10.0) as client:
                 # Ensure task stays in_progress and assigned to author
                 await client.post(f"/tasks/{task_id}/reassign", json={"new_owner": author_agent})
 
