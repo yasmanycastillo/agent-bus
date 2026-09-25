@@ -181,7 +181,7 @@ def advance_once(client, instance: str, workspace: Path, agents: list[str], *, r
     return _ok(client.post("/workflows/advance", json=body), allowed=(200, 409))
 
 
-def drive_run(client, answers: dict, *, repo: Path, ask) -> dict:
+def drive_run(client, answers: dict, *, repo: Path, ask, verdict_client=None) -> dict:
     """Registra, compila y avanza. ask devuelve (approve|changes_requested, motivo)."""
     workspace, branch = ensure_worktree(repo, answers["implementer"])
     agents = [answers["implementer"], answers["reviewer"]]
@@ -203,7 +203,7 @@ def drive_run(client, answers: dict, *, repo: Path, ask) -> dict:
             continue
         if status in ("waiting_for_integration", "waiting_for_review"):
             verdict, reason = ask()
-            _ok(client.post(f"/tasks/{review_id}/verdict", json={
+            _ok((verdict_client or client).post(f"/tasks/{review_id}/verdict", json={
                 "agent_id": answers["reviewer"], "verdict": verdict, "reason": reason,
             }))
             if verdict != "approve":
@@ -245,16 +245,47 @@ def git_root(start: Path | None = None) -> Path:
     return Path(result.stdout.strip())
 
 
+def ensure_session(agent_id: str, role: str = "agent") -> None:
+    """Crea la credencial local si no existe. No pide que elijas un agente antes."""
+    from agent_bus.cli.auth_cmds import create
+    from agent_bus.config import get_config_dir
+    from agent_bus.security import AuthenticationError, load_session
+
+    path = get_config_dir() / "credentials" / f"{agent_id}.json"
+    if not path.exists():
+        create.callback(agent=agent_id, provider=None, role=role, ttl=86400, output=None, quiet=True, show_token=False)
+    try:
+        load_session(agent_id, session_file=path)
+    except AuthenticationError as exc:
+        raise click.ClickException(
+            f"La sesión de {agent_id} no sirve ({exc}). Borra {path} y vuelve a correr."
+        ) from exc
+
+
+def _session_client(agent_id: str, timeout: float):
+    from agent_bus.config import get_bus_url
+    from agent_bus.security import load_session, sync_bus_client
+
+    return sync_bus_client(
+        agent_id, session=load_session(agent_id), base_url=get_bus_url(), timeout=timeout,
+    )
+
+
 def run_interactive() -> None:
     from urllib.parse import urlsplit
 
-    from agent_bus.cli.main import _client, _start_daemon
+    from agent_bus.cli.main import _start_daemon
     from agent_bus.config import get_bus_url
+    from agent_bus.project import init_project
 
     repo = git_root()
     answers = collect_answers(click.prompt, click.confirm)
+    init_project(repo)
+    ensure_session("operator", role="admin")
+    ensure_session(answers["implementer"])
+    ensure_session(answers["reviewer"])
     endpoint = urlsplit(get_bus_url())
-    with _client() as client:
+    with _session_client("operator", 3600) as client, _session_client(answers["reviewer"], 60) as reviewer:
         try:
             client.get("/health").raise_for_status()
         except Exception:
@@ -282,7 +313,7 @@ def run_interactive() -> None:
                 return "approve", "aprobado"
             return "changes_requested", click.prompt("Qué hay que cambiar")
 
-        drive_run(client, answers, repo=repo, ask=ask)
+        drive_run(client, answers, repo=repo, ask=ask, verdict_client=reviewer)
     click.echo("Corrida integrada")
 
 
