@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import aiosqlite
 import secrets
+import sqlite3
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -213,10 +214,13 @@ class Database:
         self._connection: aiosqlite.Connection | None = None
 
     async def initialize(self) -> None:
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        path = Path(self.db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = await aiosqlite.connect(self.db_path)
         self._connection.row_factory = aiosqlite.Row
+        snapshot = Path(str(path) + ".migration-snapshot")
         try:
+            await self._write_snapshot(snapshot)
             await self._connection.executescript(SCHEMA)
             if self.project_id is not None:
                 await self.bind_project(self.project_id)
@@ -233,7 +237,30 @@ class Database:
             await self._migrate_runtime_registry()
         except BaseException:
             await self.close()
+            self._restore_snapshot(snapshot)
             raise
+        else:
+            snapshot.unlink(missing_ok=True)
+
+    async def _write_snapshot(self, snapshot: Path) -> None:
+        def copy(connection: sqlite3.Connection) -> None:
+            if snapshot.exists():
+                snapshot.unlink()
+            target = sqlite3.connect(snapshot)
+            try:
+                connection.backup(target)
+            finally:
+                target.close()
+
+        await self.conn._execute(copy, self.conn._conn)
+
+    def _restore_snapshot(self, snapshot: Path) -> None:
+        if not snapshot.exists():
+            return
+        path = Path(self.db_path)
+        for suffix in ("-wal", "-shm"):
+            Path(str(path) + suffix).unlink(missing_ok=True)
+        snapshot.replace(path)
 
     async def bind_project(self, project_id: str) -> None:
         """Adopt an unbound legacy database once, or verify its durable owner.
