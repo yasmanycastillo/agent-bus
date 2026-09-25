@@ -2,6 +2,14 @@
 
 from agent_bus.runtimes.external import ExternalCommandRuntime
 from agent_bus.runtimes.native import NativeRuntime
+from agent_bus.runtimes.openhands import OpenHandsRuntime
 from agent_bus.runtimes.protocol import AgentRuntime, RuntimeSession, RuntimeStartRequest
 
-__all__ = ["AgentRuntime", "ExternalCommandRuntime", "NativeRuntime", "RuntimeSession", "RuntimeStartRequest"]
+__all__ = [
+    "AgentRuntime",
+    "ExternalCommandRuntime",
+    "NativeRuntime",
+    "OpenHandsRuntime",
+    "RuntimeSession",
+    "RuntimeStartRequest",
+]
