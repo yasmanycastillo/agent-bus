@@ -87,3 +87,63 @@ async def test_strict_policy_blocks_when_the_author_claims_completion(tmp_path, 
     assert merged.success, merged.error
     assert git(repo, "rev-parse", "HEAD^2") == candidate
     await db.close()
+
+
+def _repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-b", "main")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "config", "user.email", "test@example.invalid")
+    (repo / "base").write_text("base")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "base")
+    work = tmp_path / "worker"
+    git(repo, "worktree", "add", "-b", "agent/alice", str(work))
+    (work / "feature").write_text("reviewed")
+    git(work, "add", ".")
+    git(work, "commit", "-m", "feature")
+    return repo, work
+
+
+@pytest.mark.asyncio
+async def test_unreachable_evidence_policy_does_not_merge(tmp_path):
+    repo, work = _repo(tmp_path)
+    baseline = git(repo, "rev-parse", "HEAD")
+    integrator = BranchIntegrator(repo_dir=repo, bus_url="http://127.0.0.1:9", require_approval=True)
+    integrator.run_tests = AsyncMock(return_value=(True, "tests passed"))
+    blocked = await integrator.integrate_task("T-down", "alice", work, "agent/alice")
+    assert blocked.success is False
+    assert blocked.merged is False
+    assert blocked.status == "blocked"
+    assert "evidence policy unavailable" in blocked.error
+    assert git(repo, "rev-parse", "HEAD") == baseline
+
+
+@pytest.mark.asyncio
+async def test_evidence_policy_http_error_does_not_merge(tmp_path):
+    repo, work = _repo(tmp_path)
+    baseline = git(repo, "rev-parse", "HEAD")
+
+    def factory(timeout):
+        def handler(request):
+            if request.url.path.endswith("/evidence-policy"):
+                return httpx.Response(503)
+            return httpx.Response(200, json={})
+
+        @asynccontextmanager
+        async def opener():
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler), base_url="http://bus.local", timeout=timeout,
+            ) as client:
+                yield client
+
+        return opener()
+
+    integrator = BranchIntegrator(repo_dir=repo, require_approval=True, client_factory=factory)
+    integrator.run_tests = AsyncMock(return_value=(True, "tests passed"))
+    blocked = await integrator.integrate_task("T-503", "alice", work, "agent/alice")
+    assert blocked.success is False
+    assert blocked.merged is False
+    assert "evidence policy unavailable (503)" in blocked.error
+    assert git(repo, "rev-parse", "HEAD") == baseline

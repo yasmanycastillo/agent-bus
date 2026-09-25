@@ -114,5 +114,8 @@ def isolated_git_policy(monkeypatch):
         return None
     async def snapshot(*args):
         return {"sha": "a" * 40, "target_sha": "b" * 40}
+    async def no_strict_policy(*args, **kwargs):
+        return None
     monkeypatch.setattr(BranchIntegrator, "_preflight", preflight)
     monkeypatch.setattr(BranchIntegrator, "_snapshot", snapshot)
+    monkeypatch.setattr(BranchIntegrator, "_evidence_gap", no_strict_policy)

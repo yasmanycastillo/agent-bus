@@ -1,10 +1,28 @@
 """Real Git acceptance: integrate only the candidate that passed validation."""
 import subprocess
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from agent_bus.worker.integrator import BranchIntegrator
+
+
+def policy_free_client(timeout):
+    def handler(request):
+        if request.url.path.endswith("/evidence-policy"):
+            return httpx.Response(404)
+        return httpx.Response(200, json={})
+
+    @asynccontextmanager
+    async def opener():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://bus.local", timeout=timeout,
+        ) as client:
+            yield client
+
+    return opener()
 
 
 def git(path, *args):
@@ -28,7 +46,7 @@ async def candidate(tmp_path):
     (wt / 'feature').write_text('reviewed')
     git(wt, 'add', '.')
     git(wt, 'commit', '-m', 'feature')
-    integrator = BranchIntegrator(repo_dir=repo)
+    integrator = BranchIntegrator(repo_dir=repo, client_factory=policy_free_client)
     integrator.run_tests = AsyncMock(return_value=(True, 'tests passed'))
     integrator._record_review = AsyncMock()
     integrator._mark_task_completed = AsyncMock()

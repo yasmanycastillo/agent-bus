@@ -589,8 +589,8 @@ class BranchIntegrator:
                 if not body.get("ok"):
                     return body.get("error") or "required evidence is missing"
                 return None
-        except Exception:
-            return None
+        except Exception as exc:
+            return f"evidence policy unavailable: {type(exc).__name__}"
 
     async def _record_review(self, decision: ReviewDecision) -> None:
         try:
