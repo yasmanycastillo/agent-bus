@@ -224,6 +224,18 @@ def _uninstall_hermes_server(config_path: Path, server_name: str, *, dry_run: bo
     return removed
 
 
+def mcp_tool_names() -> list[str]:
+    from agent_bus.mcp.coordination import TOOLS as facade_tools
+    from agent_bus.mcp.server import TOOLS_DEFINITIONS
+
+    names: list[str] = []
+    for tool in [*TOOLS_DEFINITIONS, *facade_tools]:
+        name = tool["name"]
+        if name not in names:
+            names.append(name)
+    return names
+
+
 def _codex_block(name: str, server_cfg: dict[str, Any]) -> str:
     args = ", ".join(json.dumps(arg) for arg in server_cfg["args"])
     lines = [
@@ -243,6 +255,7 @@ def _install_codex_server(
 ) -> bool:
     text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     updated, existed = _splice_codex_server(text, server_name, _codex_block(server_name, server_cfg))
+    updated = _ensure_codex_tool_approvals(updated, server_name, mcp_tool_names())
     if not dry_run:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(updated, encoding="utf-8")
@@ -253,10 +266,19 @@ def _uninstall_codex_server(config_path: Path, server_name: str, *, dry_run: boo
     if not config_path.exists():
         return False
     text = config_path.read_text(encoding="utf-8")
-    updated, removed = _splice_codex_server(text, server_name, "")
+    updated, removed_server = _splice_codex_server(text, server_name, "")
+    updated, removed_tools = _remove_codex_tool_tables(updated, server_name)
+    removed = removed_server or removed_tools
     if removed and not dry_run:
         config_path.write_text(updated, encoding="utf-8")
     return removed
+
+
+def _toml_header(line: str) -> str:
+    stripped = line.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return stripped[1:-1]
+    return ""
 
 
 def _codex_table_span(lines: list[str], start: int) -> int:
@@ -272,13 +294,13 @@ def _codex_table_span(lines: list[str], start: int) -> int:
 def _splice_codex_server(text: str, server_name: str, block: str) -> tuple[str, bool]:
     """Replace the Codex server table and drop a pinned env table. Leave every other line."""
     lines = text.splitlines(keepends=True)
-    header = f"[mcp_servers.{server_name}]"
-    env_header = f"[mcp_servers.{server_name}.env]"
+    header = f"mcp_servers.{server_name}"
+    env_header = f"mcp_servers.{server_name}.env"
     spans: list[tuple[int, int]] = []
     index = 0
     while index < len(lines):
         line = lines[index]
-        if line.startswith(header) or line.startswith(env_header):
+        if _toml_header(line) in {header, env_header}:
             end = _codex_table_span(lines, index)
             spans.append((index, end))
             index = end
@@ -305,6 +327,50 @@ def _splice_codex_server(text: str, server_name: str, block: str) -> tuple[str, 
         rebuilt.append(lines[index])
         index += 1
     return "".join(rebuilt), True
+
+
+def _ensure_codex_tool_approvals(text: str, server_name: str, names: list[str]) -> str:
+    """Add approval_mode = approve for each catalog tool. Keep existing tool tables."""
+    lines = text.splitlines(keepends=True)
+    prefix = f"mcp_servers.{server_name}.tools."
+    present: set[str] = set()
+    inserts: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        header = _toml_header(line)
+        if not header.startswith(prefix):
+            continue
+        tool = header[len(prefix):]
+        present.add(tool)
+        end = _codex_table_span(lines, index)
+        if not any("approval_mode" in lines[cursor] for cursor in range(index + 1, end)):
+            inserts.append((end, 'approval_mode = "approve"\n'))
+    for end, row in reversed(inserts):
+        lines.insert(end, row)
+    missing = [name for name in names if name not in present]
+    if missing:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] = lines[-1] + "\n"
+        for name in missing:
+            lines.append(f"\n[mcp_servers.{server_name}.tools.{name}]\napproval_mode = \"approve\"\n")
+    return "".join(lines)
+
+
+def _remove_codex_tool_tables(text: str, server_name: str) -> tuple[str, bool]:
+    lines = text.splitlines(keepends=True)
+    prefix = f"mcp_servers.{server_name}.tools."
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        if _toml_header(lines[index]).startswith(prefix):
+            end = _codex_table_span(lines, index)
+            spans.append((index, end))
+            index = end
+            continue
+        index += 1
+    if not spans:
+        return text, False
+    skip = {line_no for start, end in spans for line_no in range(start, end)}
+    return "".join(line for index, line in enumerate(lines) if index not in skip), True
 
 
 def _splice_hermes_server(text: str, server_name: str, block: str) -> tuple[str, bool]:

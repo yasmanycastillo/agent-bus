@@ -166,6 +166,9 @@ def test_codex_install_keeps_the_rest_of_the_config(tmp_path, monkeypatch):
         "[mcp_servers.agent-bus.env]\n"
         "AGENT_BUS_URL = \"http://localhost:8420\"\n"
         "\n"
+        "[mcp_servers.agent-bus.tools.bootstrap_agent]\n"
+        "approval_mode = \"approve\"\n"
+        "\n"
         "# tail comment\n"
         "[hooks.state]\n"
         "ok = true\n",
@@ -182,7 +185,9 @@ def test_codex_install_keeps_the_rest_of_the_config(tmp_path, monkeypatch):
     assert "[mcp_servers.other]" in text
     assert "[hooks.state]" in text
     assert "http://localhost:8420" not in text
-    assert text.count("[mcp_servers.agent-bus]") == 1
+    assert sum(1 for line in text.splitlines() if line.strip() == "[mcp_servers.agent-bus]") == 1
+    assert text.count("[mcp_servers.agent-bus.tools.bootstrap_agent]") == 1
+    assert '[mcp_servers.agent-bus.tools.claim_task]\napproval_mode = "approve"' in text
     assert "command = \"agent-bus\"" in text
 
     removed_path, removed = uninstall_mcp_config("codex", scope="global")
