@@ -652,7 +652,7 @@ Replace any one provider with another agent exposing the same capabilities witho
 ## V2 Stable
 
 - workspace abstraction,
-- external sandbox runtime,
+- external sandbox runtime (not closed; see Immediate Next Sprint),
 - hardened migrations,
 - operator documentation,
 - compatibility tests across multiple agent clients.
@@ -677,13 +677,13 @@ Replace any one provider with another agent exposing the same capabilities witho
 
 # Immediate Next Sprint
 
-Phases 1–10 and the feature-development integration loop are on `main`
-(`8f5d098`). Phase 1 is not the next sprint. The work that remains is the
-V2 Stable remainder below. This line still does not add an Orca adapter, put
-OpenHands in the runtime registry, or become a terminal UI.
+Phases 1–10, the feature-development loop, hardened migrations, and the
+operator guide are on `main` (`1816faa`). There is no Phase 1 sprint left.
+This line still does not add an Orca adapter or become a terminal UI.
 
 The executable Phase -1 checks for this host stay in
-[the spike](docs/spikes/2026-09-23-phase-minus-one.md).
+[the spike](docs/spikes/2026-09-23-phase-minus-one.md). Operator steps are in
+[docs/workflows.md](docs/workflows.md).
 
 Landed on `main`:
 
@@ -700,14 +700,37 @@ Landed on `main`:
 - an unreadable evidence policy does not merge
 - a green merge marks the integration task `done`; a later call does not merge that candidate again
 - the same `feature-development` definition reaches `done` with two external implementation providers (`tests/integration/test_workflow_two_providers.py`)
+- a native agent reaches `done` on that same definition (`tests/integration/test_workflow_native.py`): `advance` leaves the attempt started, and the worker marks discovery, design, and implementation `done`
+- a legacy database keeps its tasks, messages, and reviews while gaining `requirements`, `independent_from`, and `blocked_reason`; a failed `initialize` restores the snapshot from the start of that attempt
 
-OpenHands remains a runtime class behind an adapter. The router still selects only `native` and `external`. Orca stays out.
+Orca stays out. `RuntimeRegistry` still accepts only `native` and `external`.
 
-### Still open
+### External sandbox runtime
 
-The V2 Stable items tracked in this section are on `main`. Operator steps are in [docs/workflows.md](docs/workflows.md). A native agent completes `feature-development` through `done` in `tests/integration/test_workflow_native.py`: `advance` leaves the native attempt started, and the worker marks discovery, design, and implementation `done`. Review stays with another agent. OpenHands is still not a routed runtime, and Orca stays out.
+This is the V2 Stable criterion that is not closed. `OpenHandsRuntime` is a
+class with an injected sandbox. It is not a routed runtime. The 2026-09-24
+spike measured a local Docker workspace and a kind `AgentSandboxWorkspace`
+smoke (image `ghcr.io/openhands/agent-server:1.49.5-python`); the kind cluster
+was deleted afterward. `OpenHandsCloudWorkspace` and `APIRemoteWorkspace`
+fail closed without `cloud_api_url`/`cloud_api_key` or
+`runtime_api_url`/`runtime_api_key`/`server_image`. The bus keeps the task,
+the review, and the candidate SHA.
 
-A legacy database gains `requirements`, `independent_from`, and `blocked_reason` without dropping tasks, inbox messages, or reviews. If `initialize` fails halfway, it restores the snapshot taken at the start of that attempt.
+Closing it requires all of the following:
+
+1. `advance` can launch a third runtime only through an injected sandbox
+   opener. Importing OpenHands stays lazy, on first start. Missing cloud or
+   remote API credentials still fail closed and do not open a socket.
+2. The same `feature-development` definition reaches `done` when
+   implementation runs inside that sandbox. The candidate SHA is the sandbox
+   checkout. An independent reviewer, who is not `openhands-runtime` and not
+   the implementer, approves that SHA. `finish` may record a Gatekeeper row
+   under `openhands-runtime`; that row does not authorize the merge.
+3. Integration runs the implementation `test_cmd`. `main`'s second parent is
+   the sandbox candidate. A second advance does not merge it again.
+4. An `unknown` attempt is reconciled before another start. The suite uses a
+   fake sandbox or the local Docker opener. It does not require a paid cloud
+   key or a standing kind cluster.
 
 The evaluation record:
 
