@@ -28,6 +28,13 @@ IMPLEMENTER_PRESET = (
     "python",
 )
 REVIEWER_PRESET = ("code-review",)
+STEP_PLAIN = {
+    "discovery": "Está mirando el repositorio para contar qué hay.",
+    "design": "Está proponiendo cómo hacer el cambio.",
+    "implementation": "Está escribiendo el código. El resultado tiene que ser un commit.",
+    "review": "El revisor está mirando ese commit. No escribe código.",
+    "integration": "Está corriendo el test. Si pasa, une el commit a main.",
+}
 IMPLEMENTER_REQUIRED = ("repository-analysis", "long-context", "architecture", "implementation", "tests")
 CAPABILITY_HELP = {
     "repository-analysis": "leer el repositorio y decir qué hay",
@@ -130,15 +137,19 @@ version: 1
 steps:
   - id: discovery
     requires: [repository-analysis, long-context]
+    summary: Mira este repositorio y resume qué hay. No cambies código.
   - id: design
     requires: [architecture]
     depends_on: [discovery]
+    summary: Propón cómo hacer el cambio. No lo implementes todavía.
   - id: implementation
     requires: [implementation, tests]
-    depends_on: [design]{rendered}
+    depends_on: [design]
+    summary: Escribe el cambio en este repositorio y haz un commit. No revises tu propio cambio.{rendered}
   - id: review
     requires: [code-review]
     depends_on: [implementation]
+    summary: Revisa el commit del implementador. No escribas código.
     policy:
       independent_from: [implementation]
   - id: integration
@@ -225,9 +236,11 @@ def drive_run(client, answers: dict, *, repo: Path, ask, verdict_client=None) ->
     }))
     _release_stale_steps(client, agents)
     click.echo(f"Tareas: {', '.join(task['task_id'] for task in compiled.get('tasks') or [])}")
+    click.echo(f"El código se escribe en {workspace}")
     review_id = f"feature-development-{answers['instance']}-review"
     for _ in range(20):
-        click.echo("Siguiente paso. El programa trabaja solo y puede tardar.")
+        step = _next_pending_step(client, answers["instance"])
+        click.echo(STEP_PLAIN.get(step, "Siguiente paso.") + " Puede tardar.")
         result = advance_once(client, answers["instance"], workspace, agents, repo=None, branch=None, timeout=1800)
         status = result.get("status")
         click.echo(f"Avance: {status} {result.get('task_id', '')} {result.get('task_status', '')}".strip())
@@ -263,6 +276,16 @@ def drive_run(client, answers: dict, *, repo: Path, ask, verdict_client=None) ->
         if result.get("error"):
             raise click.ClickException(result["error"])
     raise click.ClickException("La corrida no terminó")
+
+
+def _next_pending_step(client, instance: str) -> str | None:
+    listed = _ok(client.get("/tasks"))
+    prefix = f"feature-development-{instance}-"
+    pending = {task["task_id"] for task in listed if task.get("status") == "pending"}
+    for step in ("discovery", "design", "implementation", "review", "integration"):
+        if prefix + step in pending:
+            return step
+    return None
 
 
 def _release_stale_steps(client, agents: list[str]) -> None:

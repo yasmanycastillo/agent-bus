@@ -116,6 +116,9 @@ def compile_tasks(document: dict[str, Any], instance_id: str) -> list[dict[str, 
         description = f"workflow {document['workflow']} instance {instance_id} step {step['id']}"
         if step["independent_from"]:
             description += f"; independent_from {', '.join(step['independent_from'])}"
+        summary = step.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            description += f". {summary.strip()}"
         tasks.append({
             "task_id": task_id,
             "title": step["id"],
