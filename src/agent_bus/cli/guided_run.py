@@ -304,11 +304,69 @@ def _session_client(agent_id: str, timeout: float):
     )
 
 
-def run_interactive() -> None:
+def _probe_health(url: str) -> dict | None:
+    import httpx
+
+    try:
+        response = httpx.get(url.rstrip("/") + "/health", timeout=2)
+    except httpx.HTTPError:
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def ensure_project_hub(url: str, project_id: str, *, probe, start, free_port, echo, wait) -> str:
+    """Use this project's hub. If the port belongs to another project, start one on a free port."""
+    if (probe(url) or {}).get("project_id") == project_id:
+        return url
+    host, port = _host_port(url)
+    if probe(url) is None:
+        start(host, port)
+        if wait(url, project_id):
+            return url
+    new_port = free_port()
+    new_url = f"http://{host}:{new_port}"
+    echo(f"El puerto {port} ya lo usa otro proyecto. Este hub queda en {new_url}")
+    start(host, new_port)
+    if not wait(new_url, project_id):
+        raise click.ClickException(f"El hub no quedó listo en {new_url}. Revisa el log del bus.")
+    return new_url
+
+
+def _host_port(url: str) -> tuple[str, int]:
     from urllib.parse import urlsplit
 
+    parsed = urlsplit(url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return host, port
+
+
+def _remember_bus_url(repo: Path, url: str) -> None:
+    import yaml
+
+    path = repo / ".agent-bus" / "config.yaml"
+    data = yaml.safe_load(path.read_text()) or {}
+    data["bus_url"] = url
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def run_interactive() -> None:
     from agent_bus.cli.main import _start_daemon
-    from agent_bus.config import get_bus_url
+    from agent_bus.config import get_bus_url, load_config
     from agent_bus.project import init_project
 
     repo = git_root()
@@ -317,24 +375,21 @@ def run_interactive() -> None:
     ensure_session("operator", role="admin")
     ensure_session(answers["implementer"])
     ensure_session(answers["reviewer"])
-    endpoint = urlsplit(get_bus_url())
+
+    def wait(url: str, project_id: str) -> bool:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if (_probe_health(url) or {}).get("project_id") == project_id:
+                return True
+            time.sleep(0.2)
+        return False
+
+    url = ensure_project_hub(
+        get_bus_url(), load_config().bus.project_id,
+        probe=_probe_health, start=_start_daemon, free_port=_free_port, echo=click.echo, wait=wait,
+    )
+    _remember_bus_url(repo, url)
     with _session_client("operator", 3600) as client, _session_client(answers["reviewer"], 60) as reviewer:
-        try:
-            client.get("/health").raise_for_status()
-        except Exception:
-            host = endpoint.hostname or "127.0.0.1"
-            if host not in ("127.0.0.1", "localhost", "::1"):
-                raise click.ClickException("El hub no responde. Arranca el servidor de este proyecto.") from None
-            _start_daemon(host, endpoint.port or 80)
-            deadline = time.monotonic() + 5
-            while True:
-                try:
-                    client.get("/health").raise_for_status()
-                    break
-                except Exception:
-                    if time.monotonic() > deadline:
-                        raise click.ClickException("El hub no arrancó") from None
-                    time.sleep(0.2)
         if answers["impl_runtime"] == "native":
             _start_worker(answers["implementer"], repo / ".worktrees" / answers["implementer"])
         if answers["review_runtime"] == "native":

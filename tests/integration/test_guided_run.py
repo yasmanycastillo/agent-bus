@@ -7,7 +7,7 @@ import httpx
 import pytest
 from httpx import ASGITransport
 
-from agent_bus.cli.guided_run import collect_answers, drive_run
+from agent_bus.cli.guided_run import collect_answers, drive_run, ensure_project_hub
 from agent_bus.core.bus import MessageBus
 from agent_bus.core.inbox import InboxManager
 from agent_bus.core.registry import AgentRegistry
@@ -19,6 +19,25 @@ def git(path, *args):
     result = subprocess.run(["git", *args], cwd=path, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
+
+
+def test_another_project_on_the_port_gets_its_own_hub():
+    started = []
+
+    def probe(url):
+        if url.endswith(":8420"):
+            return {"project_id": "other"}
+        if url.endswith(":8500"):
+            return {"project_id": "mine"}
+        return None
+
+    url = ensure_project_hub(
+        "http://127.0.0.1:8420", "mine",
+        probe=probe, start=lambda host, port: started.append(port), free_port=lambda: 8500,
+        echo=lambda text: None, wait=lambda url, project_id: (probe(url) or {}).get("project_id") == project_id,
+    )
+    assert url == "http://127.0.0.1:8500"
+    assert started == [8500]
 
 
 def test_prompts_keep_reviewer_apart():
