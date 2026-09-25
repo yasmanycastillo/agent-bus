@@ -1,4 +1,4 @@
-"""Unit tests for agent-bus MCP installer across codex, gemini, claude, cursor, grok."""
+"""Unit tests for the agent-bus MCP installer across supported clients."""
 from __future__ import annotations
 
 import json
@@ -19,7 +19,7 @@ from agent_bus.mcp.installer import (
 
 
 def test_supported_clients_list():
-    assert set(SUPPORTED_CLIENTS) == {"codex", "gemini", "claude", "cursor", "grok"}
+    assert set(SUPPORTED_CLIENTS) == {"codex", "gemini", "claude", "cursor", "grok", "hermes", "agy"}
     for client in SUPPORTED_CLIENTS:
         assert client in DEFAULT_CLIENT_AGENTS
 
@@ -51,6 +51,8 @@ def test_get_mcp_config_path_global(monkeypatch, tmp_path):
 
     grok_path = get_mcp_config_path("grok", scope="global")
     assert grok_path == fake_home / ".grok" / "mcp.json"
+    assert get_mcp_config_path("hermes", scope="global") == fake_home / ".hermes" / "config.yaml"
+    assert get_mcp_config_path("agy", scope="global") == fake_home / ".gemini" / "antigravity-cli" / "mcp_config.json"
 
 
 def test_get_mcp_config_path_errors():
@@ -101,6 +103,62 @@ def test_install_mcp_config_clean_and_merge(tmp_path):
     assert updated_data["mcpServers"]["agent-bus"]["args"] == [
         "mcp-server", "--agent", "bob", "--bus-url", "http://127.0.0.1:8420"
     ]
+
+
+def test_hermes_install_keeps_the_rest_of_the_config(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    config = fake_home / ".hermes" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "model: demo\n"
+        "# keep this comment\n"
+        "mcp_servers:\n"
+        "  agent-bus:\n"
+        "    command: /old/agent-bus\n"
+        "    args:\n"
+        "      - mcp-server\n"
+        "    env:\n"
+        "      AGENT_BUS_URL: http://localhost:8420\n"
+        "    enabled: true\n"
+        "  codebase-memory-mcp:\n"
+        "    command: echo\n"
+        "model_aliases:\n"
+        "  demo:\n"
+        "    model: zai/glm\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    path, cfg, existed = install_mcp_config("hermes", scope="global", bus_url="http://127.0.0.1:9")
+    text = path.read_text(encoding="utf-8")
+    assert existed
+    assert cfg["args"][-2:] == ["--bus-url", "http://127.0.0.1:9"]
+    assert "# keep this comment" in text
+    assert "codebase-memory-mcp:" in text
+    assert "model_aliases:" in text
+    assert "http://localhost:8420" not in text
+    assert text.count("  agent-bus:") == 1
+    assert "http://127.0.0.1:9" in text
+
+    removed_path, removed = uninstall_mcp_config("hermes", scope="global")
+    removed_text = removed_path.read_text(encoding="utf-8")
+    assert removed
+    assert "  agent-bus:" not in removed_text
+    assert "codebase-memory-mcp:" in removed_text
+    assert "# keep this comment" in removed_text
+
+
+def test_agy_install_merges_mcp_servers(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    config = fake_home / ".gemini" / "antigravity-cli" / "mcp_config.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"mcpServers": {"agent-comms": {"command": "agent-comms"}}}), encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    path, cfg, existed = install_mcp_config("agy", agent_id="agy", scope="global")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert not existed
+    assert cfg["args"] == ["mcp-server", "--agent", "agy"]
+    assert data["mcpServers"]["agent-comms"]["command"] == "agent-comms"
+    assert data["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "agy"]
 
 
 def test_install_mcp_config_dry_run(tmp_path):
@@ -172,3 +230,16 @@ def test_cli_mcp_commands(tmp_path, monkeypatch):
     res_err = runner.invoke(app, ["mcp", "install", "--client", "badclient"])
     assert res_err.exit_code != 0
     assert "Cliente(s) no soportado(s): badclient" in res_err.output
+    assert "hermes" in res_err.output
+    assert "agy" in res_err.output
+
+    res_hermes = runner.invoke(app, ["mcp", "install", "--client", "hermes", "--agent", "hermes"])
+    assert res_hermes.exit_code == 0, res_hermes.output
+    hermes_text = (tmp_path / ".hermes" / "config.yaml").read_text(encoding="utf-8")
+    assert "mcp_servers:" in hermes_text
+    assert "hermes" in hermes_text
+
+    res_agy = runner.invoke(app, ["mcp", "install", "--client", "agy", "--agent", "agy"])
+    assert res_agy.exit_code == 0, res_agy.output
+    agy_data = json.loads((tmp_path / ".gemini" / "mcp_config.json").read_text(encoding="utf-8"))
+    assert agy_data["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "agy"]

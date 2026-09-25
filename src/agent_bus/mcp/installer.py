@@ -9,7 +9,7 @@ from typing import Any
 
 from agent_bus.project import resolve_project_root
 
-SUPPORTED_CLIENTS: tuple[str, ...] = ("codex", "gemini", "claude", "cursor", "grok")
+SUPPORTED_CLIENTS: tuple[str, ...] = ("codex", "gemini", "claude", "cursor", "grok", "hermes", "agy")
 
 DEFAULT_CLIENT_AGENTS: dict[str, str] = {
     "codex": "codex",
@@ -17,6 +17,8 @@ DEFAULT_CLIENT_AGENTS: dict[str, str] = {
     "claude": "claude",
     "cursor": "cursor",
     "grok": "grok",
+    "hermes": "hermes",
+    "agy": "agy",
 }
 
 
@@ -44,6 +46,10 @@ def get_mcp_config_path(
             return root / ".codex" / "mcp.json"
         elif client == "grok":
             return root / ".grok" / "mcp.json"
+        elif client == "hermes":
+            return root / ".hermes" / "config.yaml"
+        elif client == "agy":
+            return root / ".gemini" / "mcp_config.json"
 
     elif scope == "global":
         if client == "cursor":
@@ -64,6 +70,10 @@ def get_mcp_config_path(
             return home / ".codex" / "mcp.json"
         elif client == "grok":
             return home / ".grok" / "mcp.json"
+        elif client == "hermes":
+            return home / ".hermes" / "config.yaml"
+        elif client == "agy":
+            return home / ".gemini" / "antigravity-cli" / "mcp_config.json"
 
     raise ValueError(f"Invalid scope '{scope}'. Must be 'project' or 'global'.")
 
@@ -106,6 +116,9 @@ def install_mcp_config(
     config_path = get_mcp_config_path(client, scope=scope, project_root=project_root)
     resolved_agent = agent_id or DEFAULT_CLIENT_AGENTS.get(client, "agent")
     server_cfg = build_mcp_server_config(resolved_agent, command=command, bus_url=bus_url, env=env)
+    if client == "hermes":
+        existed = _install_hermes_server(config_path, server_name, server_cfg, dry_run=dry_run)
+        return config_path, server_cfg, existed
 
     data: dict[str, Any] = {}
     already_existed = False
@@ -147,6 +160,8 @@ def uninstall_mcp_config(
         (config_path, was_removed)
     """
     config_path = get_mcp_config_path(client, scope=scope, project_root=project_root)
+    if client == "hermes":
+        return config_path, _uninstall_hermes_server(config_path, server_name, dry_run=dry_run)
     if not config_path.exists():
         return config_path, False
 
@@ -163,3 +178,62 @@ def uninstall_mcp_config(
             return config_path, True
 
     return config_path, False
+
+
+def _hermes_block(name: str, server_cfg: dict[str, Any]) -> str:
+    lines = [f"  {name}:", f"    command: {json.dumps(server_cfg['command'])}", "    args:"]
+    lines.extend(f"      - {json.dumps(arg)}" for arg in server_cfg["args"])
+    env = server_cfg.get("env") or {}
+    if env:
+        lines.append("    env:")
+        lines.extend(f"      {key}: {json.dumps(value)}" for key, value in env.items())
+    lines.append("    enabled: true")
+    return "\n".join(lines) + "\n"
+
+
+def _install_hermes_server(
+    config_path: Path,
+    server_name: str,
+    server_cfg: dict[str, Any],
+    *,
+    dry_run: bool,
+) -> bool:
+    text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    block = _hermes_block(server_name, server_cfg)
+    updated, existed = _splice_hermes_server(text, server_name, block)
+    if not dry_run:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(updated, encoding="utf-8")
+    return existed
+
+
+def _uninstall_hermes_server(config_path: Path, server_name: str, *, dry_run: bool) -> bool:
+    if not config_path.exists():
+        return False
+    text = config_path.read_text(encoding="utf-8")
+    updated, removed = _splice_hermes_server(text, server_name, "")
+    if removed and not dry_run:
+        config_path.write_text(updated, encoding="utf-8")
+    return removed
+
+
+def _splice_hermes_server(text: str, server_name: str, block: str) -> tuple[str, bool]:
+    lines = text.splitlines(keepends=True)
+    key = f"  {server_name}:"
+    start = next((index for index, line in enumerate(lines) if line.startswith(key)), None)
+    if start is not None:
+        end = start + 1
+        while end < len(lines):
+            line = lines[end]
+            if line.strip() and not line.startswith("    "):
+                break
+            end += 1
+        replacement = [block] if block else []
+        return "".join(lines[:start] + replacement + lines[end:]), True
+    if not block:
+        return text, False
+    header = next((index for index, line in enumerate(lines) if line.startswith("mcp_servers:")), None)
+    if header is None:
+        suffix = "" if not text or text.endswith("\n") else "\n"
+        return text + suffix + "mcp_servers:\n" + block, False
+    return "".join(lines[: header + 1] + [block] + lines[header + 1 :]), False

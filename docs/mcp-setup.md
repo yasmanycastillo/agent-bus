@@ -24,20 +24,21 @@ no contiene el token. Conserva el entorno Python al que apunta. El comando
 Puedes configurar directamente tus clientes sin copiar ni editar JSON manualmente:
 
 ```sh
-# Instalar en Cursor, Claude, Gemini, Codex y Grok a la vez:
+# Instalar en Cursor, Claude, Gemini, Codex, Grok, Hermes y AGY:
 agent-bus mcp install --client all
 
 # Instalar para un cliente o agente concreto:
 agent-bus mcp install --client cursor,claude --agent backend
 
-# Instalar en el ámbito global del usuario (~/.cursor, ~/.config/Claude, etc.):
-agent-bus mcp install --client gemini --global
+# Instalar en el ámbito global del usuario (~/.cursor, ~/.config/Claude, ~/.hermes, etc.):
+agent-bus mcp install --scope global --client agy --agent agy
+agent-bus mcp install --scope global --client hermes --agent hermes
 
 # Simular cambios sin escribir en disco:
 agent-bus mcp install --client all --dry-run
 ```
 
-La instalación realiza una combinación (*merge*) no destructiva conservando cualquier otro servidor MCP ya configurado.
+La instalación conserva los demás servidores MCP. AGY escribe en el JSON de Antigravity CLI (`~/.gemini/antigravity-cli/mcp_config.json` en ámbito global). Hermes escribe sólo el bloque `agent-bus` dentro de `mcp_servers` en `~/.hermes/config.yaml`, sin reescribir el resto del archivo. El ámbito global no fija un proyecto ni un puerto: cada proyecto sigue necesitando su propia credencial.
 
 Para una configuración manual, la forma del cliente JSON es:
 

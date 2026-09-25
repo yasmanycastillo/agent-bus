@@ -37,7 +37,7 @@ repositorio; no presupone que haya un paquete público disponible en PyPI.
 
 ### Configurar clientes MCP automáticamente
 
-Configura `agent-bus` directamente en los clientes soportados (**Cursor**, **Claude**, **Gemini / Antigravity**, **Codex**, **Grok**) sin editar archivos JSON a mano:
+Configura `agent-bus` directamente en los clientes soportados (**Cursor**, **Claude**, **Gemini / Antigravity**, **Codex**, **Grok**, **Hermes**, **AGY**) sin editar sus archivos a mano:
 
 ```sh
 # Instalar en todos los clientes en el proyecto actual:
@@ -46,8 +46,9 @@ agent-bus mcp install --client all
 # Instalar para un agente específico en clientes puntuales:
 agent-bus mcp install --client cursor,claude --agent hermes
 
-# Instalar a nivel global en la máquina del usuario (~/.cursor, ~/.config/Claude, ~/.gemini, etc.):
-agent-bus mcp install --client gemini --global
+# Instalar a nivel global (~/.cursor, ~/.config/Claude, ~/.gemini, ~/.hermes):
+agent-bus mcp install --scope global --client agy --agent agy
+agent-bus mcp install --scope global --client hermes --agent hermes
 
 # Simular qué archivos y configuraciones se tocarían sin modificarlos:
 agent-bus mcp install --client all --dry-run

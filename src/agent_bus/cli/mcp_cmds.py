@@ -11,6 +11,7 @@ from agent_bus.mcp.installer import (
     DEFAULT_CLIENT_AGENTS,
     SUPPORTED_CLIENTS,
     build_mcp_server_config,
+    get_mcp_config_path,
     install_mcp_config,
     uninstall_mcp_config,
 )
@@ -20,7 +21,7 @@ console = Console()
 
 @click.group(name="mcp", help="Configurar e instalar el servidor MCP de agent-bus en clientes IA.")
 def mcp():
-    """Gestión de configuración MCP en Codex, Gemini, Claude, Cursor, Grok."""
+    """Gestión de configuración MCP en Codex, Gemini, Claude, Cursor, Grok, Hermes y AGY."""
 
 
 def _resolve_clients(client_arg: str) -> list[str]:
@@ -76,7 +77,12 @@ def install(
     table.add_column("Estado", style="bold")
 
     success_count = 0
+    seen_paths: set[str] = set()
     for target_client in clients:
+        path_key = str(get_mcp_config_path(target_client, scope=effective_scope))
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
         target_agent = agent_id or DEFAULT_CLIENT_AGENTS.get(target_client, target_client)
         try:
             path, _, existed = install_mcp_config(
@@ -120,7 +126,12 @@ def uninstall(client: str, scope: str, is_global: bool, dry_run: bool):
     effective_scope = "global" if is_global else scope
     clients = _resolve_clients(client)
 
+    seen_paths: set[str] = set()
     for target_client in clients:
+        path_key = str(get_mcp_config_path(target_client, scope=effective_scope))
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
         path, removed = uninstall_mcp_config(
             client=target_client,
             scope=effective_scope,
