@@ -173,6 +173,36 @@ class OpenHandsRuntime:
         await self._db.conn.commit()
 
 
+def cloud_sandbox_opener(*, cloud_api_url: str | None = None, cloud_api_key: str | None = None) -> Callable[[], Awaitable[Sandbox]]:
+    """Fail closed before any cloud request when credentials are missing."""
+    if not cloud_api_url or not cloud_api_key:
+        raise ValueError("cloud workspace requires cloud_api_url and cloud_api_key")
+
+    async def open_sandbox() -> Sandbox:
+        from openhands.workspace import OpenHandsCloudWorkspace
+        workspace = OpenHandsCloudWorkspace(cloud_api_url=cloud_api_url, cloud_api_key=cloud_api_key)
+        return _DockerSandbox(workspace)
+
+    return open_sandbox
+
+
+def remote_api_sandbox_opener(
+    *, runtime_api_url: str | None = None, runtime_api_key: str | None = None, server_image: str | None = None,
+) -> Callable[[], Awaitable[Sandbox]]:
+    """Fail closed before any remote API request when credentials are missing."""
+    if not runtime_api_url or not runtime_api_key or not server_image:
+        raise ValueError("remote API workspace requires runtime_api_url, runtime_api_key, and server_image")
+
+    async def open_sandbox() -> Sandbox:
+        from openhands.workspace import APIRemoteWorkspace
+        workspace = APIRemoteWorkspace(
+            runtime_api_url=runtime_api_url, runtime_api_key=runtime_api_key, server_image=server_image,
+        )
+        return _DockerSandbox(workspace)
+
+    return open_sandbox
+
+
 def docker_sandbox_opener(server_image: str = "ghcr.io/openhands/agent-server:1.49.5-python") -> Callable[[], Awaitable[Sandbox]]:
     """Open a local OpenHands Docker workspace. Import happens on first start."""
 

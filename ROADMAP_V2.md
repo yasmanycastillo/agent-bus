@@ -652,7 +652,7 @@ Replace any one provider with another agent exposing the same capabilities witho
 ## V2 Stable
 
 - workspace abstraction,
-- external sandbox runtime (not closed; see Immediate Next Sprint),
+- external sandbox runtime,
 - hardened migrations,
 - operator documentation,
 - compatibility tests across multiple agent clients.
@@ -707,30 +707,19 @@ Orca stays out. `RuntimeRegistry` still accepts only `native` and `external`.
 
 ### External sandbox runtime
 
-This is the V2 Stable criterion that is not closed. `OpenHandsRuntime` is a
-class with an injected sandbox. It is not a routed runtime. The 2026-09-24
-spike measured a local Docker workspace and a kind `AgentSandboxWorkspace`
-smoke (image `ghcr.io/openhands/agent-server:1.49.5-python`); the kind cluster
-was deleted afterward. `OpenHandsCloudWorkspace` and `APIRemoteWorkspace`
-fail closed without `cloud_api_url`/`cloud_api_key` or
-`runtime_api_url`/`runtime_api_key`/`server_image`. The bus keeps the task,
-the review, and the candidate SHA.
+Closed on `main` as runtime `sandbox`. `advance` launches it only when the
+bus has an injected opener. Without that opener the task stays `pending` and
+OpenHands is not imported. `docker_sandbox_opener` still imports the SDK on
+first start. `cloud_sandbox_opener` and `remote_api_sandbox_opener` raise
+before any request when `cloud_api_url`/`cloud_api_key` or
+`runtime_api_url`/`runtime_api_key`/`server_image` are missing.
 
-Closing it requires all of the following:
-
-1. `advance` can launch a third runtime only through an injected sandbox
-   opener. Importing OpenHands stays lazy, on first start. Missing cloud or
-   remote API credentials still fail closed and do not open a socket.
-2. The same `feature-development` definition reaches `done` when
-   implementation runs inside that sandbox. The candidate SHA is the sandbox
-   checkout. An independent reviewer, who is not `openhands-runtime` and not
-   the implementer, approves that SHA. `finish` may record a Gatekeeper row
-   under `openhands-runtime`; that row does not authorize the merge.
-3. Integration runs the implementation `test_cmd`. `main`'s second parent is
-   the sandbox candidate. A second advance does not merge it again.
-4. An `unknown` attempt is reconciled before another start. The suite uses a
-   fake sandbox or the local Docker opener. It does not require a paid cloud
-   key or a standing kind cluster.
+`tests/integration/test_workflow_sandbox.py` runs `feature-development` with a
+fake sandbox. The candidate SHA is that checkout. A review row written as
+`openhands-runtime` does not authorize the merge. An independent reviewer
+approves the SHA, integration runs `test_cmd`, and `main`'s second parent is
+the candidate. A later advance does not merge it again. An `unknown` attempt
+blocks another start. The suite does not use a cloud key or a kind cluster.
 
 The evaluation record:
 

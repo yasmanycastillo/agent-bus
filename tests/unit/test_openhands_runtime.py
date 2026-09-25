@@ -6,8 +6,8 @@ import pytest
 from agent_bus.core.reviews import ReviewLog
 from agent_bus.core.tasks import TaskManager
 from agent_bus.reputation.database import Database
-from agent_bus.runtimes.openhands import OpenHandsRuntime
-from agent_bus.runtimes.protocol import RuntimeStartRequest
+from agent_bus.runtimes.openhands import OpenHandsRuntime, cloud_sandbox_opener, remote_api_sandbox_opener
+from agent_bus.runtimes.protocol import AttemptConflict, RuntimeStartRequest
 
 
 class FakeSandbox:
@@ -76,4 +76,17 @@ async def test_openhands_runtime_keeps_task_state_and_does_not_restart(tmp_path)
     same = await again.start(request)
     assert same.attempt_id == "att-oh"
     assert opened == 1
+    await db.conn.execute("UPDATE runtime_attempts SET state = 'unknown' WHERE task_id = 'T-oh'")
+    await db.conn.commit()
+    fresh = OpenHandsRuntime(db, open_sandbox)
+    with pytest.raises(AttemptConflict):
+        await fresh.start(RuntimeStartRequest("att-new", "T-oh", "openhands:T-oh-2", "kimi", str(repo)))
+    assert opened == 1
     await db.close()
+
+
+def test_cloud_and_remote_sandboxes_fail_closed_without_credentials():
+    with pytest.raises(ValueError, match="cloud_api_url"):
+        cloud_sandbox_opener()
+    with pytest.raises(ValueError, match="runtime_api_url"):
+        remote_api_sandbox_opener()

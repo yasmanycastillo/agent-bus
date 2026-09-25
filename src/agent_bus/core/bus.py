@@ -165,6 +165,7 @@ class MessageBus:
         self.events = EventLog(db)
         self.registry = registry
         self.inbox = inbox
+        self.sandbox_opener = None
         self.tasks = TaskManager(db)
         self.decisions = DecisionLog(db)
         self.reviews = ReviewLog(db)
@@ -573,7 +574,7 @@ class MessageBus:
             if principal and not principal.is_admin and principal.agent_id != agent_id:
                 return JSONResponse({"error": "agent_id does not match the session"}, status_code=403)
             try:
-                return await RuntimeRegistry(self.db, self.project_id).register(
+                return await RuntimeRegistry(self.db, self.project_id, sandbox_opener=self.sandbox_opener).register(
                     agent_id, body.get("runtime") or "", body.get("command"),
                 )
             except RegistryError as exc:
@@ -590,7 +591,7 @@ class MessageBus:
             decision = await self._decide(task.requirements)
             if decision.selected_agent is None:
                 return JSONResponse({"error": "no eligible agent", "reasons": decision.reasons}, status_code=409)
-            registry = RuntimeRegistry(self.db, self.project_id)
+            registry = RuntimeRegistry(self.db, self.project_id, sandbox_opener=self.sandbox_opener)
             spec = await registry.get(decision.selected_agent)
             if spec is None:
                 return JSONResponse({"error": f"{decision.selected_agent} has no runtime"}, status_code=422)

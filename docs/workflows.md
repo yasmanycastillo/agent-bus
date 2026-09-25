@@ -16,7 +16,7 @@ Un YAML propio se compila con `--file camino.yaml --instance run-1`. Solo se ace
 
 ## Qué tiene que existir antes de avanzar
 
-Cada paso libre se enruta por capacidades. Hace falta un agente con perfil aprobado, heartbeat reciente y un runtime `native` o `external`.
+Cada paso libre se enruta por capacidades. Hace falta un agente con perfil aprobado, heartbeat reciente y un runtime `native`, `external` o `sandbox`. `sandbox` solo arranca si el proceso inyectó un abridor; sin ese abridor la tarea sigue `pending`. La review que el sandbox escribe como `openhands-runtime` no autoriza el merge.
 
 | Paso | Capacidades | Quién lo cierra |
 |---|---|---|

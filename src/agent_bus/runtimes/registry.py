@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import shlex
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from agent_bus.core.usage import UsageLedger
 from agent_bus.reputation.database import Database
@@ -13,7 +14,7 @@ from agent_bus.runtimes.external import ExternalCommandRuntime
 from agent_bus.runtimes.native import NativeRuntime
 from agent_bus.runtimes.protocol import RuntimeStartRequest
 
-RUNTIMES = frozenset({"native", "external"})
+RUNTIMES = frozenset({"native", "external", "sandbox"})
 
 
 class RegistryError(Exception):
@@ -23,15 +24,18 @@ class RegistryError(Exception):
 
 
 class RuntimeRegistry:
-    def __init__(self, db: Database, project_id: str) -> None:
+    def __init__(self, db: Database, project_id: str, sandbox_opener: Callable | None = None) -> None:
         self._db = db
         self._project_id = project_id
+        self._sandbox_opener = sandbox_opener
 
     async def register(self, agent_id: str, runtime: str, command: list[str] | None = None) -> dict:
         if runtime not in RUNTIMES:
-            raise RegistryError("runtime must be native or external")
+            raise RegistryError("runtime must be native, external, or sandbox")
         if runtime == "external" and not command:
             raise RegistryError("an external runtime needs a command")
+        if runtime == "sandbox" and not command:
+            raise RegistryError("a sandbox runtime needs a command")
         await self._db.conn.execute(
             """INSERT INTO agent_runtimes (agent_id, project_id, runtime, command)
                VALUES (?, ?, ?, ?)
@@ -70,6 +74,21 @@ class RuntimeRegistry:
                 report_state, sha = report.state, report.candidate_sha
             else:
                 report_state, sha = session.state, None
+        elif runtime == "sandbox":
+            if self._sandbox_opener is None:
+                raise RegistryError("a sandbox runtime needs an injected opener")
+            if not workspace_ref:
+                raise RegistryError("a sandbox runtime needs workspace_ref")
+            from agent_bus.runtimes.openhands import OpenHandsRuntime
+            adapter = OpenHandsRuntime(self._db, self._sandbox_opener)
+            session = await adapter.start(request)
+            if session.state == "started" and command:
+                await adapter.send(session, shlex.join(command))
+            report = await adapter.finish(session) if session.state == "started" or command else None
+            if report is None:
+                report_state, sha = session.state, None
+            else:
+                report_state, sha = report.state, report.candidate_sha
         else:
             raise RegistryError(f"unsupported runtime {runtime}")
         wall = round(time.monotonic() - started, 3)

@@ -14,7 +14,7 @@ from httpx import ASGITransport
 from agent_bus.core.artifacts import ArtifactStore
 from agent_bus.core.bus import MessageBus
 from agent_bus.core.evidence import EvidenceLog
-from agent_bus.runtimes.registry import RuntimeRegistry
+from agent_bus.runtimes.registry import RegistryError, RuntimeRegistry
 from agent_bus.types import Envelope, MessageType
 
 
@@ -64,10 +64,12 @@ async def advance_workflow(
         reasons = dict(decision.reasons)
         reasons.update({agent_id: "completed an independent step" for agent_id in excluded})
         return {"status": "unroutable", "task_id": task.task_id, "reasons": reasons}
-    registry = RuntimeRegistry(bus.db, bus.project_id)
+    registry = RuntimeRegistry(bus.db, bus.project_id, sandbox_opener=bus.sandbox_opener)
     spec = await registry.get(eligible[0])
     if spec is None:
         return {"status": "no_runtime", "task_id": task.task_id, "selected_agent": decision.selected_agent}
+    if spec["runtime"] == "sandbox" and bus.sandbox_opener is None:
+        raise RegistryError("a sandbox runtime needs an injected opener")
     claimed = await bus.tasks.claim(task.task_id, spec["agent_id"])
     if claimed is None:
         return {"status": "not_claimed", "task_id": task.task_id, "selected_agent": spec["agent_id"]}
