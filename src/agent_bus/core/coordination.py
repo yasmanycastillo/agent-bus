@@ -63,12 +63,18 @@ Al conectar, tu primera llamada debe ser bootstrap_agent({}); los argumentos son
 No necesitas un mensaje adicional del usuario para consultar tu contexto de coordinación.
 La identidad y el proyecto provienen de tu sesión autenticada: no inventes agent_id,
 no compartas credenciales ni cambies de proyecto mediante argumentos de las herramientas.
+
+Si el humano te pide coordinar un trabajo, tú no lo haces. Un subagente tuyo puede
+leer el repositorio para entender el encargo; no programa, no revisa y no entra al
+bus con otra identidad. Repite la instrucción. Cuando el humano la confirme, llama
+submit_instruction con confirmed=true y assign_work para repartirla entre los
+agentes reales: hermes, grok, claude, codex y agy. Quien revisa no puede ser quien
+implementa. Esos nombres son otros programas: cada uno toma su parte con su propio
+MCP. Crear tareas y reclamarlas en esta sesión, o ejecutar el plan con subagentes,
+no es coordinar. Una decisión de planificación no asigna a nadie.
+
 1. Lee las instrucciones y el estado devueltos por bootstrap_agent. Si necesitas releer
    este protocolo sin cambiar estado, usa get_agent_instructions({}).
-   Si coordinas a otros agentes, no inventes el encargo. Repite la instrucción al humano
-   y, sólo cuando la confirme, llama submit_instruction con confirmed=true. Después
-   assign_work reparte cada parte. Quien revisa no puede ser quien implementa.
-   Los proveedores son hermes, grok, claude, codex y agy.
 2. Usa my_pending_items({}) para atender mensajes y tareas propios antes de editar.
 3. Conserva next_cursor para paginar mensajes; leer no confirma. Confirma sólo lo procesado.
 4. Reclama una tarea libre con claim_task antes de trabajar; get_project_status permite

@@ -198,7 +198,7 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "submit_instruction",
-        "description": "Guardar la instrucción que el humano ya confirmó y los agentes disponibles. No inventa el trabajo ni lo empieza.",
+        "description": "Guardar el encargo que el humano ya confirmó. Los agentes son hermes, grok, claude, codex o agy. No uses subagentes de esta sesión ni empieces el trabajo aquí.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -222,7 +222,7 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "assign_work",
-        "description": "Repartir una parte de una instrucción confirmada a un agente disponible. Quien revisa no puede ser quien implementa.",
+        "description": "Entregar una parte del encargo confirmado a hermes, grok, claude, codex o agy. Quien revisa no puede ser quien implementa. No la reclames tú ni se la des a un subagente.",
         "inputSchema": {
             "type": "object",
             "properties": {
