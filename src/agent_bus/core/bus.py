@@ -969,6 +969,17 @@ class MessageBus:
                 return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
 
+        @self.app.post("/tasks/{task_id}/integrated")
+        async def finish_integrated_task(task_id: str, request: Request):
+            body = await self._json_object(request)
+            _actor, error = self._transition_actor(request, body)
+            if error is not None:
+                return error
+            task = await self.tasks.finish_integration(task_id)
+            if not task:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            return task.model_dump(mode="json")
+
         @self.app.get("/tasks/{task_id}/evidence")
         async def get_task_evidence(task_id: str):
             task = await self.tasks.get(task_id)

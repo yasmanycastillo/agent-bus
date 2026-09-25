@@ -391,6 +391,19 @@ class TaskManager:
         await self._db.conn.commit()
         return self._row_to_task(row) if row is not None else None
 
+    async def finish_integration(self, task_id: str) -> Task | None:
+        """Mark a merged integration done from any status other than done."""
+        now = datetime.now(timezone.utc).isoformat()
+        rows = await self._db.conn.execute_fetchall(
+            """UPDATE tasks SET status = 'done', blocked_reason = NULL, updated_at = ?
+               WHERE task_id = ? AND status != 'done' RETURNING *""",
+            (now, task_id),
+        )
+        await self._db.conn.commit()
+        if rows:
+            return self._row_to_task(rows[0])
+        return await self.get(task_id)
+
     async def get_evidence(self, task_id: str) -> list[dict[str, Any]]:
         rows = await self._db.conn.execute_fetchall(
             """SELECT action, actor_agent_id, actor_session_id, previous_owner, new_owner, evidence, created_at

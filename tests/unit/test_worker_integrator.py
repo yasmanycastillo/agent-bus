@@ -94,7 +94,7 @@ async def test_integrator_success_flow(tmp_path):
         return (True, "Merged 1 commit cleanly.")
 
     async def mock_done(task_id):
-        pass
+        return True
 
     integrator.run_tests = mock_pass_tests
     integrator._merge_branches = mock_clean_merge

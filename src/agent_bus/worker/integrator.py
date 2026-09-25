@@ -171,6 +171,9 @@ class BranchIntegrator:
         except ValueError as exc:
             return IntegratorResult(False, False, "rejected", error=str(exc))
 
+        if await self._candidate_is_merged(snapshot["sha"], target_branch):
+            return await self._finish_recorded_merge(task_id, "candidate already on target")
+
         # Test and review the same immutable candidate and target baseline.
         tests_passed, test_output = await self.run_tests(worktree_dir, test_cmd)
         try:
@@ -277,6 +280,8 @@ class BranchIntegrator:
                 )
 
             # Verdict is APPROVE: proceed with git merge!
+            if await self._candidate_is_merged(sha, target_branch):
+                return await self._record_merge(task_id, decision, "candidate already on target", sha, target_branch)
             try:
                 merge_ok, merge_output = await self._merge_branches(
                     sha, target_branch, expected_target_sha=snapshot["target_sha"]
@@ -297,15 +302,7 @@ class BranchIntegrator:
                     metadata={"review": decision.model_dump(mode="json")},
                 )
 
-            self._retry_counts.pop(task_id, None)
-            await self._mark_task_completed(task_id)
-            return IntegratorResult(
-                success=True,
-                merged=True,
-                status="integrated",
-                output=merge_output,
-                metadata={"review": decision.model_dump(mode="json")},
-            )
+            return await self._record_merge(task_id, decision, merge_output, sha, target_branch)
 
         else:
             # Explicit advisory-review mode: record the verdict and merge on
@@ -340,6 +337,8 @@ class BranchIntegrator:
                     metadata={"review": decision.model_dump(mode="json")},
                 )
 
+            if await self._candidate_is_merged(sha, target_branch):
+                return await self._record_merge(task_id, decision, "candidate already on target", sha, target_branch)
             try:
                 merge_ok, merge_output = await self._merge_branches(
                     sha, target_branch, expected_target_sha=snapshot["target_sha"]
@@ -360,15 +359,34 @@ class BranchIntegrator:
                     metadata={"review": decision.model_dump(mode="json")},
                 )
 
-            self._retry_counts.pop(task_id, None)
-            await self._mark_task_completed(task_id)
+            return await self._record_merge(task_id, decision, merge_output, sha, target_branch)
+
+    async def _record_merge(
+        self, task_id: str, decision: ReviewDecision, merge_output: str, sha: str, target_branch: str,
+    ) -> IntegratorResult:
+        del sha, target_branch
+        self._retry_counts.pop(task_id, None)
+        result = await self._finish_recorded_merge(task_id, merge_output)
+        result.metadata = {"review": decision.model_dump(mode="json")}
+        return result
+
+    async def _finish_recorded_merge(self, task_id: str, output: str) -> IntegratorResult:
+        recorded = bool(await self._mark_task_completed(task_id))
+        if not recorded:
             return IntegratorResult(
-                success=True,
-                merged=True,
-                status="integrated",
-                output=merge_output,
-                metadata={"review": decision.model_dump(mode="json")},
+                success=False, merged=True, status="merged_unrecorded", output=output,
+                error="integration merged but the task was not marked done",
             )
+        return IntegratorResult(success=True, merged=True, status="integrated", output=output)
+
+    async def _candidate_is_merged(self, sha: str, target_branch: str) -> bool:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "merge-base", "--is-ancestor", sha, target_branch,
+            cwd=str(self.repo_dir),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        return await proc.wait() == 0
 
     async def _block_merge_invariant(
         self, task_id: str, author_agent: str, decision: ReviewDecision,
@@ -550,13 +568,19 @@ class BranchIntegrator:
             logger.debug(f"Could not fetch owner for {task_id}: {exc}")
         return self.agent_id
 
-    async def _mark_task_completed(self, task_id: str) -> None:
-        owner = await self._task_owner(task_id)
-        async with self._open_bus(10.0) as client:
-            try:
-                await client.post(f"/tasks/{task_id}/done", json={"agent_id": owner})
-            except Exception as exc:
-                logger.error(f"Failed to mark task {task_id} done: {exc}")
+    async def _mark_task_completed(self, task_id: str) -> bool:
+        try:
+            async with self._open_bus(10.0) as client:
+                response = await client.post(
+                    f"/tasks/{task_id}/integrated", json={"agent_id": self.agent_id},
+                )
+        except Exception as exc:
+            logger.error(f"Failed to mark task {task_id} done: {exc}")
+            return False
+        if response.status_code != 200:
+            logger.error(f"Failed to mark task {task_id} done: {response.status_code}")
+            return False
+        return response.json().get("status") == "done"
 
     async def _fetch_acceptance_criteria(self, task_id: str) -> list[str]:
         try:

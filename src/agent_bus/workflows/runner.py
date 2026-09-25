@@ -172,12 +172,15 @@ async def _integrate(
     result = await integrator.integrate_task(
         task_id, "workflow", Path(workspace_ref), branch, test_cmd=test_cmd,
     )
+    if result.merged:
+        stored = await bus.tasks.get(task_id)
+        if stored is None or stored.status.value != "done":
+            stored = await bus.tasks.finish_integration(task_id)
+        if stored is not None and stored.status.value == "done":
+            return {"status": "integrated", "task_id": task_id, "candidate_sha": candidate_sha}
     if not result.success:
         await _notify_blocked(bus, task_id, result.error or "integration blocked")
         return {"status": "blocked", "task_id": task_id, "error": result.error}
-    stored = await bus.tasks.get(task_id)
-    if stored is None or stored.status.value != "done":
-        await bus.tasks.complete(task_id)
     return {"status": "integrated", "task_id": task_id, "candidate_sha": candidate_sha}
 
 

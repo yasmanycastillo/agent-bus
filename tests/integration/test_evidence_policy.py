@@ -147,3 +147,49 @@ async def test_evidence_policy_http_error_does_not_merge(tmp_path):
     assert blocked.merged is False
     assert "evidence policy unavailable (503)" in blocked.error
     assert git(repo, "rev-parse", "HEAD") == baseline
+
+
+@pytest.mark.asyncio
+async def test_pending_integration_is_done_after_merge_and_not_merged_twice(tmp_path):
+    repo, work = _repo(tmp_path)
+    candidate = git(work, "rev-parse", "HEAD")
+    db = Database(str(tmp_path / "bus.db"))
+    await db.initialize()
+    bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+
+    def factory(timeout):
+        @asynccontextmanager
+        async def opener():
+            async with httpx.AsyncClient(
+                transport=ASGITransport(app=bus.app), base_url="http://bus.local", timeout=timeout,
+            ) as client:
+                yield client
+        return opener()
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        created = await client.post("/tasks", json={"task_id": "T-int", "title": "Integrate", "owner": "free"})
+        assert created.status_code == 200, created.text
+    integrator = BranchIntegrator(repo_dir=repo, require_approval=True, client_factory=factory)
+    integrator.run_tests = AsyncMock(return_value=(True, "tests passed"))
+    merged = await integrator.integrate_task("T-int", "alice", work, "agent/alice", acceptance_criteria=[])
+    assert merged.success, merged.error
+    assert git(repo, "rev-parse", "HEAD^2") == candidate
+    async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        task = (await client.get("/tasks/T-int")).json()
+    assert task["status"] == "done"
+    merge_commit = git(repo, "rev-parse", "HEAD")
+
+    failing = BranchIntegrator(repo_dir=repo, require_approval=True, client_factory=factory)
+    failing.run_tests = AsyncMock(return_value=(True, "tests passed"))
+
+    async def unavailable(task_id):
+        return False
+
+    failing._mark_task_completed = unavailable  # type: ignore[method-assign]
+    again = await failing.integrate_task("T-int", "alice", work, "agent/alice", acceptance_criteria=[])
+    assert again.success is False
+    assert again.merged is True
+    assert again.status == "merged_unrecorded"
+    assert git(repo, "rev-parse", "HEAD") == merge_commit
+    assert git(repo, "rev-parse", "HEAD^2") == candidate
+    await db.close()
