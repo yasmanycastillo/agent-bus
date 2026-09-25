@@ -565,6 +565,46 @@ class MessageBus:
             await self.db.conn.commit()
             return await self._load_profile(agent_id)
 
+        @self.app.post("/agents/{agent_id}/runtime")
+        async def register_agent_runtime(agent_id: str, request: Request):
+            from agent_bus.runtimes.registry import RegistryError, RuntimeRegistry
+            body = await self._json_object(request)
+            principal = request.state.principal
+            if principal and not principal.is_admin and principal.agent_id != agent_id:
+                return JSONResponse({"error": "agent_id does not match the session"}, status_code=403)
+            try:
+                return await RuntimeRegistry(self.db, self.project_id).register(
+                    agent_id, body.get("runtime") or "", body.get("command"),
+                )
+            except RegistryError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+        @self.app.post("/tasks/{task_id}/dispatch")
+        async def dispatch_task(task_id: str, request: Request):
+            from agent_bus.runtimes.registry import RegistryError, RuntimeRegistry
+            task = await self.tasks.get(task_id)
+            if task is None:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            if task.owner != "free" or task.status != TaskStatus.PENDING:
+                return JSONResponse({"error": "Only a free pending task can be dispatched"}, status_code=409)
+            decision = await self._decide(task.requirements)
+            if decision.selected_agent is None:
+                return JSONResponse({"error": "no eligible agent", "reasons": decision.reasons}, status_code=409)
+            registry = RuntimeRegistry(self.db, self.project_id)
+            spec = await registry.get(decision.selected_agent)
+            if spec is None:
+                return JSONResponse({"error": f"{decision.selected_agent} has no runtime"}, status_code=422)
+            body = await self._json_object(request)
+            try:
+                launched = await registry.launch(
+                    task_id, spec["agent_id"], spec["runtime"], spec["command"],
+                    body.get("workspace_ref"), float(body.get("timeout") or 30),
+                )
+            except RegistryError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+            stored = await self.tasks.get(task_id)
+            return {**launched, "selected_agent": decision.selected_agent, "task_status": stored.status.value if stored else None}
+
         @self.app.get("/agents/{agent_id}/route-profile")
         async def get_route_profile(agent_id: str):
             return await self._load_profile(agent_id)

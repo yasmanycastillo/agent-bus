@@ -230,6 +230,7 @@ class Database:
             await self._migrate_artifacts()
             await self._migrate_evidence()
             await self._migrate_usage()
+            await self._migrate_runtime_registry()
         except BaseException:
             await self.close()
             raise
@@ -540,6 +541,22 @@ class Database:
                     source TEXT NOT NULL,
                     confidence TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                )"""
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_runtime_registry(self) -> None:
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS agent_runtimes (
+                    agent_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    runtime TEXT NOT NULL,
+                    command TEXT NOT NULL DEFAULT '[]'
                 )"""
             )
             await self.conn.commit()
