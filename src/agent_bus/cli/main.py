@@ -559,15 +559,18 @@ def work_reassign(task_id: str, new_owner: str):
 @work.command("verdict")
 @click.argument("task_id")
 @click.option("--verdict", type=click.Choice(["approve", "changes_requested"]), required=True)
-@click.option("--sha", required=True)
+@click.option("--sha", default=None)
 @click.option("--reason", default="")
-def work_verdict(task_id: str, verdict: str, sha: str, reason: str):
+def work_verdict(task_id: str, verdict: str, sha: str | None, reason: str):
     """Registrar el veredicto del dueño de la tarea de review."""
-    payload = {"agent_id": _require_agent(), "verdict": verdict, "sha": sha, "reason": reason}
+    payload = {"agent_id": _require_agent(), "verdict": verdict, "reason": reason}
+    if sha:
+        payload["sha"] = sha
     with _client() as client:
         resp = client.post(f"/tasks/{task_id}/verdict", json=payload)
         if resp.status_code == 200:
-            click.echo(f"Veredicto {verdict} registrado para {task_id} en {sha}")
+            recorded = resp.json().get("sha") or sha
+            click.echo(f"Veredicto {verdict} registrado para {task_id} en {recorded}")
         else:
             click.echo(f"Error: {_explain_error(resp)}")
 

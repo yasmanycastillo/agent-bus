@@ -19,7 +19,7 @@ class ReviewLog:
         self._db = db
 
     async def record_task_verdict(
-        self, task_id: str, reviewer: str, sha: str, verdict: str, reason: str = "",
+        self, task_id: str, reviewer: str, sha: str | None, verdict: str, reason: str = "",
     ) -> ReviewDecision:
         rows = await self._db.conn.execute_fetchall(
             "SELECT owner, independent_from FROM tasks WHERE task_id = ?", (task_id,),
@@ -47,10 +47,11 @@ class ReviewLog:
         )
         if not attempts:
             raise VerdictError("implementation attempt is missing")
-        if attempts[0]["candidate_sha"] != sha:
+        candidate = attempts[0]["candidate_sha"]
+        if sha and sha != candidate:
             raise VerdictError("sha does not match the implementation candidate")
         return await self.add(ReviewDecision(
-            task_id=task_id, sha=sha, verdict=Verdict(verdict), reason=reason or verdict,
+            task_id=task_id, sha=candidate, verdict=Verdict(verdict), reason=reason or verdict,
             reviewer_agent_id=reviewer, reviewer_session_id="",
         ))
 

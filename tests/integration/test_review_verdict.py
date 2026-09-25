@@ -120,6 +120,10 @@ async def test_assigned_reviewer_records_the_verdict(tmp_path, monkeypatch):
         assert dispatched.json()["status"] == "dispatched"
         assert dispatched.json()["task_status"] == "done"
         assert git(repo, "rev-parse", "HEAD") == sha
+        review_inbox = (await client.get("/inbox/reviewer-01/messages")).json()
+        assert any(
+            (message.get("body") or {}).get("sha") == sha for message in review_inbox["messages"]
+        )
 
         new_sha = "b" * 40
         await db.conn.execute(
@@ -140,8 +144,11 @@ async def test_assigned_reviewer_records_the_verdict(tmp_path, monkeypatch):
         assert (await client.get(f"/tasks/{integration_id}")).json()["status"] == "pending"
         assert git(repo, "rev-parse", "HEAD") == sha
 
-        approved = await verdict("reviewer-01", "approve", new_sha)
+        approved = await client.post(f"/tasks/{review_id}/verdict", json={
+            "agent_id": "reviewer-01", "verdict": "approve", "reason": "reviewed",
+        })
         assert approved.status_code == 200, approved.text
+        assert approved.json()["sha"] == new_sha
         blocked = await client.post("/workflows/advance", json={
             "workflow": "feature-development", "instance_id": "run-5",
             "workspace_ref": str(repo), "repo_dir": str(repo), "candidate_branch": "main",
@@ -181,10 +188,13 @@ async def test_assigned_reviewer_records_the_verdict(tmp_path, monkeypatch):
     assert captured["json"] == {
         "agent_id": "reviewer-01", "verdict": "approve", "sha": sha, "reason": "reviewed",
     }
+    omitted = CliRunner().invoke(work, ["verdict", review_id, "--verdict", "approve"])
+    assert omitted.exit_code == 0, omitted.output
+    assert "sha" not in captured["json"]
 
     monkeypatch.delenv("AGENT_BUS_SESSION_FILE", raising=False)
     monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "1")
     server = McpServer()
     tool = next(item for item in server.tools if item["name"] == "record_verdict")
-    assert tool["inputSchema"]["required"] == ["task_id", "verdict", "sha", "agent_id"]
+    assert tool["inputSchema"]["required"] == ["task_id", "verdict", "agent_id"]
     assert "dueño de la tarea de review" in tool["description"]

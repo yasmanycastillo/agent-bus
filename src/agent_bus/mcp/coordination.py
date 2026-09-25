@@ -60,7 +60,7 @@ TOOL_GUIDANCE = {
     "renew_lock": "Requiere el token vigente de la misma sesión. Si vence o falla la renovación, detén la edición y consulta get_project_status antes de adquirir de nuevo.",
     "get_project_status": "Para incorporarte al proyecto usa primero bootstrap_agent. Después selecciona una tarea disponible o consulta tus pendientes con my_pending_items.",
     "record_decision": "Antes: bootstrap_agent y revisión de decisiones recientes. Registra sólo un acuerdo alcanzado; después comunica el resultado si corresponde.",
-    "record_verdict": "Sólo el dueño de la tarea de review. El SHA es el del intento de implementación. approve autoriza la integración. changes_requested reabre la implementación y deja la integración pendiente.",
+    "record_verdict": "Sólo el dueño de la tarea de review. Sin SHA usa el último intento de implementación. approve autoriza la integración. changes_requested reabre la implementación y deja la integración pendiente.",
 }
 
 

@@ -904,6 +904,12 @@ class MessageBus:
                 RuntimeSession(attempt_id, body.get("task_id") or "", "", None, current.state),
                 RuntimeResult(outcome, body.get("candidate_sha"), tuple(refs)),
             )
+            if outcome == "completed" and report.candidate_sha:
+                rows = await self.db.conn.execute_fetchall(
+                    "SELECT task_id FROM runtime_attempts WHERE attempt_id = ?", (attempt_id,),
+                )
+                if rows:
+                    await self._notify_reviewers_of_candidate(rows[0]["task_id"], report.candidate_sha)
             return {
                 "attempt_id": report.attempt_id,
                 "state": report.state,
@@ -1054,18 +1060,19 @@ class MessageBus:
                     return JSONResponse({"error": "agent_id is required"}, status_code=422)
                 actor = actor.strip()
             verdict = body.get("verdict")
-            sha = body.get("sha")
+            raw_sha = body.get("sha")
             if verdict not in ("approve", "changes_requested"):
                 return JSONResponse({"error": "verdict must be approve or changes_requested"}, status_code=422)
-            if not isinstance(sha, str) or not sha.strip():
+            if raw_sha is not None and not isinstance(raw_sha, str):
                 return JSONResponse({"error": "sha is required"}, status_code=422)
+            sha = raw_sha.strip() if isinstance(raw_sha, str) and raw_sha.strip() else None
             reason = body.get("reason") if isinstance(body.get("reason"), str) else ""
             try:
-                saved = await self.reviews.record_task_verdict(task_id, actor, sha.strip(), verdict, reason)
+                saved = await self.reviews.record_task_verdict(task_id, actor, sha, verdict, reason)
             except VerdictError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
             if verdict == "changes_requested":
-                await self._reopen_rejected_implementation(task_id, actor, sha.strip(), reason or verdict)
+                await self._reopen_rejected_implementation(task_id, actor, saved.sha, reason or verdict)
             return saved.model_dump(mode="json")
 
         @self.app.get("/reviews")
@@ -1679,6 +1686,29 @@ class MessageBus:
         except (ValueError, UnicodeDecodeError):
             return {}
         return body if isinstance(body, dict) else {}
+
+    async def _notify_reviewers_of_candidate(self, implementation_id: str, candidate_sha: str) -> None:
+        if not candidate_sha:
+            return
+        implementation = await self.tasks.get(implementation_id)
+        implementer = implementation.owner if implementation is not None else None
+        for task in await self.tasks.list_all():
+            if implementation_id not in task.independent_from:
+                continue
+            if task.owner in (None, "free") or task.owner == implementer:
+                continue
+            await self.inbox.send(Envelope(
+                from_agent="workflow",
+                to_agent=task.owner,
+                message_type=MessageType.INBOX,
+                reply_needed=True,
+                related_task=task.task_id,
+                body={
+                    "text": f"Implementation candidate {candidate_sha} is ready for review",
+                    "sha": candidate_sha,
+                    "implementation_task": implementation_id,
+                },
+            ), [task.owner])
 
     async def _reopen_rejected_implementation(
         self, review_task_id: str, reviewer: str, sha: str, reason: str,

@@ -208,7 +208,7 @@ TOOLS_DEFINITIONS = [
                 "reason": {"type": "string"},
                 "agent_id": {"type": "string"},
             },
-            "required": ["task_id", "verdict", "sha", "agent_id"],
+            "required": ["task_id", "verdict", "agent_id"],
         },
     },
     {
@@ -448,12 +448,14 @@ class McpServer:
                 return resp.json()
 
             elif name == "record_verdict":
-                resp = await client.post(f"/tasks/{args['task_id']}/verdict", json={
+                payload = {
                     "agent_id": args["agent_id"],
                     "verdict": args["verdict"],
-                    "sha": args["sha"],
                     "reason": args.get("reason") or "",
-                })
+                }
+                if args.get("sha"):
+                    payload["sha"] = args["sha"]
+                resp = await client.post(f"/tasks/{args['task_id']}/verdict", json=payload)
                 resp.raise_for_status()
                 return resp.json()
 
