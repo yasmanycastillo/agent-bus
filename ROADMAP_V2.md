@@ -677,10 +677,37 @@ Replace any one provider with another agent exposing the same capabilities witho
 
 # Immediate Next Sprint
 
-The executable Phase -1 checks that this host can run are recorded in
-[the spike](docs/spikes/2026-09-23-phase-minus-one.md). Phase 1 is the next
-implementation sprint. It still does not add an Orca adapter, an OpenHands
-adapter, or a second task owner inside a terminal UI.
+Phases 1–10 and the feature-development integration loop are on `main`
+(`8f5d098`). Phase 1 is not the next sprint. The work that remains is the
+V2 Stable remainder below. This line still does not add an Orca adapter, put
+OpenHands in the runtime registry, or become a terminal UI.
+
+The executable Phase -1 checks for this host stay in
+[the spike](docs/spikes/2026-09-23-phase-minus-one.md).
+
+Landed on `main`:
+
+- capability registration, deterministic routing, and `NativeRuntime`
+- external command runtime, artifacts, strict evidence, and the usage ledger
+- Hermes as a planner strategy, not as the bus planner
+- workflow compiler and `POST /workflows/advance`
+- workspace backend and worktree ownership
+- independent review before integration, `work verdict` / `record_verdict`
+- `changes_requested` reopens implementation and a new attempt needs a new approve
+- the review owner is told the candidate SHA, including when integration is waiting
+- integration runs the implementation `test_cmd` and talks to the compiling bus
+- a block stores `blocked_reason` and notifies the implementer and the reviewer
+- an unreadable evidence policy does not merge
+- a green merge marks the integration task `done`; a later call does not merge that candidate again
+- the same `feature-development` definition reaches `done` with two external implementation providers (`tests/integration/test_workflow_two_providers.py`)
+
+OpenHands remains a runtime class behind an adapter. The router still selects only `native` and `external`. Orca stays out.
+
+### Still open
+
+1. Hardened migrations.
+2. Operator documentation for the workflow commands now on `main`.
+3. One `native` agent completes the same `feature-development` definition through `done`. The two-provider test covers two external commands, not native. `advance` leaves a native attempt started; the worker is what marks a non-integration native step `done`.
 
 The evaluation record:
 
@@ -706,44 +733,4 @@ The OpenHands Docker workspace and a kind smoke test of
 fail closed without credentials. None of these is an adapter. Do not turn the
 command probe into one. The kind cluster was deleted after the test.
 
-After Phase -1 exits successfully, the first implementation sprint should contain only three technical objectives:
-
-### 1. Capability model
-
-Add capability registration and task requirements.
-
-### 2. Deterministic router
-
-Route unassigned tasks to eligible available agents.
-
-### 3. Runtime protocol
-
-Define the runtime interface and wrap the current native worker.
-
-Do **not** start Orca/OpenHands adapters until these contracts exist.
-
-A good sprint result is:
-
-```text
-Task
-  requires: [implementation, python]
-
-        |
-        v
-
-Capability Router
-
-        |
-        +---- codex-01
-        +---- claude-02
-        +---- glm-01
-
-        |
-        v
-
-NativeRuntime
-```
-
-with complete unit and integration coverage.
-
-After that foundation is stable, an external runtime adapter becomes a contained integration project instead of another architectural branch.
+Those three Phase 1 objectives are already on `main`: capability registration, the deterministic router, and `NativeRuntime`. Do not restart them. Do not start an Orca adapter. Do not register OpenHands as a third routed runtime until a later revision says so.
