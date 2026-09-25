@@ -23,6 +23,15 @@ from agent_bus.worker.runner import AgentRunner, RunnerResult
 logger = logging.getLogger("agent_bus.worker.daemon")
 
 
+def _turn_timeout() -> float:
+    raw = os.environ.get("AGENT_BUS_TURN_TIMEOUT", "1800")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 1800.0
+    return value if value > 0 else 1800.0
+
+
 class WorkerDaemon:
     """Autonomous Worker Daemon that continuously listens to agent-bus events (via SSE and polling)
     and drives agent execution without human intervention."""
@@ -48,6 +57,7 @@ class WorkerDaemon:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.max_turns_per_task = max_turns_per_task
         self.max_message_attempts = max(1, max_message_attempts)
+        self.turn_timeout_seconds = _turn_timeout()
         self.notifier = notifier or ExternalNotifier(
             enable_desktop=os.environ.get("AGENT_BUS_NOTIFY_DESKTOP") == "1"
         )
@@ -185,42 +195,68 @@ class WorkerDaemon:
             message_id = message["message_id"]
             if time.monotonic() < self._message_retry_after.get(message_id, 0):
                 continue
+            if int(message.get("attempts", 0) or 0) >= self.max_message_attempts:
+                logger.error(
+                    "Message %s exhausted after %s attempts; the worker continues with its task",
+                    message_id, message.get("attempts"),
+                )
+                continue
             await self._handle_urgent_message(message)
             processed = True
         if processed:
             return
 
-        # 2. Check for assigned / in_progress tasks owned by this agent
-        tasks_resp = await self._client.get("/tasks", params={"owner": self.agent_id, "status": "in_progress"})
-        if tasks_resp.status_code == 200:
-            tasks = tasks_resp.json()
-            if tasks:
-                task = tasks[0]
-                await self._handle_active_task(task)
-                return
+        owned = await self._owned_task()
+        if owned is not None:
+            await self._handle_active_task(owned)
+            return
+        await self._claim_assigned_task()
 
-        # 3. Check for free pending tasks to claim (unlocked only)
-        free_tasks_resp = await self._client.get("/tasks", params={"owner": "free", "status": "pending", "ready_only": "true"})
-        if free_tasks_resp.status_code == 200:
-            free_tasks = free_tasks_resp.json()
-            if free_tasks:
-                task_to_claim = free_tasks[0]
-                claim_resp = await self._client.post(
-                    f"/tasks/{task_to_claim['task_id']}/claim",
-                    json={"agent_id": self.agent_id},
-                )
-                if claim_resp.status_code == 200:
-                    logger.info(f"Agent '{self.agent_id}' claimed task {task_to_claim['task_id']}")
-                    try:
-                        await self._client.post("/runtime/native/start", json={
-                            "task_id": task_to_claim["task_id"],
-                            "idempotency_key": f"dispatch:{task_to_claim['task_id']}",
-                            "agent_id": self.agent_id,
-                        })
-                    except Exception as exc:
-                        logger.debug("Native runtime attempt was not recorded: %s", exc)
-                    await self._handle_active_task(claim_resp.json())
-                    return
+    async def _owned_task(self) -> dict[str, Any] | None:
+        for status in ("in_progress", "pending"):
+            response = await self._client.get(
+                "/tasks", params={"owner": self.agent_id, "status": status},
+            )
+            if response.status_code != 200:
+                continue
+            tasks = response.json()
+            if isinstance(tasks, list) and tasks:
+                return tasks[0]
+        return None
+
+    async def _claim_assigned_task(self) -> None:
+        assigned = await self._client.get(f"/agents/{self.agent_id}/assignments")
+        if assigned.status_code != 200:
+            return
+        body = assigned.json()
+        rows = body.get("assignments", []) if isinstance(body, dict) else []
+        wanted = {row.get("task_id") for row in rows if row.get("task_id")}
+        if not wanted:
+            return
+        free = await self._client.get(
+            "/tasks", params={"owner": "free", "status": "pending", "ready_only": "true"},
+        )
+        if free.status_code != 200 or not isinstance(free.json(), list):
+            return
+        chosen = next((task for task in free.json() if task.get("task_id") in wanted), None)
+        if chosen is None:
+            return
+        claim = await self._client.post(
+            f"/tasks/{chosen['task_id']}/claim", json={"agent_id": self.agent_id},
+        )
+        if claim.status_code != 200:
+            return
+        logger.info("Agent '%s' claimed assigned task %s", self.agent_id, chosen["task_id"])
+        try:
+            await self._client.post("/runtime/native/start", json={
+                "task_id": chosen["task_id"],
+                "idempotency_key": f"dispatch:{chosen['task_id']}",
+                "agent_id": self.agent_id,
+            })
+        except Exception as exc:
+            logger.debug("Native runtime attempt was not recorded: %s", exc)
+        claimed = claim.json()
+        await self._handle_active_task(claimed if isinstance(claimed, dict) else chosen)
 
     async def _record_message_failure(self, message_id: str, error: str) -> None:
         self._message_retry_after[message_id] = time.monotonic() + max(3.0, self.poll_interval_seconds)
@@ -270,7 +306,9 @@ class WorkerDaemon:
                 ),
             )
             thread_id = message.get("conversation_id") or message.get("correlation_id") or message_id
-            result = await self.runner.execute_turn(prompt, thread_id=thread_id)
+            result = await self.runner.execute_turn(
+                prompt, thread_id=thread_id, timeout_seconds=self.turn_timeout_seconds,
+            )
             if not result.success:
                 await self._record_message_failure(message_id, result.error or "Runner failed")
                 return result
@@ -325,7 +363,7 @@ class WorkerDaemon:
         task = {**task, "runtime_messages": await self._runtime_messages(task_id)}
         prompt = self.runner.assemble_prompt(task=task, decisions=decisions)
 
-        result = await self.runner.execute_turn(prompt)
+        result = await self.runner.execute_turn(prompt, timeout_seconds=self.turn_timeout_seconds)
         await self._finish_attempt(task_id, "completed" if result.success else "failed")
 
         if result.success and await self._closes_workflow_step(task):

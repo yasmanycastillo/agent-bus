@@ -103,8 +103,12 @@ async def test_worker_daemon_claims_and_runs_task(test_bus, tmp_path):
     # Register agent
     await test_bus.registry.register(AgentInfo(agent_id="worker_bob", display_name="Bob"))
 
-    # Create free pending task
+    # Create a free task that this worker was assigned. Unassigned work stays put.
     await test_bus.tasks.create(task_id="T500", title="Build feature X")
+    from agent_bus.core.instructions import InstructionLog
+    await InstructionLog(test_bus.db).add_assignment(
+        "instruction-1", "worker_bob", "codex", "implement", "Build feature X", "T500",
+    )
 
     executed_tasks = []
 

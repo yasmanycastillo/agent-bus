@@ -97,6 +97,8 @@ class DeliveryHub:
             return httpx.Response(200, json={"agent_id": "bob", "paused": False})
         if path in ("/decisions", "/tasks"):
             return httpx.Response(200, json=[])
+        if path == "/agents/bob/assignments":
+            return httpx.Response(200, json={"assignments": []})
         if path == "/agents/bob/active-work":
             return httpx.Response(200, json={})
         pytest.fail(f"Unexpected request {request.method} {path}")

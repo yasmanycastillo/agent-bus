@@ -135,6 +135,10 @@ async def test_http_claim_has_one_winner(claim_buses):
 async def test_worker_does_not_execute_after_losing_claim(claim_buses):
     first, second = claim_buses
     await first.tasks.create("T1", "Claim race")
+    from agent_bus.core.instructions import InstructionLog
+    await InstructionLog(first.db).add_assignment(
+        "instruction-1", "bob", "codex", "implement", "Claim race", "T1",
+    )
     executions = []
 
     async def execute(prompt, session_id):

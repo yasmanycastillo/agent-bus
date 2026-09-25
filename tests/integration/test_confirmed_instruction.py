@@ -62,4 +62,23 @@ async def test_coordinator_assigns_only_a_confirmed_instruction(tmp_path):
         assert writing.json()["task_id"] in review_task["independent_from"]
         inbox = (await client.get("/inbox/claude-01/messages")).json()
         assert any(text in ((message.get("body") or {}).get("text") or "") for message in inbox["messages"])
+
+        profile = await client.post("/agents/grok-01/route-profile", json={
+            "declared": ["code-review"], "approved": ["code-review"], "can_edit": False,
+        })
+        assert profile.status_code == 200, profile.text
+        free = await client.post("/tasks", json={
+            "task_id": "adapt-ar-aging", "title": "aging", "description": "implementation work",
+        })
+        assert free.status_code == 200, free.text
+        stolen = await client.post("/tasks/adapt-ar-aging/claim", json={"agent_id": "grok-01"})
+        assert stolen.status_code == 409
+        assert "reviewer" in stolen.json()["error"]
+        released = await client.post(f"/tasks/{writing.json()['task_id']}/reassign", json={"new_owner": "free"})
+        assert released.status_code == 200, released.text
+        taken = await client.post(f"/tasks/{writing.json()['task_id']}/claim", json={"agent_id": "grok-01"})
+        assert taken.status_code == 409
+        assert "claude-01" in taken.json()["error"]
+        listed = (await client.get("/agents/claude-01/assignments")).json()
+        assert writing.json()["task_id"] in {row["task_id"] for row in listed["assignments"]}
     await db.close()

@@ -156,6 +156,15 @@ async def test_pilot_end_to_end_operational_cycle(
         )
         assert t_create.status_code == 200
 
+    from agent_bus.core.instructions import InstructionLog
+    from agent_bus.reputation.database import Database
+    assignment_db = Database(str(tmp_path / "live-bus.db"))
+    await assignment_db.initialize()
+    await InstructionLog(assignment_db).add_assignment(
+        "pilot", worker_agent, "codex", "implement", "Implement multiplication feature", task_id,
+    )
+    await assignment_db.close()
+
     # 5. Run one step of worker daemon polling / task claiming & execution
     worker_daemon._client = async_bus_client(worker_agent, base_url=live_bus_url, timeout=10.0)
     try:

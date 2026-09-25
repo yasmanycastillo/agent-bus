@@ -627,6 +627,11 @@ class MessageBus:
         async def get_route_profile(agent_id: str):
             return await self._load_profile(agent_id)
 
+        @self.app.get("/agents/{agent_id}/assignments")
+        async def agent_assignments(agent_id: str):
+            from agent_bus.core.instructions import InstructionLog
+            return {"assignments": await InstructionLog(self.db).for_agent(agent_id)}
+
         @self.app.post("/tasks/{task_id}/requirements")
         async def set_requirements(task_id: str, request: Request):
             body = await self._json_object(request)
@@ -1667,6 +1672,9 @@ class MessageBus:
         task = await self.tasks.get(task_id)
         if task is None:
             return None
+        assigned = await self._assigned_elsewhere(task, agent_id)
+        if assigned:
+            return JSONResponse({"error": assigned}, status_code=409)
         conflict = await self._independence_conflict(task, agent_id)
         if conflict:
             return JSONResponse({"error": conflict}, status_code=409)
@@ -1680,6 +1688,20 @@ class MessageBus:
             {"error": reason, "eligible": list(decision.eligible), "reasons": decision.reasons},
             status_code=409,
         )
+
+    async def _assigned_elsewhere(self, task, agent_id: str) -> str | None:
+        from agent_bus.core.instructions import InstructionLog
+        holder = await InstructionLog(self.db).holder(task.task_id)
+        if holder is not None and holder["agent_id"] != agent_id:
+            return f"task is assigned to {holder['agent_id']}"
+        if holder is not None:
+            return None
+        profile = await self._load_profile(agent_id)
+        if profile["can_edit"]:
+            return None
+        if "code-review" in set(task.requirements or []):
+            return None
+        return "a reviewer does not claim implementation work"
 
     async def _independence_conflict(self, task, agent_id: str) -> str | None:
         for dependency_id in task.independent_from:

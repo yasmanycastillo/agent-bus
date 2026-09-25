@@ -88,6 +88,23 @@ class InstructionLog:
         )
         return [dict(row) for row in rows]
 
+    async def for_agent(self, agent_id: str) -> list[dict]:
+        await self.ensure_schema()
+        rows = await self._db.conn.execute_fetchall(
+            """SELECT task_id, role, agent_id, title FROM work_assignments
+               WHERE agent_id = ? ORDER BY assignment_id""",
+            (agent_id,),
+        )
+        return [dict(row) for row in rows]
+
+    async def holder(self, task_id: str) -> dict | None:
+        await self.ensure_schema()
+        rows = await self._db.conn.execute_fetchall(
+            "SELECT agent_id, role FROM work_assignments WHERE task_id = ? ORDER BY assignment_id",
+            (task_id,),
+        )
+        return dict(rows[0]) if rows else None
+
     async def add_assignment(self, instruction_id: str, agent_id: str, provider: str, role: str, title: str, task_id: str) -> None:
         await self._db.conn.execute(
             """INSERT INTO work_assignments
