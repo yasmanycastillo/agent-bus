@@ -1,5 +1,7 @@
 # Universal Agent Protocol for agent-bus
 
+If the user only asks to install agent-bus as an MCP server, follow [Instalar como MCP](README.md#instalar-como-mcp) and stop. Do not lock files, start a watcher, read the source, create credentials, or pin a project hub.
+
 This repository is governed by the **agent-bus** autonomous multi-agent coordination protocol. Every AI coding agent (Claude Code, Antigravity/AGY, Codex, Grok, Aider, etc.) operating in this workspace **MUST** adhere to the following rules:
 
 ---

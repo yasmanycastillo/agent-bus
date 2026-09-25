@@ -43,7 +43,7 @@ def get_mcp_config_path(
         elif client == "gemini":
             return root / ".gemini" / "mcp_config.json"
         elif client == "codex":
-            return root / ".codex" / "mcp.json"
+            return root / ".codex" / "config.toml"
         elif client == "grok":
             return root / ".grok" / "mcp.json"
         elif client == "hermes":
@@ -67,13 +67,13 @@ def get_mcp_config_path(
         elif client == "gemini":
             return home / ".gemini" / "antigravity-cli" / "mcp_config.json"
         elif client == "codex":
-            return home / ".codex" / "mcp.json"
+            return home / ".codex" / "config.toml"
         elif client == "grok":
             return home / ".grok" / "mcp.json"
         elif client == "hermes":
             return home / ".hermes" / "config.yaml"
         elif client == "agy":
-            return home / ".gemini" / "antigravity-cli" / "mcp_config.json"
+            return home / ".gemini" / "config" / "mcp_config.json"
 
     raise ValueError(f"Invalid scope '{scope}'. Must be 'project' or 'global'.")
 
@@ -113,9 +113,13 @@ def install_mcp_config(
     Returns:
         (config_path, server_config, already_existed)
     """
+    client = client.lower().strip()
     config_path = get_mcp_config_path(client, scope=scope, project_root=project_root)
     resolved_agent = agent_id or DEFAULT_CLIENT_AGENTS.get(client, "agent")
     server_cfg = build_mcp_server_config(resolved_agent, command=command, bus_url=bus_url, env=env)
+    if client == "codex":
+        existed = _install_codex_server(config_path, server_name, server_cfg, dry_run=dry_run)
+        return config_path, server_cfg, existed
     if client == "hermes":
         existed = _install_hermes_server(config_path, server_name, server_cfg, dry_run=dry_run)
         return config_path, server_cfg, existed
@@ -159,7 +163,10 @@ def uninstall_mcp_config(
     Returns:
         (config_path, was_removed)
     """
+    client = client.lower().strip()
     config_path = get_mcp_config_path(client, scope=scope, project_root=project_root)
+    if client == "codex":
+        return config_path, _uninstall_codex_server(config_path, server_name, dry_run=dry_run)
     if client == "hermes":
         return config_path, _uninstall_hermes_server(config_path, server_name, dry_run=dry_run)
     if not config_path.exists():
@@ -215,6 +222,89 @@ def _uninstall_hermes_server(config_path: Path, server_name: str, *, dry_run: bo
     if removed and not dry_run:
         config_path.write_text(updated, encoding="utf-8")
     return removed
+
+
+def _codex_block(name: str, server_cfg: dict[str, Any]) -> str:
+    args = ", ".join(json.dumps(arg) for arg in server_cfg["args"])
+    lines = [
+        f"[mcp_servers.{name}]",
+        f"command = {json.dumps(server_cfg['command'])}",
+        f"args = [{args}]",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _install_codex_server(
+    config_path: Path,
+    server_name: str,
+    server_cfg: dict[str, Any],
+    *,
+    dry_run: bool,
+) -> bool:
+    text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    updated, existed = _splice_codex_server(text, server_name, _codex_block(server_name, server_cfg))
+    if not dry_run:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(updated, encoding="utf-8")
+    return existed
+
+
+def _uninstall_codex_server(config_path: Path, server_name: str, *, dry_run: bool) -> bool:
+    if not config_path.exists():
+        return False
+    text = config_path.read_text(encoding="utf-8")
+    updated, removed = _splice_codex_server(text, server_name, "")
+    if removed and not dry_run:
+        config_path.write_text(updated, encoding="utf-8")
+    return removed
+
+
+def _codex_table_span(lines: list[str], start: int) -> int:
+    end = start + 1
+    while end < len(lines):
+        stripped = lines[end].strip()
+        if not stripped or stripped.startswith("#") or lines[end].startswith("["):
+            break
+        end += 1
+    return end
+
+
+def _splice_codex_server(text: str, server_name: str, block: str) -> tuple[str, bool]:
+    """Replace the Codex server table and drop a pinned env table. Leave every other line."""
+    lines = text.splitlines(keepends=True)
+    header = f"[mcp_servers.{server_name}]"
+    env_header = f"[mcp_servers.{server_name}.env]"
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith(header) or line.startswith(env_header):
+            end = _codex_table_span(lines, index)
+            spans.append((index, end))
+            index = end
+            continue
+        index += 1
+    if not spans:
+        if not block:
+            return text, False
+        suffix = "" if not text or text.endswith("\n") else "\n"
+        return text + suffix + block, False
+    skip = {line_no for start, end in spans[1:] for line_no in range(start, end)}
+    first = spans[0]
+    replacement = [block] if block else []
+    rebuilt: list[str] = []
+    index = 0
+    while index < len(lines):
+        if index in skip:
+            index += 1
+            continue
+        if index == first[0]:
+            rebuilt.extend(replacement)
+            index = first[1]
+            continue
+        rebuilt.append(lines[index])
+        index += 1
+    return "".join(rebuilt), True
 
 
 def _splice_hermes_server(text: str, server_name: str, block: str) -> tuple[str, bool]:

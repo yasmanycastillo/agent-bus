@@ -31,7 +31,7 @@ def test_get_mcp_config_path_project(tmp_path):
     assert get_mcp_config_path("cursor", scope="project", project_root=root) == root / ".cursor" / "mcp.json"
     assert get_mcp_config_path("claude", scope="project", project_root=root) == root / ".claude" / "mcp.json"
     assert get_mcp_config_path("gemini", scope="project", project_root=root) == root / ".gemini" / "mcp_config.json"
-    assert get_mcp_config_path("codex", scope="project", project_root=root) == root / ".codex" / "mcp.json"
+    assert get_mcp_config_path("codex", scope="project", project_root=root) == root / ".codex" / "config.toml"
     assert get_mcp_config_path("grok", scope="project", project_root=root) == root / ".grok" / "mcp.json"
 
 
@@ -47,12 +47,12 @@ def test_get_mcp_config_path_global(monkeypatch, tmp_path):
     assert gemini_path == fake_home / ".gemini" / "antigravity-cli" / "mcp_config.json"
 
     codex_path = get_mcp_config_path("codex", scope="global")
-    assert codex_path == fake_home / ".codex" / "mcp.json"
+    assert codex_path == fake_home / ".codex" / "config.toml"
 
     grok_path = get_mcp_config_path("grok", scope="global")
     assert grok_path == fake_home / ".grok" / "mcp.json"
     assert get_mcp_config_path("hermes", scope="global") == fake_home / ".hermes" / "config.yaml"
-    assert get_mcp_config_path("agy", scope="global") == fake_home / ".gemini" / "antigravity-cli" / "mcp_config.json"
+    assert get_mcp_config_path("agy", scope="global") == fake_home / ".gemini" / "config" / "mcp_config.json"
 
 
 def test_get_mcp_config_path_errors():
@@ -147,9 +147,55 @@ def test_hermes_install_keeps_the_rest_of_the_config(tmp_path, monkeypatch):
     assert "# keep this comment" in removed_text
 
 
+def test_codex_install_keeps_the_rest_of_the_config(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    config = fake_home / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "model = \"demo\"\n"
+        "# keep this comment\n"
+        "\n"
+        "[mcp_servers.other]\n"
+        "command = \"echo\"\n"
+        "\n"
+        "[mcp_servers.agent-bus]\n"
+        "command = \"/old/agent-bus\"\n"
+        "args = [\"mcp-server\", \"--agent\", \"codex\"]\n"
+        "# between\n"
+        "\n"
+        "[mcp_servers.agent-bus.env]\n"
+        "AGENT_BUS_URL = \"http://localhost:8420\"\n"
+        "\n"
+        "# tail comment\n"
+        "[hooks.state]\n"
+        "ok = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    path, cfg, existed = install_mcp_config("codex", scope="global")
+    text = path.read_text(encoding="utf-8")
+    assert existed
+    assert cfg["args"] == ["mcp-server", "--agent", "codex"]
+    assert "# keep this comment" in text
+    assert "# between" in text
+    assert "# tail comment" in text
+    assert "[mcp_servers.other]" in text
+    assert "[hooks.state]" in text
+    assert "http://localhost:8420" not in text
+    assert text.count("[mcp_servers.agent-bus]") == 1
+    assert "command = \"agent-bus\"" in text
+
+    removed_path, removed = uninstall_mcp_config("codex", scope="global")
+    removed_text = removed_path.read_text(encoding="utf-8")
+    assert removed
+    assert "[mcp_servers.agent-bus]" not in removed_text
+    assert "[mcp_servers.other]" in removed_text
+    assert "[hooks.state]" in removed_text
+
+
 def test_agy_install_merges_mcp_servers(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
-    config = fake_home / ".gemini" / "antigravity-cli" / "mcp_config.json"
+    config = fake_home / ".gemini" / "config" / "mcp_config.json"
     config.parent.mkdir(parents=True)
     config.write_text(json.dumps({"mcpServers": {"agent-comms": {"command": "agent-comms"}}}), encoding="utf-8")
     monkeypatch.setattr(Path, "home", lambda: fake_home)
@@ -217,7 +263,7 @@ def test_cli_mcp_commands(tmp_path, monkeypatch):
     assert res_inst_all.exit_code == 0
     assert (tmp_path / ".cursor" / "mcp.json").exists()
     assert (tmp_path / ".claude" / "mcp.json").exists()
-    assert (tmp_path / ".codex" / "mcp.json").exists()
+    assert (tmp_path / ".codex" / "config.toml").exists()
     assert (tmp_path / ".grok" / "mcp.json").exists()
 
     # 4. Uninstall client

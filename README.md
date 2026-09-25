@@ -1,5 +1,16 @@
 # agent-bus
 
+## Instalar como MCP
+
+Si el pedido es instalar agent-bus como MCP, este bloque es toda la tarea. El cliente es `codex`, `agy`, `hermes`, `claude`, `cursor`, `grok` o `gemini`.
+
+```sh
+agent-bus mcp install --scope global --client codex --agent codex
+agent-bus mcp install --scope global --client agy --agent agy
+```
+
+Ese comando no crea credenciales, no elige un hub y no fija `AGENT_BUS_PROJECT_ROOT`, `AGENT_BUS_URL` ni `AGENT_BUS_SESSION_FILE`. No arranques `mcp-server`, no leas el código y no edites este repositorio. Reinicia el cliente.
+
 Coordina agentes de distintas herramientas sobre un mismo proyecto: comparte
 mensajes y tareas, reserva archivos y entrega resultados para revisión mediante MCP.
 

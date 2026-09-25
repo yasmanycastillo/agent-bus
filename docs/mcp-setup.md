@@ -1,5 +1,7 @@
 # Conectar un cliente MCP
 
+Si el pedido es solo instalar agent-bus como MCP, ejecuta el comando de [Instalar como MCP](../README.md#instalar-como-mcp) y termina. No leas el resto de esta guía para ese pedido.
+
 El servidor MCP permite que un agente consulte pendientes, coordine archivos y
 entregue trabajo al hub. Funciona por stdio: el cliente inicia un proceso
 `agent-bus mcp-server` y se comunica con él mediante JSON-RPC.
@@ -38,7 +40,7 @@ agent-bus mcp install --scope global --client hermes --agent hermes
 agent-bus mcp install --client all --dry-run
 ```
 
-La instalación conserva los demás servidores MCP. AGY escribe en el JSON de Antigravity CLI (`~/.gemini/antigravity-cli/mcp_config.json` en ámbito global). Hermes escribe sólo el bloque `agent-bus` dentro de `mcp_servers` en `~/.hermes/config.yaml`, sin reescribir el resto del archivo. El ámbito global no fija un proyecto ni un puerto: cada proyecto sigue necesitando su propia credencial.
+La instalación conserva los demás servidores. Codex escribe solo la tabla `[mcp_servers.agent-bus]` de `~/.codex/config.toml`. AGY escribe en `~/.gemini/config/mcp_config.json`. Hermes escribe solo el bloque `agent-bus` de `~/.hermes/config.yaml`. El ámbito global no fija un proyecto ni un puerto.
 
 Para una configuración manual, la forma del cliente JSON es:
 
