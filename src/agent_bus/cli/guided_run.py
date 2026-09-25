@@ -196,14 +196,17 @@ def _register_agent(client, agent_id: str, caps: list[str], runtime: str, comman
     _ok(client.post(f"/agents/{agent_id}/runtime", json={"runtime": runtime, "command": command}))
 
 
-def advance_once(client, instance: str, workspace: Path, agents: list[str], *, repo: Path | None, branch: str | None) -> dict:
+def advance_once(
+    client, instance: str, workspace: Path, agents: list[str], *,
+    repo: Path | None, branch: str | None, timeout: int = 30,
+) -> dict:
     for agent_id in agents:
         _ok(client.post(f"/agents/{agent_id}/heartbeat"))
     body: dict = {
         "workflow": "feature-development",
         "instance_id": instance,
         "workspace_ref": str(workspace),
-        "timeout": 30,
+        "timeout": timeout,
     }
     if repo is not None and branch:
         body["repo_dir"] = str(repo)
@@ -223,12 +226,16 @@ def drive_run(client, answers: dict, *, repo: Path, ask, verdict_client=None) ->
     click.echo(f"Tareas: {', '.join(task['task_id'] for task in compiled.get('tasks') or [])}")
     review_id = f"feature-development-{answers['instance']}-review"
     for _ in range(20):
-        result = advance_once(client, answers["instance"], workspace, agents, repo=None, branch=None)
+        click.echo("Siguiente paso. El programa trabaja solo y puede tardar.")
+        result = advance_once(client, answers["instance"], workspace, agents, repo=None, branch=None, timeout=1800)
         status = result.get("status")
         click.echo(f"Avance: {status} {result.get('task_id', '')} {result.get('task_status', '')}".strip())
         if status == "dispatched" and result.get("task_status") == "in_progress":
-            _wait_done(client, result["task_id"])
-            continue
+            if result.get("runtime") == "native" and result.get("state") == "started":
+                click.echo("El worker de ese agente está haciendo el paso.")
+                _wait_done(client, result["task_id"])
+                continue
+            raise click.ClickException(_unfinished(result))
         if status == "dispatched" and result.get("task_status") == "done":
             continue
         if status in ("waiting_for_integration", "waiting_for_review"):
@@ -253,6 +260,15 @@ def drive_run(client, answers: dict, *, repo: Path, ask, verdict_client=None) ->
         if result.get("error"):
             raise click.ClickException(result["error"])
     raise click.ClickException("La corrida no terminó")
+
+
+def _unfinished(result: dict) -> str:
+    task_id = result.get("task_id") or "el paso"
+    if result.get("state") == "failed":
+        return f"{task_id}: el programa terminó con error. No se puede seguir."
+    if result.get("state") == "unknown":
+        return f"{task_id}: el programa no terminó solo. No puede quedarse esperando que escribas."
+    return f"{task_id} no quedó terminado ({result.get('state') or 'sin estado'})."
 
 
 def _wait_done(client, task_id: str) -> None:

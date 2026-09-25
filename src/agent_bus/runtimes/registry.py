@@ -17,6 +17,18 @@ from agent_bus.runtimes.protocol import RuntimeStartRequest
 RUNTIMES = frozenset({"native", "external", "sandbox"})
 
 
+def expand_provider_command(command: list[str], prompt: str) -> list[str]:
+    """Give a bare Claude or Codex command the task, so it exits instead of waiting for a keyboard."""
+    if not command or not prompt:
+        return list(command)
+    program = command[0]
+    if program == "claude" and "-p" not in command:
+        return ["claude", "-p", prompt, "--output-format", "json"]
+    if program == "codex" and "exec" not in command:
+        return ["codex", "exec", "--json", prompt]
+    return list(command)
+
+
 class RegistryError(Exception):
     def __init__(self, message: str, status_code: int = 422) -> None:
         super().__init__(message)
@@ -28,6 +40,16 @@ class RuntimeRegistry:
         self._db = db
         self._project_id = project_id
         self._sandbox_opener = sandbox_opener
+
+    async def _task_prompt(self, task_id: str) -> str:
+        rows = await self._db.conn.execute_fetchall(
+            "SELECT title, description FROM tasks WHERE task_id = ?", (task_id,),
+        )
+        if not rows:
+            return ""
+        title = rows[0]["title"] or ""
+        description = rows[0]["description"] or ""
+        return f"{title}\n\n{description}".strip()
 
     async def register(self, agent_id: str, runtime: str, command: list[str] | None = None) -> dict:
         if runtime not in RUNTIMES:
@@ -67,6 +89,7 @@ class RuntimeRegistry:
         elif runtime == "external":
             if not workspace_ref:
                 raise RegistryError("an external runtime needs workspace_ref")
+            command = expand_provider_command(command, await self._task_prompt(task_id))
             adapter = ExternalCommandRuntime(self._db, command)
             session = await adapter.start(request)
             if session.state == "started":

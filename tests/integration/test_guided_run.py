@@ -8,6 +8,7 @@ import pytest
 from httpx import ASGITransport
 
 from agent_bus.cli.guided_run import collect_answers, drive_run, ensure_project_hub
+from agent_bus.runtimes.registry import expand_provider_command
 from agent_bus.core.bus import MessageBus
 from agent_bus.core.inbox import InboxManager
 from agent_bus.core.registry import AgentRegistry
@@ -19,6 +20,13 @@ def git(path, *args):
     result = subprocess.run(["git", *args], cwd=path, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
+
+
+def test_bare_provider_command_receives_the_task():
+    prompt = "Descubre el repositorio"
+    assert expand_provider_command(["claude"], prompt) == ["claude", "-p", prompt, "--output-format", "json"]
+    assert expand_provider_command(["codex"], prompt)[:4] == ["codex", "exec", "--json", prompt]
+    assert expand_provider_command(["claude", "-p", "ya"], prompt) == ["claude", "-p", "ya"]
 
 
 def test_another_project_on_the_port_gets_its_own_hub():
