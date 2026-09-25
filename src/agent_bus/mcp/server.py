@@ -30,7 +30,7 @@ from agent_bus.mcp import coordination
 logger = logging.getLogger("agent_bus.mcp")
 
 SERVER_NAME = "agent-bus"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 
 
 class DecisionToolArguments(BaseModel):

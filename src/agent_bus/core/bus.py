@@ -172,7 +172,7 @@ class MessageBus:
         self.locks = LockManager(db)
         self.skills = SkillRegistry(db)
         self.kickoff = KickoffManager(db)
-        self.app = FastAPI(title="agent-bus", version="0.1.0")
+        self.app = FastAPI(title="agent-bus", version="0.2.0")
         self._sse_subscribers: dict[str, set[asyncio.Event]] = defaultdict(set)
         self._global_sse_subscribers: set[asyncio.Event] = set()
         self._ws_connections: dict[str, WebSocket] = {}
@@ -301,7 +301,7 @@ class MessageBus:
         async def status():
             agents = await self.registry.list_all()
             return {
-                "bus_version": "0.1.0",
+                "bus_version": "0.2.0",
                 "project_id": self.project_id,
                 "agents_online": sum(1 for a in agents if a.status.value == "online"),
                 "agents_total": len(agents),

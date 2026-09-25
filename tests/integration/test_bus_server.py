@@ -149,7 +149,7 @@ async def test_archive_message(client: AsyncClient):
 async def test_status_endpoint(client: AsyncClient):
     resp = await client.get("/status")
     data = resp.json()
-    assert data["bus_version"] == "0.1.0"
+    assert data["bus_version"] == "0.2.0"
     assert data["agents_total"] == 0
 
 

@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-25
+
+agent-bus coordina agentes que ya saben trabajar. No inventa el encargo ni lo ejecuta.
+
+- El humano habla con un agente: Hermes, Grok, Claude, Codex o AGY. Ese agente confirma el texto y lo reparte por MCP.
+- Quien revisa no es quien implementa. Hermes arma el plan; los demás programan o revisan.
+- Instalar el MCP es un comando. No crea credenciales en este repositorio: la sesión nace en el proyecto que se coordina.
+- Cada worker solo toma la tarea que tiene asignada. Un revisor no reclama implementación. Un mensaje agotado no bloquea la cola. El turno espera 1800 segundos.
 
 - Integración nativa de Grok en `watch`, selección del proveedor desde la
   credencial y lanzadores por identidad generados durante onboarding.
