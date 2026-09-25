@@ -214,7 +214,7 @@ class WorkerDaemon:
                     try:
                         await self._client.post("/runtime/native/start", json={
                             "task_id": task_to_claim["task_id"],
-                            "idempotency_key": f"native:{task_to_claim['task_id']}",
+                            "idempotency_key": f"dispatch:{task_to_claim['task_id']}",
                             "agent_id": self.agent_id,
                         })
                     except Exception as exc:
@@ -328,11 +328,30 @@ class WorkerDaemon:
         result = await self.runner.execute_turn(prompt)
         await self._finish_attempt(task_id, "completed" if result.success else "failed")
 
-        if result.success:
+        if result.success and await self._closes_workflow_step(task):
+            await self._client.post(f"/tasks/{task_id}/done", json={"agent_id": self.agent_id})
+        elif result.success:
             await self._commit_and_submit_review(task_id)
 
         await self._set_agent_status(AgentStatus.ONLINE, work=None)
         return result
+
+    async def _closes_workflow_step(self, task: dict[str, Any]) -> bool:
+        description = str(task.get("description") or "")
+        task_id = str(task.get("task_id") or "")
+        if not description.startswith("workflow "):
+            return False
+        if task.get("title") == "integration" or task_id.endswith("-integration"):
+            return False
+        if not self._client:
+            return False
+        try:
+            policy = await self._client.get(f"/tasks/{task_id}/evidence-policy")
+            if policy.status_code == 200 and policy.json().get("strict"):
+                return False
+        except Exception:
+            return False
+        return True
 
     async def _runtime_allows_execution(self, task_id: str) -> bool:
         if not self._client or not task_id:
@@ -340,7 +359,7 @@ class WorkerDaemon:
         try:
             started = await self._client.post("/runtime/native/start", json={
                 "task_id": task_id,
-                "idempotency_key": f"native:{task_id}",
+                "idempotency_key": f"dispatch:{task_id}",
                 "agent_id": self.agent_id,
             })
             if started.status_code == 409:
@@ -366,7 +385,7 @@ class WorkerDaemon:
         try:
             started = await self._client.post("/runtime/native/start", json={
                 "task_id": task_id,
-                "idempotency_key": f"native:{task_id}",
+                "idempotency_key": f"dispatch:{task_id}",
                 "agent_id": self.agent_id,
             })
             if started.status_code != 200:
