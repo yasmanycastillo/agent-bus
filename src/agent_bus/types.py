@@ -94,6 +94,7 @@ class Task(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     requirements: list[str] = Field(default_factory=list)
     independent_from: list[str] = Field(default_factory=list)
+    blocked_reason: str | None = None
     operation_key: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

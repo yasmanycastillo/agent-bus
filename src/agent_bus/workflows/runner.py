@@ -241,14 +241,35 @@ async def _notify_review_wait(
 
 
 async def _notify_blocked(bus: MessageBus, task_id: str, reason: str) -> None:
-    await bus.inbox.send(Envelope(
-        from_agent="integrator",
-        to_agent="workflow",
-        message_type=MessageType.BLOCKER,
-        reply_needed=True,
-        related_task=task_id,
-        body={"text": f"Task {task_id} blocked: {reason[:300]}", "details": reason[:300]},
-    ), ["workflow"])
+    integration = await bus.tasks.get(task_id)
+    review_task = None
+    for dependency_id in integration.depends_on if integration else []:
+        dependency = await bus.tasks.get(dependency_id)
+        if dependency is not None and "code-review" in dependency.requirements:
+            review_task = dependency
+            break
+    recipients: list[str] = []
+    if review_task is not None and review_task.owner not in (None, "free"):
+        recipients.append(review_task.owner)
+    for implementation_id in review_task.independent_from if review_task is not None else []:
+        implementation = await bus.tasks.get(implementation_id)
+        if implementation is None or implementation.owner in (None, "free"):
+            continue
+        if implementation.owner not in recipients:
+            recipients.append(implementation.owner)
+    if not recipients:
+        return
+    digest = hashlib.sha256(f"{task_id}:{reason}".encode()).hexdigest()[:32]
+    body = {"text": f"Task {task_id} blocked: {reason[:300]}", "reason": reason[:300]}
+    for recipient in recipients:
+        await bus.inbox.send(Envelope(
+            from_agent="integrator",
+            to_agent=recipient,
+            message_type=MessageType.BLOCKER,
+            reply_needed=True,
+            related_task=task_id,
+            body=body,
+        ), [recipient], idempotency_key=f"block:{digest}:{recipient}")
 
 
 async def _implementation_attempt(bus: MessageBus, task_id: str) -> dict | None:

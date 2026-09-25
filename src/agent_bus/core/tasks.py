@@ -340,7 +340,7 @@ class TaskManager:
                 condition = " AND owner = ? AND status IN ('in_progress', 'in_review')" if actor else " AND status != 'done'"
                 params = (now, task_id, actor) if actor else (now, task_id)
                 cursor = connection.execute(
-                    "UPDATE tasks SET status = 'done', updated_at = ? WHERE task_id = ?"
+                    "UPDATE tasks SET status = 'done', blocked_reason = NULL, updated_at = ? WHERE task_id = ?"
                     + condition + " RETURNING *", params,
                 )
                 row = cursor.fetchone()
@@ -366,7 +366,7 @@ class TaskManager:
                     b_task_id = b_row["task_id"] if hasattr(b_row, "keys") else b_row[0]
                     if not b_deps:
                         connection.execute(
-                            "UPDATE tasks SET status = 'pending', updated_at = ? WHERE task_id = ? AND status = 'blocked'",
+                            "UPDATE tasks SET status = 'pending', blocked_reason = NULL, updated_at = ? WHERE task_id = ? AND status = 'blocked'",
                             (now, b_task_id),
                         )
                     else:
@@ -377,7 +377,7 @@ class TaskManager:
                         ).fetchone()[0]
                         if c == len(b_deps):
                             connection.execute(
-                                "UPDATE tasks SET status = 'pending', updated_at = ? WHERE task_id = ? AND status = 'blocked'",
+                                "UPDATE tasks SET status = 'pending', blocked_reason = NULL, updated_at = ? WHERE task_id = ? AND status = 'blocked'",
                                 (now, b_task_id),
                             )
                 connection.execute("RELEASE task_complete")
@@ -430,11 +430,10 @@ class TaskManager:
         """Mark a task as blocked. A named actor must own it; admins pass no actor."""
         now = datetime.now(timezone.utc).isoformat()
         condition = " AND owner = ?" if actor else ""
-        params: tuple = (now, task_id, actor) if actor else (now, task_id)
         rows = await self._db.conn.execute_fetchall(
-            "UPDATE tasks SET status = 'blocked', updated_at = ? WHERE task_id = ? AND status != 'done'"
+            "UPDATE tasks SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE task_id = ? AND status != 'done'"
             + condition + " RETURNING *",
-            params,
+            (reason, now, task_id, actor) if actor else (reason, now, task_id),
         )
         await self._db.conn.commit()
         return self._row_to_task(rows[0]) if rows else None
@@ -543,6 +542,7 @@ class TaskManager:
             operation_key = row["operation_key"] if "operation_key" in keys else None
             requirements_raw = row["requirements"] if "requirements" in keys else "[]"
             independent_raw = row["independent_from"] if "independent_from" in keys else "[]"
+            blocked_reason = row["blocked_reason"] if "blocked_reason" in keys else None
         else:
             task_id = row[0]
             title = row[1]
@@ -558,6 +558,7 @@ class TaskManager:
             operation_key = row[11] if len(row) > 11 else None
             requirements_raw = row[12] if len(row) > 12 else "[]"
             independent_raw = row[13] if len(row) > 13 else "[]"
+            blocked_reason = None
 
         if isinstance(created_at, str):
             created_at = datetime.fromisoformat(created_at)
@@ -591,6 +592,7 @@ class TaskManager:
             depends_on=depends_on,
             requirements=requirements,
             independent_from=independent_from,
+            blocked_reason=blocked_reason,
             operation_key=operation_key,
             created_at=created_at,
             updated_at=updated_at,

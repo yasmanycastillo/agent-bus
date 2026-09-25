@@ -181,11 +181,13 @@ async def test_integration_uses_the_implementation_sha(tmp_path):
         assert "candidate SHA" in mismatched.json()["error"]
         blocked_task = (await client.get("/tasks/feature-development-run-2-integration")).json()
         assert blocked_task["status"] == "blocked"
-        inbox = (await client.get("/inbox/workflow/messages")).json()
-        assert any(
-            "candidate SHA" in ((message.get("body") or {}).get("text") or "")
-            for message in inbox["messages"]
-        )
+        assert "candidate SHA" in blocked_task["blocked_reason"]
+        for recipient in ("impl-01", "analyst-01"):
+            inbox = (await client.get(f"/inbox/{recipient}/messages")).json()
+            assert any(
+                "candidate SHA" in ((message.get("body") or {}).get("text") or "")
+                for message in inbox["messages"]
+            )
         assert git(repo, "rev-parse", "HEAD") == baseline
         await db.conn.execute(
             "UPDATE tasks SET status = 'pending' WHERE task_id = ?",
@@ -332,8 +334,21 @@ async def test_failing_suite_blocks_integration(tmp_path):
         assert "suite failed" in blocked.json()["error"]
         blocked_task = (await client.get("/tasks/feature-development-run-4-integration")).json()
         assert blocked_task["status"] == "blocked"
-        inbox = (await client.get("/inbox/workflow/messages")).json()
-        texts = [((message.get("body") or {}).get("text") or "") for message in inbox["messages"]]
-        assert any("tests failed" in text and "suite failed" in text for text in texts)
+        assert "tests failed" in blocked_task["blocked_reason"]
+        assert "suite failed" in blocked_task["blocked_reason"]
+        await db.conn.execute(
+            "UPDATE tasks SET status = 'pending' WHERE task_id = ?",
+            ("feature-development-run-4-integration",),
+        )
+        await db.conn.commit()
+        repeated = await client.post("/workflows/advance", json={
+            "workflow": "feature-development", "instance_id": "run-4",
+            "workspace_ref": str(repo), "repo_dir": str(repo), "candidate_branch": "main",
+        })
+        assert repeated.json()["status"] == "blocked"
+        for recipient in ("impl-01", "reviewer-01"):
+            inbox = (await client.get(f"/inbox/{recipient}/messages")).json()
+            texts = [((message.get("body") or {}).get("text") or "") for message in inbox["messages"]]
+            assert sum("tests failed" in text and "suite failed" in text for text in texts) == 1
         assert git(repo, "rev-parse", "HEAD") == sha
     await db.close()

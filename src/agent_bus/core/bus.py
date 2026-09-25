@@ -1744,7 +1744,7 @@ class MessageBus:
         for task in await self.tasks.list_all():
             if review_task_id in task.depends_on and task.status == TaskStatus.BLOCKED:
                 await self.db.conn.execute(
-                    "UPDATE tasks SET status = 'pending', updated_at = ? WHERE task_id = ?",
+                    "UPDATE tasks SET status = 'pending', blocked_reason = NULL, updated_at = ? WHERE task_id = ?",
                     (now, task.task_id),
                 )
         await self.db.conn.commit()

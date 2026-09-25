@@ -351,6 +351,7 @@ class Database:
                 ("operation_key", "TEXT"),
                 ("requirements", "TEXT DEFAULT '[]'"),
                 ("independent_from", "TEXT DEFAULT '[]'"),
+                ("blocked_reason", "TEXT"),
             ]
             for name, col_def in new_cols:
                 if name not in columns:
