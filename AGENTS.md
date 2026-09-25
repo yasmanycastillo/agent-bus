@@ -1,6 +1,18 @@
 # Universal Agent Protocol for agent-bus
 
-If the user only asks to install agent-bus as an MCP server, follow [Instalar como MCP](README.md#instalar-como-mcp) and stop. Do not lock files, start a watcher, read the source, create credentials, or pin a project hub.
+## Install as MCP only
+
+If the user only asks to install agent-bus as an MCP server, run one command and stop. Do not lock files, start a watcher, read the source, edit this repository, start `mcp-server`, run `auth create`, or set `AGENT_BUS_PROJECT_ROOT`, `AGENT_BUS_URL`, or `AGENT_BUS_SESSION_FILE`.
+
+```bash
+agent-bus mcp install --scope global --client <client> --agent <agent>
+```
+
+`<client>` is `codex`, `agy`, `hermes`, `claude`, `cursor`, `grok`, or `gemini`. Use that same name for `--agent` unless the user names another identity. Tell the user to restart the client.
+
+The credential is created later, when `bootstrap_agent` receives `project_path` of the project being coordinated. Do not create it inside the agent-bus checkout.
+
+The rules below apply when the user asked you to work in this repository. They do not apply to a bare install.
 
 This repository is governed by the **agent-bus** autonomous multi-agent coordination protocol. Every AI coding agent (Claude Code, Antigravity/AGY, Codex, Grok, Aider, etc.) operating in this workspace **MUST** adhere to the following rules:
 

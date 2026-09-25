@@ -1,6 +1,6 @@
 # Conectar un cliente MCP
 
-Si el pedido es solo instalar agent-bus como MCP, ejecuta el comando de [Instalar como MCP](../README.md#instalar-como-mcp) y termina. No leas el resto de esta guía para ese pedido.
+Para dejar el servidor instalado en un cliente, usa [Instalar como MCP](../README.md#instalar-como-mcp). Esta página explica la conexión cuando hace falta prepararla a mano.
 
 El servidor MCP permite que un agente consulte pendientes, coordine archivos y
 entregue trabajo al hub. Funciona por stdio: el cliente inicia un proceso
