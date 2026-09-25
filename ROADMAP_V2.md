@@ -705,8 +705,9 @@ OpenHands remains a runtime class behind an adapter. The router still selects on
 
 ### Still open
 
-1. Operator documentation for the workflow commands now on `main`.
-2. One `native` agent completes the same `feature-development` definition through `done`. The two-provider test covers two external commands, not native. `advance` leaves a native attempt started; the worker is what marks a non-integration native step `done`.
+1. One `native` agent completes the same `feature-development` definition through `done`. The two-provider test covers two external commands, not native. `advance` leaves a native attempt started; the worker is what marks a non-integration native step `done`.
+
+Operator steps for compile, verdict, advance, and integration are in [docs/workflows.md](docs/workflows.md).
 
 A legacy database gains `requirements`, `independent_from`, and `blocked_reason` without dropping tasks, inbox messages, or reviews. If `initialize` fails halfway, it restores the snapshot taken at the start of that attempt.
 

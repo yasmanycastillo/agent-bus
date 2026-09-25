@@ -117,6 +117,7 @@ administrativa. [Guía de la consola](docs/console.md).
 
 - [Índice de documentación](docs/README.md)
 - [Instalación y operación](docs/first-run.md)
+- [Workflow feature-development](docs/workflows.md)
 - [Conexión MCP](docs/mcp-setup.md)
 - [Desarrollo y pruebas](docs/development.md)
 - [Cambios del producto](CHANGELOG.md)
