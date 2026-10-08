@@ -188,3 +188,10 @@ def test_run_team_uses_checkout_root_and_absolute_worktree(tmp_path, monkeypatch
     assert seen['root'] == checkout
     assert seen['spawn'][3] == str(target)
     assert seen['spawn'][5]['AGENT_BUS_URL'] == 'http://127.0.0.1:12345'
+
+
+def test_environment_drops_inherited_claude_child_session_marker(monkeypatch):
+    # Claude Code stops saving the transcript when it inherits this marker, which breaks --resume.
+    monkeypatch.setenv('CLAUDE_CODE_CHILD_SESSION', '1')
+    env = worker_environment('alice', bus_url='http://127.0.0.1:23456')
+    assert 'CLAUDE_CODE_CHILD_SESSION' not in env

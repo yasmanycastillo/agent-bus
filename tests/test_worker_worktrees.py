@@ -91,6 +91,27 @@ def test_remove(repo):
     assert "agent/claude" not in _git(repo, "branch", "--list")
 
 
+def test_remove_keeps_uncommitted_work_unless_forced(repo):
+    mgr = WorktreeManager(repo_root=repo)
+    mgr.create("claude")
+    (mgr.path_for("claude") / "draft.md").write_text("sin commitear")
+    with pytest.raises(RuntimeError):
+        mgr.remove("claude")
+    assert (mgr.path_for("claude") / "draft.md").exists()
+    mgr.remove("claude", force=True)
+    assert not mgr.exists("claude")
+
+
+def test_remove_keeps_unmerged_branch_unless_forced(repo):
+    mgr = WorktreeManager(repo_root=repo)
+    mgr.create("claude")
+    (mgr.path_for("claude") / "x.md").write_text("x")
+    mgr.commit_all("claude", "trabajo")
+    mgr.remove("claude")
+    assert not mgr.exists("claude")
+    assert "agent/claude" in _git(repo, "branch", "--list")
+
+
 def test_list_all(repo):
     mgr = WorktreeManager(repo_root=repo)
     assert mgr.list_all() == []

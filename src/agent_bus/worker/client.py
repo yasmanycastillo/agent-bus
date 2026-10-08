@@ -22,6 +22,9 @@ def worker_environment(agent_id: str, *, per_agent: bool = False, bus_url: str |
     config = load_config()
     resolved_url = get_bus_url(bus_url)
     env = os.environ.copy()
+    # Inherited from a Claude Code session, this marker turns off transcript saving
+    # in the claude we launch, so its turns could not be resumed.
+    env.pop("CLAUDE_CODE_CHILD_SESSION", None)
     env["AGENT_BUS_AGENT_ID"] = agent_id
     config_dir = get_config_dir().resolve()
     env["AGENT_BUS_CONFIG_DIR"] = str(config_dir)

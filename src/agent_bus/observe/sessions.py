@@ -5,6 +5,7 @@ Missing measurements stay null. A zero is recorded only when the source reported
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -173,7 +174,8 @@ def _read_codex_file(project_root: Path, path: Path) -> dict[str, Any] | None:
 
 def _claude(project_root: Path, home: Path) -> dict[str, Any]:
     result = _blank("claude")
-    encoded = "-" + project_root.as_posix().lstrip("/").replace("/", "-")
+    # Claude Code names the folder by turning every non-alphanumeric character into "-".
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", project_root.as_posix())
     folder = home / ".claude" / "projects" / encoded
     if not folder.is_dir():
         result["session_in_project"] = False

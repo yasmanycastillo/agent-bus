@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -43,7 +44,7 @@ def test_codex_session_in_the_project_keeps_unknown_cost(tmp_path):
 def test_claude_directory_name_marks_the_project(tmp_path):
     project = tmp_path / "app"
     project.mkdir()
-    encoded = "-" + project.resolve().as_posix().lstrip("/").replace("/", "-")
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", project.resolve().as_posix())
     folder = tmp_path / "home" / ".claude" / "projects" / encoded
     folder.mkdir(parents=True)
     (folder / "session.jsonl").write_text(
@@ -53,6 +54,22 @@ def test_claude_directory_name_marks_the_project(tmp_path):
     found = {item["provider"]: item for item in scan_providers(project, home=tmp_path / "home")}
     assert found["claude"]["session_in_project"] is True
     assert found["claude"]["input_tokens"] is None
+
+
+def test_claude_directory_name_replaces_dots_and_underscores(tmp_path):
+    project = tmp_path / ".worktrees" / "my_agent"
+    project.mkdir(parents=True)
+    # Claude Code turns every non-alphanumeric character into "-": /.worktrees -> --worktrees.
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", project.resolve().as_posix())
+    assert "--worktrees-my-agent" in encoded
+    folder = tmp_path / "home" / ".claude" / "projects" / encoded
+    folder.mkdir(parents=True)
+    (folder / "session.jsonl").write_text(
+        json.dumps({"type": "user", "timestamp": "2026-09-25T10:00:00Z", "cwd": str(project)}) + "\n",
+        encoding="utf-8",
+    )
+    found = {item["provider"]: item for item in scan_providers(project, home=tmp_path / "home")}
+    assert found["claude"]["session_in_project"] is True
 
 
 def test_hermes_included_cost_stays_unknown(tmp_path):
