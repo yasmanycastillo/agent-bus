@@ -185,7 +185,16 @@ agent-bus watch --agent claude --cli muxel --muxel-agent Claude
 El watcher escribe la solicitud solo si el panel está `idle` o `done`, espera con
 `muxel ctl wait` y publica la respuesta únicamente si el turno termina (`finished`).
 Un panel trabajando o bloqueado en una pregunta aplaza la solicitud sin contar un
-fallo, y la solicitud no se vuelve a escribir mientras se espera ese turno. Las
+fallo, y la solicitud no se vuelve a escribir mientras se espera ese turno. Como
+muxel 0.2.8 no detecta cuándo trabaja la versión actual de Claude Code, el watcher
+también consulta el estado que Claude publica en `~/.claude/sessions/` para la
+carpeta del panel; cualquier Claude ocupado en esa carpeta aplaza la solicitud.
+Por esa misma razón, `muxel ctl wait` puede tardar unos 30 s más en devolver la
+respuesta.
+
+Abre muxel desde el escritorio o desde una terminal normal, no desde una sesión de
+Claude Code: si hereda sus variables `CLAUDE_CODE_*`, el Claude de cada panel
+arranca sin sesión iniciada (`Not logged in`). Las
 preguntas de permiso del panel las responde el usuario en muxel.
 
 `--status` devuelve JSON con `active`, `state` y `can_dispatch`. Comprueba la reserva

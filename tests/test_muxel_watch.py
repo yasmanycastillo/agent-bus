@@ -19,8 +19,11 @@ def hub(monkeypatch):
 class FakeMuxel:
     """Answers `muxel ctl` the way muxel prints it: one JSON object per command."""
 
-    def __init__(self, status='idle', outcome='finished', reply='Respuesta desde la TUI', asked=None):
+    def __init__(self, status='idle', outcome='finished', reply='Respuesta desde la TUI', asked=None,
+                 awaiting_reply=False, cwd=None):
         self.status = status
+        self.cwd = cwd
+        self.awaiting_reply = awaiting_reply
         self.outcome = outcome
         self.reply = reply
         self.asked = asked
@@ -30,7 +33,7 @@ class FakeMuxel:
         verb = cmd[2]
         self.calls.append((verb, input_text))
         if verb == 'status':
-            out = {'host': 'pc', 'status': self.status}
+            out = {'host': 'pc', 'status': self.status, 'awaiting_reply': self.awaiting_reply, 'cwd': self.cwd, 'remote': False}
         elif verb == 'send':
             self.asked = self.asked or input_text
             out = {'host': 'pc', 'sent': True}
@@ -61,6 +64,30 @@ async def test_busy_pane_defers_without_spending_an_attempt(hub, monkeypatch, tm
     monkeypatch.setattr(watch, '_run_cli', muxel)
     await watch.run_turn('bob', hub.message, {}, cli='muxel', muxel_agent='Claude',
                          sessions_file=tmp_path / 'sessions.json')
+    assert [verb for verb, _ in muxel.calls] == ['status']
+    assert not hub.failures and not hub.message['acknowledged']
+
+
+async def test_pane_that_just_got_a_prompt_counts_as_busy(hub, monkeypatch, tmp_path):
+    # Seen with muxel 0.2.8: a pane reports "done" with awaiting_reply until the new turn shows.
+    muxel = FakeMuxel(status='done', awaiting_reply=True)
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await watch.run_turn('bob', hub.message, {}, cli='muxel', muxel_agent='Claude',
+                         sessions_file=tmp_path / 'sessions.json')
+    assert [verb for verb, _ in muxel.calls] == ['status']
+    assert not hub.failures and not hub.message['acknowledged']
+
+
+async def test_claude_working_in_the_pane_folder_counts_as_busy(hub, monkeypatch, tmp_path):
+    # muxel can report "done" while Claude Code itself says it is busy.
+    muxel = FakeMuxel(status='done', cwd=str(tmp_path / 'project'))
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    from agent_bus.observe import sessions
+    seen = []
+    monkeypatch.setattr(sessions, 'claude_live_status', lambda root, home: seen.append(root) or 'busy')
+    await watch.run_turn('bob', hub.message, {}, cli='muxel', muxel_agent='Claude',
+                         sessions_file=tmp_path / 'sessions.json')
+    assert seen == [tmp_path / 'project']
     assert [verb for verb, _ in muxel.calls] == ['status']
     assert not hub.failures and not hub.message['acknowledged']
 

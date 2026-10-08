@@ -156,10 +156,22 @@ async def _muxel_turn(binary: str, target: str, prompt: str, sent_marker: Path,
     The marker records that the prompt was typed, so a retry after a blocked or
     timed-out turn waits for that same turn instead of typing it again.
     """
-    status = (await _muxel_ctl(binary, ["status", target], agent_id, bus_url)).get("status")
+    info = await _muxel_ctl(binary, ["status", target], agent_id, bus_url)
+    status = info.get("status")
     if not sent_marker.exists():
         if status in MUXEL_BUSY_STATES:
             raise AgentBusy(f"muxel agent '{target}' is {status}")
+        # Right after a prompt, muxel still reports the previous turn's state
+        # until the agent visibly starts; awaiting_reply covers that gap.
+        if info.get("awaiting_reply") is True:
+            raise AgentBusy(f"muxel agent '{target}' has not started its last prompt yet")
+        # muxel 0.2.8 does not see current Claude Code working; Claude's own status file does.
+        cwd = info.get("cwd")
+        if isinstance(cwd, str) and not info.get("remote"):
+            from agent_bus.observe.sessions import claude_live_status
+            live = claude_live_status(Path(cwd), Path.home())
+            if live in ("busy", "waiting"):
+                raise AgentBusy(f"Claude in {cwd} is {live}")
         await _muxel_ctl(binary, ["send", target, "-"], agent_id, bus_url, input_text=prompt)
         write_private_json(sent_marker, {"target": target, "sent_at": time.time()})
     elif status == "blocked":

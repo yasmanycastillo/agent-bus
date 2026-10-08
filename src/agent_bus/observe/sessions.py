@@ -205,7 +205,7 @@ def _read_codex_file(project_root: Path, path: Path) -> dict[str, Any] | None:
 _LIVE_ORDER = ("waiting", "busy", "idle")
 
 
-def _claude_live_status(project_root: Path, home: Path) -> str | None:
+def claude_live_status(project_root: Path, home: Path) -> str | None:
     """What running Claude Code processes in the project say they are doing.
 
     Claude Code keeps ``~/.claude/sessions/<pid>.json`` with ``status`` while it
@@ -232,7 +232,7 @@ def _claude_live_status(project_root: Path, home: Path) -> str | None:
 
 def _claude(project_root: Path, home: Path) -> dict[str, Any]:
     result = _blank("claude")
-    result["live_status"] = _claude_live_status(project_root, home)
+    result["live_status"] = claude_live_status(project_root, home)
     # Claude Code names the folder by turning every non-alphanumeric character into "-".
     encoded = re.sub(r"[^A-Za-z0-9]", "-", project_root.as_posix())
     folder = home / ".claude" / "projects" / encoded
