@@ -198,14 +198,17 @@ async def assign_work(
                 await bus.tasks.hold_for_review(row["task_id"], [task_id])
     await log.add_assignment(instruction_id, assignee, roster[assignee], role, name, task_id,
                              implement_ids if reviews is not None else None)
-    await bus.inbox.send(Envelope(
-        from_agent=stored["coordinator"],
-        to_agent=assignee,
-        message_type=MessageType.INBOX,
-        reply_needed=True,
-        related_task=task_id,
-        body={"text": stored["body"], "title": name, "role": role},
-    ), [assignee])
+    # A coordinator assigning itself already sees the task in my_pending_items;
+    # a message to itself would only sit there unacknowledged.
+    if assignee != stored["coordinator"]:
+        await bus.inbox.send(Envelope(
+            from_agent=stored["coordinator"],
+            to_agent=assignee,
+            message_type=MessageType.INBOX,
+            reply_needed=True,
+            related_task=task_id,
+            body={"text": stored["body"], "title": name, "role": role},
+        ), [assignee])
     return {"task_id": task_id, "owner": assignee, "role": role, "provider": roster[assignee], "instruction_id": instruction_id}
 
 

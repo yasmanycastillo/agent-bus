@@ -366,3 +366,26 @@ async def test_hub_start_closes_a_review_left_open_after_approving_everything(tm
     )
     assert {row["task_id"]: row["status"] for row in rows} == {review: "done", unjudged: "in_progress"}
     await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_assigning_itself_gets_no_message_from_itself(tmp_path):
+    db = Database(str(tmp_path / "bus.db"))
+    await db.initialize()
+    bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+    async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        saved = await client.post("/instructions", json={
+            "agent_id": "claude-01", "instruction": "Planear y construir", "confirmed": True, "agents": AGENTS,
+        })
+        instruction_id = saved.json()["instruction_id"]
+        for agent_id, role in (("claude-01", "plan"), ("codex-01", "implement")):
+            response = await client.post(f"/instructions/{instruction_id}/assignments", json={
+                "agent_id": agent_id, "role": role, "title": f"{role} {agent_id}",
+            })
+            assert response.status_code == 200, response.text
+        # The task itself is the coordinator's record; a message to itself would sit unacknowledged.
+        assert (await client.get("/inbox/claude-01/messages")).json()["messages"] == []
+        assert (await client.get(f"/tasks/{instruction_id}-plan-claude-01")).json()["owner"] == "claude-01"
+        sent = (await client.get("/inbox/codex-01/messages")).json()["messages"]
+        assert [message["from_agent"] for message in sent] == ["claude-01"]
+    await db.close()
