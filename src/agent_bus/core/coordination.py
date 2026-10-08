@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 
 from fastapi import HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
 from agent_bus.core.lock_paths import server_lock_path
 from agent_bus.core.locks import LockBusyError, LockError
@@ -58,6 +58,16 @@ class HandoffRequest(BaseModel):
     validation_summary: StrictStr = Field(default="", max_length=8192)
     release_locks: list[HandoffLock] = Field(default_factory=list, max_length=100)
     acknowledge_message_ids: list[Key] = Field(default_factory=list, max_length=100)
+    candidate_sha: StrictStr | None = Field(
+        default=None, pattern=r"^([0-9a-f]{40}|[0-9a-f]{64})$",
+        description="SHA completo del commit entregado (git rev-parse HEAD). La revisión lo usa como candidato.",
+    )
+
+    @model_validator(mode="after")
+    def _candidate_needs_submitted_work(self):
+        if self.candidate_sha and self.task_status == "blocked":
+            raise ValueError("candidate_sha requires task_status in_review or done")
+        return self
 
 
 INSTRUCTIONS = """agent-bus coordina agentes que trabajan en el mismo proyecto.
@@ -87,6 +97,8 @@ Las reglas siguientes son sólo si ya tienes una tarea asignada:
 5. Usa prepare_edit con una operation_key estable y conserva cada acquisition_id y expires_at.
 6. Renueva locks antes de vencer; si falla, deja de editar y adquiere una reserva nueva.
 7. Entrega con complete_handoff (in_review por defecto), resumen y evidencia de validación.
+   Si entregas código, pasa candidate_sha con el SHA completo de tu commit (git rev-parse HEAD);
+   sin él la revisión no tiene candidato y record_verdict falla.
    Conserva la misma operation_key y argumentos al reintentar. Sólo libera los tokens indicados.
 8. Si esperas respuesta, usa wait_for_updates con event_cursor. No despierta una TUI cerrada.
 9. MCP por sí solo no inicia un worker, watcher ni proveedor headless. Si el agente debe
@@ -204,7 +216,8 @@ class Coordination:
         return await self.operation(principal, "prepare_edit", req.operation_key, payload, action)
 
     async def handoff(self, principal, req):
-        payload = req.model_dump()
+        # exclude_none keeps fingerprints of handoffs without candidate_sha stable across upgrades.
+        payload = req.model_dump(exclude_none=True)
         releases = [(self.path(lock.file_path, lock.scope), lock.acquisition_id) for lock in req.release_locks]
 
         def action(conn, now):
@@ -235,6 +248,15 @@ class Coordination:
                 ("complete_handoff", req.task_id, principal.agent_id, principal.session_id,
                  principal.agent_id, principal.agent_id, timestamp),
             )
+            if req.candidate_sha:
+                # The same candidate record headless workers write, so reviews and workflows find it.
+                conn.execute(
+                    "INSERT INTO runtime_attempts(attempt_id,task_id,idempotency_key,state,external_ref,"
+                    "updated_at,outcome,candidate_sha) VALUES(?,?,?,'completed',?,?,'completed',?)",
+                    (f"handoff-{secrets.token_hex(6)}", req.task_id,
+                     f"handoff:{principal.session_id}:{req.operation_key}", f"mcp:{principal.agent_id}",
+                     timestamp, req.candidate_sha),
+                )
             if req.task_status in ("in_review", "done"):
                 release_reviews(conn, timestamp)
             if req.task_status == "done":
@@ -246,7 +268,8 @@ class Coordination:
                         conn.execute("UPDATE tasks SET status='pending',updated_at=? WHERE task_id=?",
                                      (timestamp, blocked["task_id"]))
             body = {key: payload[key] for key in ("summary", "task_status", "files_touched",
-                                                  "validation_commands", "validation_summary")}
+                                                  "validation_commands", "validation_summary", "candidate_sha")
+                    if key in payload}
             body["kind"] = "handoff"
             body["text"] = req.summary
             body["validation_source"] = "reported_by_agent"

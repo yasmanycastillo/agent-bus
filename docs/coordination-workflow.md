@@ -117,7 +117,9 @@ nuevas reservas; la renovación de credenciales no hereda locks anteriores.
 `complete_handoff` valida propietario y estado, cambia la tarea, guarda evidencia
 y mensaje al destinatario, registra auditoría, confirma los IDs explícitos y
 libera sólo las adquisiciones indicadas en **una transacción**. Un ACK ajeno,
-un token obsoleto o una tarea ajena impide todos los efectos.
+un token obsoleto o una tarea ajena impide todos los efectos. Con `candidate_sha`
+(SHA completo del commit, sólo para `in_review` o `done`) registra además el
+intento completado que la revisión juzga con `record_verdict`.
 
 El destino recibe un mensaje persistente aunque no esté conectado. Se conserva
 el propietario de la tarea; el destinatario del mensaje no se convierte en su
