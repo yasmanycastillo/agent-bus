@@ -886,6 +886,10 @@ from agent_bus.cli.watch_cmds import watch  # noqa: E402
 
 app.add_command(watch)
 
+from agent_bus.cli.panes_cmds import panes  # noqa: E402
+
+app.add_command(panes)
+
 from agent_bus.cli.orchestrator_cmds import breakdown, orchestrate  # noqa: E402
 
 app.add_command(breakdown)

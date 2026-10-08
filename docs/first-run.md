@@ -246,6 +246,37 @@ Claude Code: si hereda sus variables `CLAUDE_CODE_*`, el Claude de cada panel
 arranca sin sesión iniciada (`Not logged in`). Las
 preguntas de permiso del panel las responde el usuario en muxel.
 
+### Paneles tmux que maneja el coordinador (prototipo)
+
+`agent-bus panes` abre TUIs de agentes en un servidor tmux propio (`tmux -L agent-bus`,
+sesión `agents`), separado del tmux del usuario. El coordinador los abre, les escribe y
+los cierra; el usuario solo mira:
+
+```sh
+agent-bus panes spawn rev-1 agy --cwd ~/proyecto --agent agy --prompt "Ejecuta my_pending_items"
+agent-bus panes spawn impl-1 claude --cwd ~/proyecto -- --permission-mode acceptEdits
+agent-bus panes list            # nombre, preset y estado: idle, working, blocked o dead
+agent-bus panes send impl-1 "Continúa con la tarea t-12"
+agent-bus panes screen impl-1
+agent-bus panes close impl-1
+agent-bus panes view            # solo lectura (tmux attach -r); desconectar: prefijo + d
+```
+
+Presets: `claude` y `agy`. El estado sale de las últimas 12 líneas de la pantalla:
+Claude Code 2.1 dibuja su spinner como `✶ Verbo…` (versiones anteriores, `esc to
+interrupt`) y agy muestra `esc to cancel` mientras trabaja; ambos piden confirmar
+(`Enter to confirm` / `enter Confirm`) al preguntar por confianza o permisos, y eso
+cuenta como `blocked`. `send` rechaza un panel que no esté `idle` salvo con `--force`.
+Un agente que termina queda `dead` hasta `close`.
+
+Con `--agent` el panel recibe las variables `AGENT_BUS_*` de esa credencial, como un
+worker. El panel no hereda las variables `CLAUDE*` de quien lo abre (sesión, socket y
+token de un Claude Code coordinador); Claude vuelve a aplicar el `env` de su
+`settings.json`. Como solo escribe el coordinador y el prototipo aún no navega los menús
+de permiso, evítalos con los argumentos de permisos del CLI tras `--` y confía antes en
+la carpeta del proyecto; un panel `blocked` lo resuelve el usuario con `tmux -L agent-bus
+attach` (sin `-r`).
+
 `--status` devuelve JSON con `active`, `state` y `can_dispatch`. Comprueba la reserva
 real del ejecutor en el sistema operativo y la actualidad de su estado; un archivo
 PID antiguo no basta. `can_dispatch=true` significa que el watcher está esperando
