@@ -315,3 +315,54 @@ async def test_approved_review_closes_and_reopens_when_its_approval_goes_stale(t
         await verdict(grok_review, "grok-01", "approve", backend)
         assert await _status(client, grok_review) == "done"
     await db.close()
+
+
+async def _deliver(db, task_id, sha, stamp="2026-01-01T00:00:00+00:00"):
+    await db.conn.execute(
+        """INSERT INTO runtime_attempts
+           (attempt_id, task_id, idempotency_key, state, external_ref, workspace_ref, updated_at,
+            outcome, candidate_sha, log_refs)
+           VALUES (?, ?, ?, 'completed', 'external:1', '.', ?, 'completed', ?, '[]')""",
+        (f"att-{sha}", task_id, f"dispatch:{sha}", stamp, sha),
+    )
+    await db.conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_hub_start_closes_a_review_left_open_after_approving_everything(tmp_path):
+    """Reviews approved before the verdict closed them stay in_progress; the next start closes them."""
+    path = str(tmp_path / "bus.db")
+    db = Database(path)
+    await db.initialize()
+    bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+    async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        saved = await client.post("/instructions", json={
+            "agent_id": "coordinator", "instruction": "Backend", "confirmed": True, "agents": AGENTS,
+        })
+        instruction_id = saved.json()["instruction_id"]
+
+        async def assign(agent_id, role):
+            response = await client.post(f"/instructions/{instruction_id}/assignments", json={
+                "agent_id": agent_id, "role": role, "title": f"{role} {agent_id}",
+            })
+            return response.json()["task_id"]
+
+        backend = await assign("codex-01", "implement")
+        review = await assign("grok-01", "review")
+        unjudged = await assign("agy-01", "review")
+        await _deliver(db, backend, "b1")
+        assert (await client.post(f"/tasks/{backend}/review", json={"agent_id": "codex-01"})).status_code == 200
+        approved = await client.post(f"/tasks/{review}/verdict", json={"agent_id": "grok-01", "verdict": "approve"})
+        assert approved.status_code == 200, approved.text
+        # State written by a hub that did not close approved reviews yet.
+        await db.conn.execute("UPDATE tasks SET status = 'in_progress' WHERE task_id = ?", (review,))
+        await db.conn.commit()
+    await db.close()
+
+    restarted = Database(path)
+    await restarted.initialize()
+    rows = await restarted.conn.execute_fetchall(
+        "SELECT task_id, status FROM tasks WHERE task_id IN (?, ?)", (review, unjudged),
+    )
+    assert {row["task_id"]: row["status"] for row in rows} == {review: "done", unjudged: "in_progress"}
+    await restarted.close()

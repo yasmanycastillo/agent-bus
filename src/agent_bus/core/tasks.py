@@ -45,10 +45,14 @@ def _approvals(connection, review_id: str, covered: list[str]) -> dict[str, bool
     return judged
 
 
-def close_approved_review(connection, review_id: str, now: str) -> None:
-    """Finish an assigned review once it approves the latest candidate of every implementation it covers."""
+def close_approved_review(connection, review_id: str | None, now: str) -> None:
+    """Finish an assigned review once it approves the latest candidate of every implementation it covers.
+
+    review_id None checks every in_progress review: the hub start closes reviews approved
+    before verdicts closed them, so watchers do not announce already judged work.
+    """
     for task_id, covered in _assigned_reviews(connection, "in_progress"):
-        if task_id != review_id or not covered:
+        if (review_id is not None and task_id != review_id) or not covered:
             continue
         approvals = _approvals(connection, task_id, covered)
         if len(approvals) == len(covered) and all(approvals.values()):

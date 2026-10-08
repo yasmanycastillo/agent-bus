@@ -242,6 +242,10 @@ class Database:
             await self._migrate_runtime_registry()
             from agent_bus.core.instructions import InstructionLog
             await InstructionLog(self).ensure_schema()
+            from agent_bus.core.tasks import close_approved_review
+            await self._connection._execute(close_approved_review, self._connection._conn,
+                                            None, datetime.now(timezone.utc).isoformat())
+            await self._connection.commit()
         except BaseException:
             await self.close()
             self._restore_snapshot(snapshot)
