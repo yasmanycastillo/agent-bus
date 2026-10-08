@@ -324,3 +324,18 @@ async def test_review_of_two_mcp_handoffs_records_a_verdict_per_implementation(f
     final = await verdict('approve', implementation_task_id=frontend)
     assert final.status_code == 200, final.text
     assert final.json()['sha'] == revised
+
+
+async def test_only_the_coordinator_assigns_its_instruction(flow):
+    bus, client, alice, bob = flow
+    admin = await bus.sessions.create('root', role='admin')
+    saved = await client.post('/instructions', headers=headers(alice), json={
+        'instruction': 'Corregir', 'confirmed': True,
+        'agents': [{'agent_id': 'bob', 'provider': 'claude'}, {'agent_id': 'carol', 'provider': 'agy'}],
+    })
+    path = f"/instructions/{saved.json()['instruction_id']}/assignments"
+    stolen = await client.post(path, headers=headers(bob), json={'agent_id': 'carol', 'role': 'implement', 'title': 'A'})
+    assert stolen.status_code == 403 and 'alice' in stolen.json()['error']
+    for who, assignee in ((alice, 'bob'), (admin, 'carol')):
+        given = await client.post(path, headers=headers(who), json={'agent_id': assignee, 'role': 'implement', 'title': 'A'})
+        assert given.status_code == 200, given.text

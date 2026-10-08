@@ -147,14 +147,21 @@ def _roster(agents: list[dict]) -> list[dict]:
 
 async def assign_work(
     bus, instruction_id: str, assignee: str, role: str, title: str, reviews: list[str] | None = None,
+    actor: str | None = None,
 ) -> dict:
-    """reviews limits a review to these implementation task_ids; None covers every implementation."""
+    """reviews limits a review to these implementation task_ids; None covers every implementation.
+
+    actor is the authenticated caller; only the instruction's coordinator may hand out its work.
+    None means an administrator or an unsigned development hub.
+    """
     from agent_bus.types import Envelope, MessageType
 
     log = InstructionLog(bus.db)
     stored = await log.get(instruction_id)
     if stored is None:
         raise InstructionError(f"instruction {instruction_id} does not exist in project {bus.project_id}", 404)
+    if actor is not None and actor != stored["coordinator"]:
+        raise InstructionError(f"only {stored['coordinator']}, who coordinates {instruction_id}, can assign its work", 403)
     roster = {item["agent_id"]: item["provider"] for item in stored["agents"]}
     if assignee not in roster:
         raise InstructionError(f"{assignee} is not available for this instruction", 409)
