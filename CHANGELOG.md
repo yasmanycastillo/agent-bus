@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.1 — 2026-10-07
+
+- `watch --cli muxel --muxel-agent <agente>` escribe la solicitud en un panel vivo de
+  muxel en lugar de lanzar un turno headless. Espera si el agente está ocupado, no
+  repite la solicitud y solo responde cuando el turno terminó.
+- La consola muestra qué agentes tienen sesión en el proyecto y si Claude está
+  trabajando, esperando al usuario o inactivo. Se observan también las sesiones de
+  agy y las de Codex que quedaban detrás de otros proyectos.
+- Instalar el MCP en Codex aprueba sus herramientas de agent-bus.
+- Los coordinadores reciben el protocolo vigente aunque el hub sea anterior.
+- Corregido: sesiones de Claude no detectadas en rutas con `.` o `_`; turnos de
+  Claude sin historial al heredar `CLAUDE_CODE_CHILD_SESSION`; borrar un worktree
+  podía perder trabajo sin commitear.
+
 ## 0.2.0 — 2026-09-25
 
 agent-bus coordina agentes que ya saben trabajar. No inventa el encargo ni lo ejecuta.
