@@ -168,7 +168,30 @@ async def test_invalid_tool_arguments_are_execution_errors_not_protocol_errors(b
         assert (await client.list_tools()).tools
 
 
-@pytest.mark.parametrize("status", [401, 403, 409, 500])
+@pytest.mark.parametrize("body", [
+    {"error": "codex implements part of this instruction and cannot review it"},
+    {"detail": "codex implements part of this instruction and cannot review it"},
+])
+async def test_hub_conflict_detail_reaches_the_tool_result_bounded(bound_server, monkeypatch, body):
+    key = next(iter(body))
+    body = {key: body[key] + " " + "x" * 2000}
+    @asynccontextmanager
+    async def backend():
+        async with httpx.AsyncClient(base_url="http://test", transport=httpx.MockTransport(
+            lambda request: httpx.Response(409, json=body),
+        )) as client:
+            yield client
+    monkeypatch.setattr(bound_server, "_client", backend)
+    async with Client(bound_server.sdk_server()) as client:
+        result = await client.call_tool("read_messages", {})
+    value = payload(result)
+    assert (value["code"], value["http_status"]) == ("hub_error", 409)
+    assert value["detail"].startswith("codex implements part of this instruction")
+    assert len(value["detail"]) <= 300
+    assert "HTTP 409" in value["error"]
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
 async def test_backend_http_errors_are_sanitized_tool_results(bound_server, monkeypatch, status):
     sensitive_body = {"error": "private-session-token backend stack trace"}
     @asynccontextmanager
@@ -242,7 +265,12 @@ async def test_recovery_guidance_is_actionable_without_leaking_backend(bound_ser
     assert result.is_error
     value = payload(result)
     assert expected in value["guidance"]
-    assert "private" not in json.dumps(value)
+    if status in (404, 409):
+        # Rule rejections carry the hub's explanation only in `detail`.
+        assert value["detail"] == "private-session-token private traceback"
+        assert "private" not in json.dumps({k: v for k, v in value.items() if k != "detail"})
+    else:
+        assert "private" not in json.dumps(value)
 
 
 IDENTITY_FIELDS = {"agent_id", "from_agent", "decided_by"}

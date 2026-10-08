@@ -187,7 +187,9 @@ async def assign_work(bus, instruction_id: str, assignee: str, role: str, title:
 def role_conflict(existing: list[dict], agent_id: str, role: str) -> str | None:
     roles = {row["role"] for row in existing if row["agent_id"] == agent_id}
     if role == "review" and "implement" in roles:
-        return f"{agent_id} writes this work and cannot review it"
+        return (f"{agent_id} implements part of this instruction and cannot review it: "
+                "the reviewer must not implement any part of the same instruction; assign the review to another agent")
     if role == "implement" and "review" in roles:
-        return f"{agent_id} reviews this work and cannot write it"
+        return (f"{agent_id} reviews this instruction and cannot implement part of it: "
+                "the reviewer must not implement any part of the same instruction; assign it to another agent")
     return None

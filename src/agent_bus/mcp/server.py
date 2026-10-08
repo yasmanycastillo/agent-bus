@@ -289,6 +289,22 @@ TOOLS_DEFINITIONS = [
     },
 ]
 
+# Hub statuses whose body is a deliberate rule explanation. Auth (401/403) and
+# server errors (5xx) stay opaque: their bodies may carry session or backend data.
+_RULE_STATUSES = {400, 404, 409, 422}
+_DETAIL_CHARS = 300
+
+
+def _hub_rule_detail(response: httpx.Response) -> str | None:
+    if response.status_code not in _RULE_STATUSES:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    detail = body.get("detail") or body.get("error") if isinstance(body, dict) else None
+    return detail[:_DETAIL_CHARS] if isinstance(detail, str) and detail.strip() else None
+
 
 class McpServer:
     def __init__(self, bus_url: str | None = None, agent_id: str | None = None) -> None:
@@ -376,6 +392,9 @@ class McpServer:
             status = exc.response.status_code
             failure = {"code": "hub_error", "http_status": status,
                        "error": f"Hub rejected the operation (HTTP {status})"}
+            detail = _hub_rule_detail(exc.response)
+            if detail:
+                failure["detail"] = detail
         except httpx.TransportError:
             failure = {"code": "bus_unavailable", "error": "Cannot complete the hub request"}
         except Exception:

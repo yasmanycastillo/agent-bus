@@ -46,6 +46,8 @@ async def test_coordinator_assigns_only_a_confirmed_instruction(tmp_path):
             "agent_id": "claude-01", "role": "review", "title": "Revisar el cálculo",
         })
         assert same.status_code == 409
+        assert "claude-01 implements part of this instruction" in same.json()["error"]
+        assert "reviewer must not implement" in same.json()["error"]
         planning = await client.post(f"/instructions/{instruction_id}/assignments", json={
             "agent_id": "hermes-01", "role": "plan", "title": "Plan del cálculo",
         })
