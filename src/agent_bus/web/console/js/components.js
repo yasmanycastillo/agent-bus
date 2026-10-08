@@ -313,6 +313,44 @@
     `;
   }
 
+  // ---------- Paneles de agentes (solo lectura) ----------
+  const PANE_STATES = {
+    idle: ["esperando", ""], working: ["trabajando", "live"],
+    blocked: ["pregunta pendiente", "warn"], dead: ["terminó", "off"],
+  };
+  function PanesPanel() {
+    const [panes, setPanes] = useState(null);
+    const [error, setError] = useState("");
+    useEffect(() => {
+      let alive = true;
+      const load = () => api("/room/api/panes")
+        .then(data => { if (alive) { setPanes(data.panes); setError(""); } })
+        .catch(err => { if (alive && err.name !== "AbortError") setError(err.error || "No se pudieron leer los paneles"); });
+      load();
+      const timer = setInterval(load, 2000);
+      return () => { alive = false; clearInterval(timer); };
+    }, []);
+    return html`
+      <section className="card"><h2>Agentes en vivo</h2>
+        <p className="muted">Lo que ven las TUIs que maneja el coordinador. Solo lectura; se actualiza cada 2 s.</p>
+        ${error && html`<p role="alert" className="error">${error}</p>`}
+        ${panes && !panes.length && html`<p className="muted">Sin paneles abiertos. El coordinador los abre con agent_panes o agent-bus panes spawn.</p>`}
+        <div className="panes">
+          ${(panes || []).map(p => {
+            const [label, tone] = PANE_STATES[p.state] || [p.state, ""];
+            return html`<article className="pane" key=${p.name}>
+              <div className="row"><b className="grow">${p.name}</b><span className="muted">${p.preset}</span>
+                <span className=${`badge ${tone}`}>${label}</span>
+                ${p.watcher === "running" && html`<span className="badge live">watcher activo</span>`}
+                ${p.watcher === "stopped" && html`<span className="badge off">watcher detenido</span>`}</div>
+              <pre className="screen" aria-label=${`Pantalla de ${p.name}`}>${p.screen}</pre>
+            </article>`;
+          })}
+        </div>
+      </section>
+    `;
+  }
+
   // ---------- Mensajes ----------
   function MessagePanel({ agents }) {
     const [to, setTo] = useState("");
@@ -352,7 +390,7 @@
   }
 
   window.ConsoleComponents = {
-    Login, UsagePanel, TasksPanel, CreateTaskPanel, ApprovalsPanel, WorkersPanel, MessagePanel,
+    Login, UsagePanel, TasksPanel, CreateTaskPanel, ApprovalsPanel, WorkersPanel, MessagePanel, PanesPanel,
     esc,
   };
 })();

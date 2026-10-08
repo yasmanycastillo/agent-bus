@@ -1446,6 +1446,24 @@ class MessageBus:
                 "provider_sessions": (await provider_sessions())["providers"],
             }
 
+        @self.app.get("/room/api/panes")
+        async def room_panes():
+            """Agent TUIs of `agent-bus panes` on this host, read-only; screens can hold secrets (admin only)."""
+            from agent_bus import panes
+
+            panes.use_project(self.project_id)
+
+            def snapshot() -> list[dict[str, str]]:
+                items = []
+                for pane in panes.list_panes():
+                    try:
+                        screen = panes.screen(pane["name"], 50)
+                    except panes.PaneError:
+                        continue  # closed between list and capture
+                    items.append({**pane, "screen": screen})
+                return items
+            return {"panes": await asyncio.to_thread(snapshot)}
+
         @self.app.get("/room/api/usage")
         async def room_usage():
             """Contrato congelado (schema_version 1) de presupuesto/consumo.
