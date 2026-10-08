@@ -147,3 +147,24 @@ async def test_coordinator_drives_panes_through_mcp(tmux, tmp_path, monkeypatch)
         wait_for(lambda: "id=claude-01" in panes.screen("b"))
         await call(action="close", name="b")
         assert (await call(action="list"))[1]["panes"] == []
+
+
+async def test_console_shows_each_pane_screen_read_only(tmux, tmp_path):
+    from httpx import ASGITransport, AsyncClient
+
+    from agent_bus.core.bus import MessageBus
+    from agent_bus.core.inbox import InboxManager
+    from agent_bus.core.registry import AgentRegistry
+    from agent_bus.reputation.database import Database
+
+    db = Database(str(tmp_path / "bus.db"))
+    await db.initialize()
+    bus = MessageBus(db=db, registry=AgentRegistry(), inbox=InboxManager(db))
+    async with AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        assert (await client.get("/room/api/panes")).json() == {"panes": []}
+        panes.spawn("a", "sh", cwd=str(tmp_path))
+        panes.send("a", "echo VISIBLE-IN-CONSOLE")
+        wait_for(lambda: "VISIBLE-IN-CONSOLE\n" in panes.screen("a", 50) + "\n")
+        [pane] = (await client.get("/room/api/panes")).json()["panes"]
+        assert pane["name"] == "a" and pane["state"] == "idle" and "VISIBLE-IN-CONSOLE" in pane["screen"]
+    await db.close()

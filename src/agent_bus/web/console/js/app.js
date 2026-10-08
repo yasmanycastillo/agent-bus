@@ -79,6 +79,7 @@
         </ul>
       </section>
       <main className="layout"><div>
+        <${C.PanesPanel} />
         <${C.ApprovalsPanel} approvals=${approvals} onChanged=${refresh} />
         <${C.TasksPanel} overview=${overview} onChanged=${refresh} />
         <${C.CreateTaskPanel} onChanged=${refresh} />

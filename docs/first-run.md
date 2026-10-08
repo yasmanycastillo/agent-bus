@@ -277,6 +277,12 @@ de permiso, evítalos con los argumentos de permisos del CLI tras `--` y confía
 la carpeta del proyecto; un panel `blocked` lo resuelve el usuario con `tmux -L agent-bus
 attach` (sin `-r`).
 
+La consola web (`/console`) muestra los mismos paneles en *Agentes en vivo*: nombre,
+preset, estado y las últimas 50 líneas de pantalla, actualizadas cada 2 s y sin
+entrada de texto. Los lee el hub con `GET /room/api/panes`, reservado a sesiones
+administrativas porque una pantalla puede mostrar secretos; solo ve los paneles del
+equipo donde corre el hub.
+
 Para que el bus despierte al agente de un panel, arranca su watcher con
 `--cli tmux`:
 

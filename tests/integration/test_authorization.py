@@ -86,7 +86,7 @@ async def test_inbox_is_private_including_agent_named_all(secured):
     sent = await client.post("/messages", json={"to_agent": "bob", "body": {"text": "Private"}}, headers=bearer(sessions))
     assert sent.status_code == 200
     message_id = sent.json()["message_id"]
-    for path in ("/inbox/bob", "/inbox/bob/pending", f"/inbox/bob/{message_id}", "/inbox/all", "/events/bob", "/events/all", "/room/api/overview", "/docs"):
+    for path in ("/inbox/bob", "/inbox/bob/pending", f"/inbox/bob/{message_id}", "/inbox/all", "/events/bob", "/events/all", "/room/api/overview", "/room/api/panes", "/docs"):
         assert (await client.get(path, headers=bearer(sessions))).status_code == 403
     assert (await client.post(f"/inbox/bob/{message_id}/archive", headers=bearer(sessions))).status_code == 403
     inbox = await client.get("/inbox/bob", headers=bearer(sessions, "bob"))
