@@ -283,12 +283,19 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "complete_task",
-        "description": "Marcar una tarea como completada (done).",
+        "description": (
+            "Marcar una tarea como completada (done). El coordinador del encargo también cierra así una "
+            "implementación in_review que integró él mismo, si su último candidate_sha tiene approve vigente."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "ID de la tarea (ej: T1)"},
                 "agent_id": {"type": "string", "description": "ID del agente"},
+                "merged_sha": {
+                    "type": "string", "pattern": "^[0-9a-f]{7,64}$",
+                    "description": "Opcional: SHA del commit fusionado; queda en la evidencia",
+                },
             },
             "required": ["task_id", "agent_id"],
         },
@@ -600,7 +607,10 @@ class McpServer:
             elif name == "complete_task":
                 task_id = args["task_id"]
                 agent_id = args["agent_id"]
-                resp = await client.post(f"/tasks/{task_id}/done", json={"agent_id": agent_id})
+                payload = {"agent_id": agent_id}
+                if args.get("merged_sha"):
+                    payload["merged_sha"] = args["merged_sha"]
+                resp = await client.post(f"/tasks/{task_id}/done", json=payload)
                 resp.raise_for_status()
                 return resp.json()
 

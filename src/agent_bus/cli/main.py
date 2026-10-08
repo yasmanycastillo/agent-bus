@@ -600,11 +600,15 @@ def work_review(task_id: str):
 @work.command("done")
 @click.argument("task_id")
 @click.option("--evidence", default=None, help="Evidencia o resumen del trabajo completado")
-def work_done(task_id: str, evidence: str | None = None):
+@click.option("--merged-sha", default=None,
+              help="SHA fusionado al cerrar como coordinador una implementación aprobada")
+def work_done(task_id: str, evidence: str | None = None, merged_sha: str | None = None):
     """Marcar tarea como completada."""
     payload: dict = {"agent_id": _require_agent()}
     if evidence:
         payload["evidence"] = {"summary": evidence}
+    if merged_sha:
+        payload["merged_sha"] = merged_sha
     with _client() as client:
         resp = client.post(f"/tasks/{task_id}/done", json=payload)
         if resp.status_code == 200:

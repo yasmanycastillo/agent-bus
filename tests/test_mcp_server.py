@@ -99,8 +99,11 @@ async def test_mcp_coordination_tools_against_real_hub(live_bus_url):
     assert status["server"]["bus_version"]
     assert status["agents"] == []
     await call_tool(server, "release_lock", {"file_path": "a.py", "agent_id": "claude", "acquisition_id": lock["acquisition_id"]})
-    done = await call_tool(server, "complete_task", {"task_id": "T1", "agent_id": "claude"})
+    done = await call_tool(server, "complete_task", {"task_id": "T1", "agent_id": "claude", "merged_sha": "abc1234"})
     assert done["status"] == "done"
+    async with httpx.AsyncClient(base_url=live_bus_url) as client:
+        evidence = (await client.get("/tasks/T1/evidence")).json()["evidence"]
+    assert evidence[0]["evidence"] == {"merged_sha": "abc1234"}
     assert (await call_tool(server, "get_project_status", {}))["locks"] == []
 
 

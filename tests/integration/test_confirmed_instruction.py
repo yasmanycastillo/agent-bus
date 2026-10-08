@@ -389,3 +389,54 @@ async def test_coordinator_assigning_itself_gets_no_message_from_itself(tmp_path
         sent = (await client.get("/inbox/codex-01/messages")).json()["messages"]
         assert [message["from_agent"] for message in sent] == ["claude-01"]
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_closes_an_implementation_only_with_a_current_approve(tmp_path):
+    """Integrated outside BranchIntegrator, an approved implementation would stay in_review forever."""
+    db = Database(str(tmp_path / "bus.db"))
+    await db.initialize()
+    bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+    async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        saved = await client.post("/instructions", json={
+            "agent_id": "coordinator", "instruction": "Backend", "confirmed": True, "agents": AGENTS,
+        })
+        instruction_id = saved.json()["instruction_id"]
+
+        async def assign(agent_id, role):
+            response = await client.post(f"/instructions/{instruction_id}/assignments", json={
+                "agent_id": agent_id, "role": role, "title": f"{role} {agent_id}",
+            })
+            return response.json()["task_id"]
+
+        async def close(agent_id, **extra):
+            return await client.post(f"/tasks/{backend}/done", json={"agent_id": agent_id, **extra})
+
+        backend = await assign("codex-01", "implement")
+        review = await assign("grok-01", "review")
+        await _deliver(db, backend, "b1")
+        assert (await client.post(f"/tasks/{backend}/review", json={"agent_id": "codex-01"})).status_code == 200
+
+        unjudged = await close("coordinator")
+        assert unjudged.status_code == 409
+        assert "approve" in unjudged.json()["error"]
+        approved = await client.post(f"/tasks/{review}/verdict", json={"agent_id": "grok-01", "verdict": "approve"})
+        assert approved.status_code == 200, approved.text
+        assert (await close("agy-01")).status_code == 409
+        assert await _status(client, backend) == "in_review"
+
+        # An approve of an older candidate is not current.
+        await _deliver(db, backend, "b2", stamp="2026-01-01T00:00:05+00:00")
+        assert (await close("coordinator")).status_code == 409
+        again = await client.post(f"/tasks/{review}/verdict", json={
+            "agent_id": "grok-01", "verdict": "approve", "sha": "b2",
+        })
+        assert again.status_code == 200, again.text
+
+        closed = await close("coordinator", merged_sha="abc1234")
+        assert closed.status_code == 200, closed.text
+        assert closed.json()["status"] == "done"
+        evidence = (await client.get(f"/tasks/{backend}/evidence")).json()["evidence"][0]
+        assert evidence["actor_agent_id"] == "coordinator"
+        assert evidence["evidence"] == {"merged_sha": "abc1234", "approved_sha": "b2"}
+    await db.close()

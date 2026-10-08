@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -1033,10 +1034,24 @@ class MessageBus:
             principal = request.state.principal
             session_id = principal.session_id if principal else None
             evidence = body.get("evidence")
+            merged_sha = body.get("merged_sha")
+            if merged_sha is not None:
+                if not isinstance(merged_sha, str) or not re.fullmatch(r"[0-9a-f]{7,64}", merged_sha):
+                    return JSONResponse({"error": "merged_sha must be a hexadecimal commit SHA"}, status_code=422)
+                evidence = {**(evidence if isinstance(evidence, dict) else {}), "merged_sha": merged_sha}
             if evidence is not None:
                 task = await self.tasks.complete(task_id, actor=actor, evidence=evidence, session_id=session_id)
             else:
                 task = await self.tasks.complete(task_id, actor=actor)
+            if not task and actor and await self._coordinates(task_id, actor):
+                # The instruction's coordinator closes an approved implementation it integrated itself.
+                task = await self.tasks.complete(task_id, actor=actor, evidence=evidence,
+                                                 session_id=session_id, as_coordinator=True)
+                if not task:
+                    return JSONResponse({"error": (
+                        "the coordinator closes only an in_review implementation whose latest "
+                        "candidate_sha has a current approve from record_verdict"
+                    )}, status_code=409)
             if not task:
                 return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
@@ -1678,6 +1693,10 @@ class MessageBus:
         if broadcast:
             response["message_ids"] = [result.envelope.message_id for _ in result.recipients]
         return response
+
+    async def _coordinates(self, task_id: str, agent_id: str) -> bool:
+        from agent_bus.core.tasks import coordinated_by
+        return await self.db.conn._execute(coordinated_by, self.db.conn._conn, task_id, agent_id)
 
     async def _task_failure(self, task_id: str, principal: Principal | None = None) -> JSONResponse:
         # This read only explains a failed conditional write; it never authorizes

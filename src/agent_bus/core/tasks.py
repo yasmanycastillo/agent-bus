@@ -62,6 +62,33 @@ def close_approved_review(connection, review_id: str | None, now: str) -> None:
             )
 
 
+def coordinated_by(connection, task_id: str, agent_id: str) -> bool:
+    """Is this task an implementation that agent_id assigned as coordinator of its instruction?"""
+    if not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'work_assignments'",
+    ).fetchone():
+        return False
+    return connection.execute(
+        "SELECT 1 FROM work_assignments w JOIN instructions i ON i.instruction_id = w.instruction_id"
+        " WHERE w.task_id = ? AND w.role = 'implement' AND i.coordinator_agent_id = ?", (task_id, agent_id),
+    ).fetchone() is not None
+
+
+def approved_candidate(connection, implementation_id: str) -> str | None:
+    """The implementation's latest candidate SHA when the latest verdict on that SHA approves it."""
+    candidate = connection.execute(
+        "SELECT candidate_sha FROM runtime_attempts WHERE task_id = ? AND state = 'completed'"
+        " AND candidate_sha IS NOT NULL ORDER BY updated_at DESC LIMIT 1", (implementation_id,),
+    ).fetchone()
+    if candidate is None:
+        return None
+    verdict = connection.execute(
+        "SELECT verdict FROM reviews WHERE sha = ? AND json_extract(evidence, '$.implementation_task_id') = ?"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1", (candidate[0], implementation_id),
+    ).fetchone()
+    return candidate[0] if verdict is not None and verdict[0] == "approve" else None
+
+
 def release_reviews(connection, now: str) -> None:
     """Start held reviews once every implementation they depend on is in_review or done.
 
@@ -407,22 +434,35 @@ class TaskManager:
         actor: str | None = None,
         evidence: dict[str, Any] | None = None,
         session_id: str | None = None,
+        as_coordinator: bool = False,
     ) -> Task | None:
+        """as_coordinator: actor coordinates the instruction of this in_review implementation and
+        closes it after integrating it outside the integrator; its latest candidate needs a current approve."""
         now = datetime.now(timezone.utc).isoformat()
         current = await self.get(task_id)
         if not current:
             return None
-        if actor and (current.owner != actor or current.status not in (TaskStatus.IN_PROGRESS, TaskStatus.IN_REVIEW)):
+        if actor and not as_coordinator and (
+            current.owner != actor or current.status not in (TaskStatus.IN_PROGRESS, TaskStatus.IN_REVIEW)
+        ):
             return None
 
         previous_owner = current.owner
         evidence_json = json.dumps(evidence) if evidence is not None else None
 
         def transaction(connection):
+            nonlocal evidence_json
             connection.execute("SAVEPOINT task_complete")
             try:
                 condition = " AND owner = ? AND status IN ('in_progress', 'in_review')" if actor else " AND status != 'done'"
                 params = (now, task_id, actor) if actor else (now, task_id)
+                if as_coordinator:
+                    approved = approved_candidate(connection, task_id) if coordinated_by(connection, task_id, actor) else None
+                    if approved is None:
+                        connection.execute("RELEASE task_complete")
+                        return None
+                    condition, params = " AND status = 'in_review'", (now, task_id)
+                    evidence_json = json.dumps({**(evidence or {}), "approved_sha": approved})
                 cursor = connection.execute(
                     "UPDATE tasks SET status = 'done', blocked_reason = NULL, updated_at = ? WHERE task_id = ?"
                     + condition + " RETURNING *", params,

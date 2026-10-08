@@ -148,6 +148,15 @@ de la rama. Rechaza un destino que cambió después de revisar. Las carpetas de
 runtime y artefactos de tests deben estar ignoradas en Git. Los procesos externos
 que modifiquen simultáneamente el checkout siguen requiriendo coordinación.
 
+Si el coordinador integra una implementación aprobada sin el integrador, la cierra
+con `complete_task` (o `agent-bus work done <task_id> --merged-sha <sha>`;
+`POST /tasks/{task_id}/done` con `merged_sha` opcional). Sólo el coordinador de la
+instrucción que la asignó con `assign_work` puede cerrar así una implementación
+ajena, y sólo si está `in_review` y el último veredicto sobre su último
+`candidate_sha` es `approve`; si no, responde 409. La evidencia registra
+`approved_sha` y, si se indica, `merged_sha`. El hub no comprueba que ese SHA
+contenga el candidato aprobado. Un administrador sigue pudiendo cerrar cualquier tarea.
+
 `auth create` guarda el secreto sin imprimirlo por defecto. Usa `--show-token`
 explícitamente si necesitas copiarlo a la consola; `--quiet` prevalece.
 
