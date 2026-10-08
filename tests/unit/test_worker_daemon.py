@@ -73,7 +73,7 @@ async def test_worker_daemon_processes_urgent_message(test_bus):
 
 
 @pytest.mark.asyncio
-async def test_worker_prompt_includes_runtime_send(test_bus):
+async def test_worker_prompt_includes_runtime_send(test_bus, tmp_path):
     await test_bus.registry.register(AgentInfo(agent_id="worker_bob", display_name="Bob"))
     await test_bus.tasks.create("T-run", "Implement the helper")
     await test_bus.tasks.claim("T-run", "worker_bob")
@@ -91,7 +91,8 @@ async def test_worker_prompt_includes_runtime_send(test_bus):
             prompts.append(prompt)
             return RunnerResult(success=True, output="done")
 
-        daemon = WorkerDaemon(agent_id="worker_bob", runner=AgentRunner(agent_id="worker_bob", custom_executor=mock_exec), bus_url="http://test")
+        runner = AgentRunner(agent_id="worker_bob", custom_executor=mock_exec, worktree_dir=tmp_path)
+        daemon = WorkerDaemon(agent_id="worker_bob", runner=runner, bus_url="http://test")
         daemon._client = client
         daemon._running = True
         await daemon._check_and_process_pending()

@@ -39,6 +39,8 @@ class AgentRunner:
         self.provider = provider.lower()
         self.model = model
         self.worktree_dir = worktree_dir or Path.cwd()
+        # Only an explicitly assigned checkout may receive automatic commits.
+        self.checkout_assigned = worktree_dir is not None
         self.custom_executor = custom_executor
         self.session_map: dict[str, str] = {}  # thread_id -> CLI session_id
         self.session_file = session_file

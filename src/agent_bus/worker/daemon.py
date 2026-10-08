@@ -467,7 +467,7 @@ class WorkerDaemon:
     async def _commit_and_submit_review(self, task_id: str) -> None:
         """Commit the worker checkout and enqueue it for serialized integration."""
         checkout = self.runner.worktree_dir.resolve()
-        if not (checkout / ".git").exists():
+        if not self.runner.checkout_assigned or not (checkout / ".git").exists():
             return
         try:
             # Linked worktrees have their own Git directory, distinct from the

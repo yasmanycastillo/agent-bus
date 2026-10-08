@@ -148,3 +148,23 @@ def test_linked_worktree_from_coordinator_cwd(primary, linked, monkeypatch):
 
     assert client.posts == ["/tasks/T3/review"]
     assert _git(linked, "log", "-1", "--format=%s") == "feat(agent): complete T3"
+
+
+def test_default_cwd_checkout_is_never_committed(primary, linked, monkeypatch):
+    """(4) a runner without worktree_dir must not commit the dirty cwd checkout.
+
+    Regression: pytest run from a developer's linked worktree committed its
+    dirty files because the runner defaulted to Path.cwd().
+    """
+    (linked / "uv.lock").write_text("developer edit")
+    head_before = _git(linked, "rev-parse", "HEAD")
+    monkeypatch.chdir(linked)
+    client = _RecordingClient()
+    daemon = WorkerDaemon(agent_id="claude", runner=AgentRunner(agent_id="claude"))
+    daemon._client = client
+
+    _run(daemon._commit_and_submit_review("T4"))
+
+    assert client.posts == []
+    assert _git(linked, "rev-parse", "HEAD") == head_before
+    assert "?? uv.lock" in _git(linked, "status", "--porcelain")
