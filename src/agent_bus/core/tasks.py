@@ -13,12 +13,65 @@ from agent_bus.types import Task, TaskStatus
 REVIEW_WAIT = "waiting for the implementations under review"
 
 
+def _assigned_reviews(connection, status: str) -> list[tuple[str, list[str]]]:
+    """Reviews created by assign_work in this status, with the implementations they cover."""
+    if not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'work_assignments'",
+    ).fetchone():
+        return []
+    rows = connection.execute(
+        "SELECT t.task_id, t.independent_from FROM tasks t WHERE t.status = ? AND EXISTS"
+        " (SELECT 1 FROM work_assignments w WHERE w.task_id = t.task_id AND w.role = 'review')", (status,),
+    ).fetchall()
+    return [(task_id, json.loads(raw or "[]")) for task_id, raw in rows]
+
+
+def _approvals(connection, review_id: str, covered: list[str]) -> dict[str, bool]:
+    """For each covered implementation this review judged: does its latest verdict approve the latest candidate?"""
+    latest = {}
+    for sha, verdict, evidence in connection.execute(
+        "SELECT sha, verdict, evidence FROM reviews WHERE task_id = ? ORDER BY created_at, rowid", (review_id,),
+    ).fetchall():
+        latest[json.loads(evidence or "{}").get("implementation_task_id")] = (sha, verdict)
+    judged = {}
+    for implementation in covered:
+        if implementation not in latest:
+            continue
+        candidate = connection.execute(
+            "SELECT candidate_sha FROM runtime_attempts WHERE task_id = ? AND state = 'completed'"
+            " AND candidate_sha IS NOT NULL ORDER BY updated_at DESC LIMIT 1", (implementation,),
+        ).fetchone()
+        judged[implementation] = latest[implementation] == (candidate[0] if candidate else None, "approve")
+    return judged
+
+
+def close_approved_review(connection, review_id: str, now: str) -> None:
+    """Finish an assigned review once it approves the latest candidate of every implementation it covers."""
+    for task_id, covered in _assigned_reviews(connection, "in_progress"):
+        if task_id != review_id or not covered:
+            continue
+        approvals = _approvals(connection, task_id, covered)
+        if len(approvals) == len(covered) and all(approvals.values()):
+            connection.execute(
+                "UPDATE tasks SET status = 'done', blocked_reason = NULL, updated_at = ?"
+                " WHERE task_id = ? AND status = 'in_progress'", (now, task_id),
+            )
+
+
 def release_reviews(connection, now: str) -> None:
     """Start held reviews once every implementation they depend on is in_review or done.
 
     A review needs submitted work, not merged work: implementations reach done only
     after approval, so the usual done-only depends_on release would deadlock here.
+    A closed assigned review whose verdict no longer approves the latest candidate
+    (new SHA, or changes requested) is held again first, so it restarts on the handoff.
     """
+    for task_id, covered in _assigned_reviews(connection, "done"):
+        if not all(_approvals(connection, task_id, covered).values()):
+            connection.execute(
+                "UPDATE tasks SET status = 'blocked', blocked_reason = ?, updated_at = ?"
+                " WHERE task_id = ? AND status = 'done'", (REVIEW_WAIT, now, task_id),
+            )
     held = connection.execute(
         "SELECT task_id, depends_on FROM tasks WHERE status = 'blocked' AND blocked_reason = ?", (REVIEW_WAIT,),
     ).fetchall()

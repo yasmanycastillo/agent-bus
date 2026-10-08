@@ -234,3 +234,84 @@ async def test_missing_instruction_explains_the_404(tmp_path):
         detail = missing.json()["error"]
         assert "ins-nope" in detail and "alpha" in detail
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_approved_review_closes_and_reopens_when_its_approval_goes_stale(tmp_path):
+    from agent_bus.types import AgentInfo
+
+    db = Database(str(tmp_path / "bus.db"))
+    await db.initialize()
+    bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+    stamp = iter(f"2026-01-01T00:00:{second:02d}+00:00" for second in range(60))
+
+    async def deliver(task_id, sha):
+        await db.conn.execute(
+            """INSERT INTO runtime_attempts
+               (attempt_id, task_id, idempotency_key, state, external_ref, workspace_ref, updated_at,
+                outcome, candidate_sha, log_refs)
+               VALUES (?, ?, ?, 'completed', 'external:1', '.', ?, 'completed', ?, '[]')""",
+            (f"att-{sha}", task_id, f"dispatch:{sha}", next(stamp), sha),
+        )
+        await db.conn.commit()
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        saved = await client.post("/instructions", json={
+            "agent_id": "coordinator", "instruction": "Backend y frontend", "confirmed": True, "agents": AGENTS,
+        })
+        instruction_id = saved.json()["instruction_id"]
+
+        async def assign(agent_id, role, **extra):
+            response = await client.post(f"/instructions/{instruction_id}/assignments", json={
+                "agent_id": agent_id, "role": role, "title": f"{role} {agent_id}", **extra,
+            })
+            assert response.status_code == 200, response.text
+            return response.json()["task_id"]
+
+        async def verdict(review, agent_id, value, implementation):
+            response = await client.post(f"/tasks/{review}/verdict", json={
+                "agent_id": agent_id, "verdict": value, "implementation_task_id": implementation,
+            })
+            assert response.status_code == 200, response.text
+
+        backend = await assign("codex-01", "implement")
+        frontend = await assign("grok-01", "implement")
+        grok_review = await assign("grok-01", "review", reviews=[backend])
+        codex_review = await assign("codex-01", "review", reviews=[frontend])
+        both = await assign("agy-01", "review")
+        for agent_id in ("grok-01", "codex-01"):
+            await client.post(f"/agents/{agent_id}/route-profile", json={
+                "declared": ["implementation", "code-review"], "approved": ["implementation", "code-review"],
+                "can_edit": True, "max_in_progress": 1,
+            })
+            await bus.registry.register(AgentInfo(agent_id=agent_id, display_name=agent_id))
+
+        await deliver(backend, "b1")
+        assert (await client.post(f"/tasks/{backend}/review", json={"agent_id": "codex-01"})).status_code == 200
+        await deliver(frontend, "f1")
+        assert (await client.post(f"/tasks/{frontend}/review", json={"agent_id": "grok-01"})).status_code == 200
+        assert await _status(client, grok_review) == "in_progress"
+
+        # Approving every covered implementation closes the review in the verdict call.
+        await verdict(grok_review, "grok-01", "approve", backend)
+        assert await _status(client, grok_review) == "done"
+        await verdict(both, "agy-01", "approve", backend)
+        assert await _status(client, both) == "in_progress"
+
+        # Changes on grok's own work reopen only it; the closed review no longer holds its slot.
+        await verdict(codex_review, "codex-01", "changes_requested", frontend)
+        assert await _status(client, codex_review) == "blocked"
+        assert await _status(client, grok_review) == "done"
+        claimed = await client.post(f"/tasks/{frontend}/claim", json={"agent_id": "grok-01"})
+        assert claimed.status_code == 200, claimed.text
+
+        # A new candidate for an approved implementation reopens the closed review.
+        await verdict(both, "agy-01", "changes_requested", backend)
+        assert (await client.post(f"/tasks/{backend}/claim", json={"agent_id": "codex-01"})).status_code == 200
+        await deliver(backend, "b2")
+        assert await _status(client, grok_review) == "done"
+        assert (await client.post(f"/tasks/{backend}/review", json={"agent_id": "codex-01"})).status_code == 200
+        assert await _status(client, grok_review) == "in_progress"
+        await verdict(grok_review, "grok-01", "approve", backend)
+        assert await _status(client, grok_review) == "done"
+    await db.close()

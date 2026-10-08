@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from agent_bus.core.tasks import REVIEW_WAIT
+from agent_bus.core.tasks import REVIEW_WAIT, close_approved_review
 from agent_bus.reputation.database import Database
 from agent_bus.worker.gatekeeper import ReviewDecision, Verdict
 
@@ -70,10 +70,13 @@ class ReviewLog:
                 raise VerdictError(
                     "implementation attempt is missing: the implementer must hand off with candidate_sha"
                 )
-        return await self.add(ReviewDecision(
+        decision = ReviewDecision(
             task_id=task_id, sha=candidates[chosen], verdict=Verdict(verdict), reason=reason or verdict,
             reviewer_agent_id=reviewer, reviewer_session_id="",
             evidence={"implementation_task_id": chosen},
+        )
+        return await self.add(decision, after=lambda conn: close_approved_review(
+            conn, task_id, decision.created_at.isoformat(),
         ))
 
     async def _candidate(self, implementation_id: str) -> str | None:
@@ -86,7 +89,7 @@ class ReviewLog:
         )
         return rows[0]["candidate_sha"] if rows else None
 
-    async def add(self, review: ReviewDecision) -> ReviewDecision:
+    async def add(self, review: ReviewDecision, after=None) -> ReviewDecision:
         evidence_json = json.dumps(review.evidence)
         test_results_json = json.dumps(review.test_results)
         created_at_iso = (
@@ -135,6 +138,8 @@ class ReviewLog:
                         created_at_iso,
                     ),
                 )
+                if after is not None:
+                    after(conn)
                 conn.execute("RELEASE review_add")
             except BaseException:
                 conn.execute("ROLLBACK TO review_add")
