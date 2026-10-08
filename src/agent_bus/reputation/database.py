@@ -184,6 +184,11 @@ CREATE TABLE IF NOT EXISTS kickoff (
     completed_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS registered_agents (
+    agent_id TEXT PRIMARY KEY,
+    info TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_owner ON tasks(owner);
 

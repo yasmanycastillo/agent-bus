@@ -165,6 +165,8 @@ class MessageBus:
         self.sessions = SessionStore(db, self.project_id)
         self.events = EventLog(db)
         self.registry = registry
+        if registry.db is None:
+            registry.db = db
         self.inbox = inbox
         self.sandbox_opener = None
         self.tasks = TaskManager(db)
