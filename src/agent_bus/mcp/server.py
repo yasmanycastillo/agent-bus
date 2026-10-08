@@ -488,7 +488,8 @@ class McpServer:
             if self.session is None:
                 raise AuthenticationError("Llama bootstrap_agent antes de manejar paneles.")
             async with self._client() as client:
-                return await panes_tool.call(args, Path(self._lock_project_root or self._lock_cwd), client)
+                return await panes_tool.call(args, Path(self._lock_project_root or self._lock_cwd), client,
+                                             self.project_id)
         args = self._bind_identity(name, args)
         if name == "wait_for_updates":
             wait = WaitArguments.model_validate(args)

@@ -808,16 +808,6 @@ class MessageBus:
             except InstructionError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
 
-        @self.app.get("/instructions/assignees")
-        async def instruction_assignees(request: Request, coordinator: str | None = None):
-            from agent_bus.core.instructions import InstructionLog
-            principal = request.state.principal
-            # A session only learns its own assignees; the parameter is for unsigned development.
-            who = principal.agent_id if principal else coordinator
-            if not who:
-                return JSONResponse({"error": "coordinator is required"}, status_code=422)
-            return {"coordinator": who, "agents": await InstructionLog(self.db).assignees(who)}
-
         @self.app.post("/instructions/{instruction_id}/assignments")
         async def assign_instruction(instruction_id: str, request: Request):
             from agent_bus.core.instructions import InstructionError, assign_work
@@ -1458,6 +1448,8 @@ class MessageBus:
         async def room_panes():
             """Agent TUIs of `agent-bus panes` on this host, read-only; screens can hold secrets (admin only)."""
             from agent_bus import panes
+
+            panes.use_project(self.project_id)
 
             def snapshot() -> list[dict[str, str]]:
                 items = []

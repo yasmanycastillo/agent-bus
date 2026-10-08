@@ -14,8 +14,10 @@ import time
 import uuid
 from typing import Any, NamedTuple
 
-# A dedicated socket keeps these panes out of the user's own tmux server.
-TMUX = ["tmux", "-L", "agent-bus"]
+# One tmux server per project (socket agent-bus-<project_id>), apart from the user's own,
+# so one project's MCP or hub never sees another project's panes. Tests pin TMUX.
+TMUX: list[str] | None = None
+_project: str | None = None
 SESSION = "agents"
 # Each pane with an identity gets its watcher here, out of the session the user views.
 WATCHERS = "watchers"
@@ -25,8 +27,17 @@ SCREEN_LINES = 12
 # '.' and ':' separate window and pane in tmux targets; keep names to plain words.
 NAME = re.compile(r"[A-Za-z0-9_-]{1,40}")
 # A pane gets only these from the caller: the identity of one agent-bus credential.
-PANE_ENV = frozenset({"AGENT_BUS_AGENT_ID", "AGENT_BUS_SESSION_FILE", "AGENT_BUS_URL", "AGENT_BUS_PROJECT_ID",
+IDENTITY_ENV = frozenset({"AGENT_BUS_AGENT_ID", "AGENT_BUS_SESSION_FILE", "AGENT_BUS_URL", "AGENT_BUS_PROJECT_ID",
                       "AGENT_BUS_PROJECT_ROOT", "AGENT_BUS_CONFIG_DIR", "AGENT_BUS_DATABASE_PATH"})
+# Everything else a pane would inherit is removed except these (no API keys or tokens):
+# the agent CLIs read their own login from files under HOME.
+BASE_ENV = frozenset({"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE",
+                      "LC_MESSAGES", "TERM", "COLORTERM", "TMPDIR", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+                      "XDG_DATA_HOME", "XDG_CACHE_HOME", "SSH_AUTH_SOCK", "DISPLAY", "WAYLAND_DISPLAY",
+                      "DBUS_SESSION_BUS_ADDRESS"})
+# C0/C1 controls except tab and newline: an ESC[201~ would end the bracketed paste early and
+# turn the rest of a message into real keystrokes in the agent's TUI.
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 class Preset(NamedTuple):
@@ -40,7 +51,8 @@ class Preset(NamedTuple):
 # builds: "esc to interrupt"); agy footer "esc to cancel"; trust and permission prompts ask
 # to confirm or navigate a menu.
 PRESETS = {
-    "claude": Preset("claude", None, r"^\S \w+…|esc to interrupt",
+    # Only the spinner glyphs: a reply line "● Revisando…" is not a running turn.
+    "claude": Preset("claude", None, r"^[·✢✳✶✻✽*] \S+…|esc to interrupt",
                      r"Enter to confirm|Do you want to proceed\?"),
     # agy permission menus also show "esc to cancel", so blocked is checked first.
     "agy": Preset("agy", "-i", r"esc to cancel", r"enter Confirm|↑/↓ Navigate|^Run this command\?"),
@@ -55,8 +67,27 @@ class PaneBusy(PaneError):
     """The agent is working or waiting on a question; try again later."""
 
 
+def use_project(project_id: str) -> None:
+    """Select the project whose tmux server the following calls use (one project per process)."""
+    global _project
+    _project = project_id
+
+
+def _base() -> list[str]:
+    if TMUX:
+        return TMUX
+    project = _project or os.environ.get("AGENT_BUS_PROJECT_ID")
+    if not project:
+        from agent_bus.config import load_config
+        project = load_config().bus.project_id
+    return ["tmux", "-L", "agent-bus-" + re.sub(r"[^A-Za-z0-9_-]", "_", project)]
+
+
 def _tmux(*args: str, input_text: str | None = None) -> str:
-    result = subprocess.run([*TMUX, *args], input=input_text, capture_output=True, text=True)
+    try:
+        result = subprocess.run([*_base(), *args], input=input_text, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise PaneError("tmux is not installed") from None
     if result.returncode != 0:
         raise PaneError(result.stderr.strip() or f"tmux {args[0]} failed")
     return result.stdout
@@ -71,12 +102,12 @@ def _tmux_ok(*args: str) -> bool:
 
 
 def _inherited_names() -> set[str]:
-    """CLAUDE* and AGENT_BUS_* names a new pane would inherit.
+    """Names a new pane would inherit beyond BASE_ENV, to be removed.
 
     Panes get the tmux server's global environment (copied from whoever started the
-    server), not the caller's, so both are scanned. A coordinator running in Claude
-    Code leaks its session through CLAUDE* (a nested claude then misbehaves; it
-    re-applies settings.json env itself) and its own identity through AGENT_BUS_*.
+    server), not the caller's, so both are scanned. That covers secrets (API keys,
+    tokens), a coordinating Claude Code's own session (CLAUDE*; claude re-applies its
+    settings.json env itself) and the coordinator's identity (AGENT_BUS_*).
     """
     names = set(os.environ)
     try:
@@ -84,7 +115,7 @@ def _inherited_names() -> set[str]:
                   if not line.startswith("-")}
     except PaneError:
         pass  # no server yet: it starts with this process's environment
-    return {name for name in names if name.startswith(("CLAUDE", "AGENT_BUS_"))}
+    return names - BASE_ENV
 
 
 def _target(name: str, session: str = SESSION) -> str:
@@ -123,7 +154,7 @@ def _open_window(session: str, name: str, cwd: str, command: list[str], *options
 def spawn(name: str, preset: str, *, cwd: str | None = None, model: str | None = None,
           prompt: str | None = None, extra_args: tuple[str, ...] = (),
           env: dict[str, str] | None = None, watch: bool = False) -> None:
-    """Open NAME running PRESET. `env` is filtered to PANE_ENV; prompt and model stay values.
+    """Open NAME running PRESET. `env` is filtered to IDENTITY_ENV; prompt and model stay values.
 
     watch starts `agent-bus watch --cli tmux` for the identity in `env`, so the bus can
     wake the pane without anyone starting a watcher by hand.
@@ -139,7 +170,7 @@ def spawn(name: str, preset: str, *, cwd: str | None = None, model: str | None =
     if watch and not agent_id:
         raise PaneError("a watcher needs the pane's agent-bus identity")
     unset = [arg for var in sorted(_inherited_names()) for arg in ("-u", var)]
-    identity = [f"{k}={v}" for k, v in (env or {}).items() if k in PANE_ENV]
+    identity = [f"{k}={v}" for k, v in (env or {}).items() if k in IDENTITY_ENV]
     command = ["env", *unset, *identity, spec.program]
     # "--x=value" and "--" keep a model or prompt starting with '-' from becoming a flag.
     if model:
@@ -180,7 +211,13 @@ def state(name: str, preset: str) -> str:
 
 
 def send(name: str, text: str, *, force: bool = False) -> None:
-    """Paste the text as one bracketed paste and submit it; refuses a busy pane unless forced."""
+    """Paste the text as one bracketed paste and submit it; refuses a busy pane unless forced.
+
+    Control characters are removed first, so the text can only ever be typed, not pressed.
+    """
+    text = CONTROL_CHARS.sub("", text)
+    if not text.strip():
+        raise PaneError("nothing to send")
     pane = next((p for p in list_panes() if p["name"] == name), None)
     if pane is None:
         raise PaneError(f"no pane '{name}'")
@@ -233,5 +270,5 @@ def answer(name: str, number: int) -> None:
     _tmux("send-keys", "-t", _target(name), "Enter")
 
 
-def view_command() -> list[str]:
-    return [*TMUX, "attach", "-r", "-t", f"={SESSION}"]
+def view_command(session: str = SESSION, writable: bool = False) -> list[str]:
+    return [*_base(), "attach", *([] if writable else ["-r"]), "-t", f"={session}"]

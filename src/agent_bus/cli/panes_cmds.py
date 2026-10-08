@@ -97,8 +97,8 @@ def screen(name: str, lines: int) -> None:
 def answer(name: str, option: int | None) -> None:
     """Responder la pregunta de permiso del panel NAME (sin OPTION, solo la muestra).
 
-    Es para personas: exige una terminal interactiva y confirmación, de modo que un
-    agente no apruebe los comandos de otro.
+    Pensado para personas: exige una terminal interactiva y confirmación. Es una barrera
+    de cortesía, no de seguridad: un agente con shell puede simular una terminal.
     """
     asked = _run(backend.question, name)
     if asked is None:
@@ -121,9 +121,11 @@ def answer(name: str, option: int | None) -> None:
 
 
 @panes.command("view")
-def view() -> None:
+@click.option("--writable", is_flag=True, help="Poder escribir (p. ej. responder una pregunta a mano).")
+@click.option("--watchers", is_flag=True, help="Ver los watchers de los paneles (y sus errores).")
+def view(writable: bool, watchers: bool) -> None:
     """Ver los paneles en solo lectura (desconectar: prefijo + d)."""
     if not backend.list_panes():
         raise click.ClickException("no hay paneles abiertos")
-    command = backend.view_command()
+    command = backend.view_command(backend.WATCHERS if watchers else backend.SESSION, writable)
     os.execvp(command[0], command)

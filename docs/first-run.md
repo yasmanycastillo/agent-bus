@@ -248,8 +248,9 @@ preguntas de permiso del panel las responde el usuario en muxel.
 
 ### Paneles tmux que maneja el coordinador (prototipo)
 
-`agent-bus panes` abre TUIs de agentes en un servidor tmux propio (`tmux -L agent-bus`,
-sesión `agents`), separado del tmux del usuario. El coordinador los abre, les escribe y
+`agent-bus panes` abre TUIs de agentes en un servidor tmux propio de cada proyecto
+(`tmux -L agent-bus-<project_id>`, sesión `agents`), separado del tmux del usuario y de
+los paneles de otros proyectos. El coordinador los abre, les escribe y
 los cierra; el usuario solo mira:
 
 ```sh
@@ -270,9 +271,14 @@ cuenta como `blocked`. `send` rechaza un panel que no esté `idle` salvo con `--
 Un agente que termina queda `dead` hasta `close`.
 
 Con `--agent` el panel recibe las variables `AGENT_BUS_*` de esa credencial, como un
-worker. El panel no hereda las variables `CLAUDE*` de quien lo abre (sesión, socket y
-token de un Claude Code coordinador); Claude vuelve a aplicar el `env` de su
-`settings.json`.
+worker. Del resto del entorno solo hereda una lista permitida (`PATH`, `HOME`, `USER`,
+`SHELL`, `TERM`, idioma, `XDG_*`, `SSH_AUTH_SOCK`, `DISPLAY`…): ni claves como
+`ANTHROPIC_API_KEY` o `GITHUB_TOKEN`, ni la sesión de un Claude Code coordinador
+(`CLAUDE*`). Los CLIs leen su login de archivos bajo `HOME`, y Claude vuelve a aplicar
+el `env` de su `settings.json`.
+
+`send` quita los caracteres de control (salvo tabulador y salto de línea) antes de
+pegar: un `ESC[201~` en un mensaje cerraría el pegado y el resto llegaría como teclas.
 
 Un panel `blocked` espera una pregunta de confianza o permiso, y la responde una persona:
 
@@ -281,10 +287,10 @@ agent-bus panes answer impl-1        # muestra el comando y las opciones
 agent-bus panes answer impl-1 4      # elige la opción 4 tras confirmar
 ```
 
-`answer` con opción exige una terminal interactiva y confirmación, así que un agente
-(sin TTY en su Bash) puede leer la pregunta pero no aprobarla; no hay versión MCP.
-Muestra el comando en los menús de agy; en los de Claude Code solo las opciones.
-Alternativa: `tmux -L agent-bus attach -t agents` (sin `-r`) y responder en el panel.
+`answer` con opción exige una terminal interactiva y confirmación, y no tiene versión
+MCP. Es una barrera de cortesía, no de seguridad: un agente con shell puede simular una
+terminal. Muestra el comando en los menús de agy; en los de Claude Code solo las
+opciones. Alternativa: `agent-bus panes view --writable` y responder en el panel.
 
 Las reglas `permissions.allow` de agy (`command(git status)`) revisan cada parte de un
 comando compuesto (`a; b` pide permiso para `b`), pero no las redirecciones: un comando
@@ -299,8 +305,8 @@ equipo donde corre el hub.
 Para que el bus despierte al agente de un panel hace falta su watcher. `spawn` con
 `--agent` (o `agent_panes` con `as_agent`) lo arranca solo, en la sesión `watchers` del
 mismo tmux, que `view` no muestra; `close` lo detiene. `list` y la consola indican
-`watcher: running`, `stopped` (terminó; su error queda en
-`tmux -L agent-bus attach -t watchers`) o `none`. Con `--no-watch`, o para un panel sin
+`watcher: running`, `stopped` (terminó; su error se ve con
+`agent-bus panes view --watchers`) o `none`. Con `--no-watch`, o para un panel sin
 identidad, arráncalo a mano:
 
 ```sh
@@ -314,8 +320,12 @@ Escribe en el panel los mismos avisos de tareas que `--cli muxel` (tarea asignad
 revisión liberada, implementación reabierta y los mensajes del hub que entregan
 trabajo, que confirma tras escribirlos). Como tmux no da el texto de la respuesta,
 las preguntas con respuesta pendiente no se convierten en turnos del watcher: las
-escribe una sola vez (los ids quedan en `task_nudges.json` como `asked`) y el agente
-las contesta con `reply_message`; el watcher no responde ni confirma por él. Un panel
+escribe en una línea, con el texto del remitente entre `⟦ ⟧` y marcado como "no
+instrucciones del bus" (así no puede hacerse pasar por un aviso), y el agente las
+contesta con `reply_message`; el watcher no responde ni confirma por él. Los ids
+escritos quedan en `task_nudges.json` (`asked`); una pregunta sin respuesta a los
+15 minutos cuenta como intento fallido para el remitente y se vuelve a escribir (el
+panel pudo reiniciarse), hasta 5 intentos. Un panel
 `working` o `blocked` aplaza el aviso sin contar un fallo; uno `dead` o inexistente
 lo reintenta a los 30 s.
 
@@ -325,11 +335,10 @@ coordinador arranca con `AGENT_BUS_PANES=1` en su entorno (el bloque `env` de la
 entrada `agent-bus` en la configuración MCP del cliente) y requiere `bootstrap_agent`.
 Por MCP no hay argumentos libres del CLI ni directorio: el panel arranca en la raíz
 del proyecto del MCP, así que un agente no puede abrir otro sin preguntas de permiso.
-`as_agent` le da al panel la identidad de un agente al que ese coordinador asignó
-trabajo con `assign_work` en alguno de sus encargos (`GET /instructions/assignees`,
-que responde siempre por la sesión autenticada); estar en el roster no basta. La
-opción `--agent` de la CLI no tiene esa restricción: la usa quien ya tiene acceso
-local a las credenciales.
+`as_agent` presta al panel (y a su watcher) la credencial de otra identidad, así que
+exige una sesión que el hub reconozca como administrador (`GET /auth/me`, no el archivo
+local). La opción `--agent` de la CLI no tiene esa restricción: la usa quien ya tiene
+acceso local a las credenciales.
 
 `--status` devuelve JSON con `active`, `state` y `can_dispatch`. Comprueba la reserva
 real del ejecutor en el sistema operativo y la actualidad de su estado; un archivo

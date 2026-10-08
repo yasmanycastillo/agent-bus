@@ -2,8 +2,8 @@
 
 Opt-in with AGENT_BUS_PANES=1 on the coordinator's MCP. Agents cannot pass CLI
 arguments (no permission bypass) nor choose the directory: panes start at the
-project root the MCP was started in. as_agent must be an agent the hub says this
-coordinator assigned work to, so a pane cannot borrow any other local credential.
+project root the MCP was started in. as_agent lends another identity's credential to
+the pane and its watcher, so it needs a session the hub verifies as administrator.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ TOOL = {
     "description": (
         "Paneles TUI de agentes (claude, agy) que el usuario ve en solo lectura. "
         "action=list|spawn|send|screen|close. spawn abre name con preset en la raíz del proyecto; "
-        "as_agent le da la identidad de un agente al que asignaste trabajo con assign_work y arranca su watcher, que le avisa del trabajo nuevo; close lo detiene. send escribe text y lo envía sólo si el panel está idle."
+        "as_agent (solo sesiones de administrador) le da esa identidad y arranca su watcher, que le avisa del trabajo nuevo; close lo detiene. send escribe text y lo envía sólo si el panel está idle."
     ),
     "inputSchema": {
         "type": "object",
@@ -31,7 +31,7 @@ TOOL = {
             "action": {"type": "string", "enum": ["list", "spawn", "send", "screen", "close"]},
             "name": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,40}$"},
             "preset": {"type": "string", "enum": sorted(panes.PRESETS)},
-            "as_agent": {"type": "string", "description": "spawn: agente al que asignaste trabajo"},
+            "as_agent": {"type": "string", "description": "spawn: identidad del panel; requiere sesión de administrador"},
             "model": {"type": "string"},
             "prompt": {"type": "string", "description": "spawn: prompt inicial"},
             "text": {"type": "string", "description": "send: texto a escribir"},
@@ -48,7 +48,7 @@ def enabled() -> bool:
     return os.environ.get(ENABLED_ENV) == "1"
 
 
-def _call(args: dict[str, Any], cwd: Path, assignees: list[str]) -> dict[str, Any]:
+def _call(args: dict[str, Any], cwd: Path, admin: bool) -> dict[str, Any]:
     action = args["action"]
     if action == "list":
         return {"status": "ok", "panes": panes.list_panes()}
@@ -60,8 +60,8 @@ def _call(args: dict[str, Any], cwd: Path, assignees: list[str]) -> dict[str, An
             raise ValueError("preset is required for action=spawn")
         env = None
         if args.get("as_agent"):
-            if args["as_agent"] not in assignees:
-                raise ValueError(f"as_agent must be an agent you assigned work to: {', '.join(assignees) or 'none yet'}")
+            if not admin:
+                raise ValueError("as_agent requires an administrator session")
             from agent_bus.worker.client import worker_environment
             env = worker_environment(args["as_agent"], per_agent=True)
         panes.spawn(name, args["preset"], cwd=str(cwd), model=args.get("model"),
@@ -78,14 +78,15 @@ def _call(args: dict[str, Any], cwd: Path, assignees: list[str]) -> dict[str, An
     return {"status": "ok", "name": name}
 
 
-async def call(args: dict[str, Any], cwd: Path, client: Any) -> dict[str, Any]:
-    """client: the caller's authenticated hub client; it decides who may be as_agent."""
-    assignees: list[str] = []
+async def call(args: dict[str, Any], cwd: Path, client: Any, project_id: str) -> dict[str, Any]:
+    """client: the caller's authenticated hub client; the hub, not the local file, says who is admin."""
+    admin = False
     if args.get("action") == "spawn" and args.get("as_agent"):
-        response = await client.get("/instructions/assignees")
+        response = await client.get("/auth/me")
         response.raise_for_status()
-        assignees = response.json()["agents"]
+        admin = response.json().get("role") == "admin"
+    panes.use_project(project_id)
     try:
-        return await asyncio.to_thread(_call, args, cwd, assignees)
+        return await asyncio.to_thread(_call, args, cwd, admin)
     except panes.PaneError as exc:  # tmux's own message: pane names and states only
         return {"status": "error", "code": "pane_error", "error": str(exc)}

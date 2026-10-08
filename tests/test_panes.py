@@ -1,8 +1,10 @@
 """Agent panes on a real tmux server with a private socket; `sh` stands in for an agent TUI."""
+import os
 import shutil
 import subprocess
 import time
 import uuid
+from pathlib import Path
 
 import httpx
 import pytest
@@ -16,9 +18,17 @@ pytestmark = pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not insta
 def tmux(monkeypatch):
     socket = f"agent-bus-test-{uuid.uuid4().hex[:8]}"
     monkeypatch.setattr(panes, "TMUX", ["tmux", "-L", socket])
+    monkeypatch.setattr(panes, "_project", None)
     monkeypatch.setattr(panes, "PRESETS", {"sh": panes.Preset("sh", None, r"^WORKING$", r"^CONFIRM\?$")})
     yield
+    kill_server(socket)
+
+
+def kill_server(socket):
+    """Stop a test server and remove its socket file, which kill-server leaves behind."""
     subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+    tmpdir = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    (Path(tmpdir) / f"tmux-{os.getuid()}" / socket).unlink(missing_ok=True)
 
 
 def wait_for(check, timeout=5.0):
@@ -37,6 +47,7 @@ def test_coordinator_drives_pane_lifecycle(tmux, tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent")
     monkeypatch.setenv("AGENT_BUS_AGENT_ID", "coordinator")
     monkeypatch.setenv("AGENT_BUS_PANES", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-key")  # secrets must not reach a pane
     assert panes.list_panes() == []
     panes.spawn("a", "sh", cwd=str(tmp_path), env={"AGENT_BUS_AGENT_ID": "a", "AGENT_BUS_PANES": "1"})
     panes.spawn("b", "sh", cwd=str(tmp_path))
@@ -50,8 +61,8 @@ def test_coordinator_drives_pane_lifecycle(tmux, tmp_path, monkeypatch):
 
     panes.send("a", 'echo "$AGENT_BUS_AGENT_ID in $PWD [$CLAUDE_CODE_SESSION_ID$AGENT_BUS_PANES]"')
     wait_for(lambda: f"a in {tmp_path} []" in panes.screen("a"))
-    panes.send("b", 'echo "id=[$AGENT_BUS_AGENT_ID]"')
-    wait_for(lambda: "id=[]" in panes.screen("b"))
+    panes.send("b", 'echo "id=[$AGENT_BUS_AGENT_ID] key=[$ANTHROPIC_API_KEY] home=[$HOME]"')
+    wait_for(lambda: f"id=[] key=[] home=[{os.environ['HOME']}]" in panes.screen("b"))
 
     panes.send("a", "echo WORK''ING")
     wait_for(lambda: states()["a"] == "working")
@@ -99,7 +110,7 @@ async def test_coordinator_drives_panes_through_mcp(tmux, tmp_path, monkeypatch)
     monkeypatch.setenv("AGENT_BUS_PANES", "1")
     server = McpServer(agent_id="alice")
     server._lock_project_root = tmp_path
-    asked = []
+    asked, role = [], ["agent"]
 
     class Hub:
         async def __aenter__(self):
@@ -110,7 +121,7 @@ async def test_coordinator_drives_panes_through_mcp(tmux, tmp_path, monkeypatch)
 
         async def get(self, path):
             asked.append(path)
-            return httpx.Response(200, json={"coordinator": "alice", "agents": ["claude-01"]},
+            return httpx.Response(200, json={"agent_id": "alice", "role": role[0]},
                                   request=httpx.Request("GET", "http://hub" + path))
 
     monkeypatch.setattr(server, "_client", lambda: Hub())
@@ -139,10 +150,11 @@ async def test_coordinator_drives_panes_through_mcp(tmux, tmp_path, monkeypatch)
         assert error and body["code"] == "invalid_arguments"
         assert (await call(action="close", name="a"))[0] is False
 
-        # A pane may only borrow the identity of an agent this coordinator assigned work to.
-        error, body = await call(action="spawn", name="b", preset="claude", as_agent="admin")
-        assert error and body["code"] == "invalid_arguments" and "claude-01" in body["error"]
-        assert asked == ["/instructions/assignees"]
+        # Lending another identity's credential takes a session the hub knows as administrator.
+        error, body = await call(action="spawn", name="b", preset="claude", as_agent="claude-01")
+        assert error and body["code"] == "invalid_arguments" and "administrator" in body["error"]
+        assert asked == ["/auth/me"] and panes.list_panes() == []
+        role[0] = "admin"
         assert await call(action="spawn", name="b", preset="claude", as_agent="claude-01") == (
             False, {"status": "ok", "name": "b"})
         await call(action="send", name="b", text='echo "id=$AGENT_BUS_AGENT_ID"')
@@ -265,3 +277,45 @@ def test_identified_pane_runs_its_watcher_until_closed(tmux, tmp_path, monkeypat
     panes.close("a")
     assert panes.list_panes() == []
     assert subprocess.run([*panes.TMUX, "has-session", "-t", "=watchers"], capture_output=True).returncode != 0
+
+
+def test_send_strips_control_characters(monkeypatch):
+    """An ESC[201~ would end the bracketed paste and press the rest as real keys."""
+    loaded = []
+    monkeypatch.setattr(panes, "list_panes", lambda: [{"name": "x", "preset": "sh", "state": "idle"}])
+    monkeypatch.setattr(panes.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(panes, "_tmux", lambda *a, input_text=None: loaded.append(input_text) or "")
+    panes.send("x", "hola\x1b[201~\x1b[B\rfin\x00\x9b1;2\nlínea 2\tok\x7f")
+    assert loaded[0] == "hola[201~[Bfin1;2\nlínea 2\tok"
+    with pytest.raises(panes.PaneError, match="nothing"):
+        panes.send("x", "\x1b\x03")
+
+
+def test_each_project_has_its_own_tmux_server(monkeypatch):
+    monkeypatch.setattr(panes, "TMUX", None)
+    monkeypatch.setattr(panes, "_project", None)
+    monkeypatch.setenv("AGENT_BUS_PROJECT_ID", "env-project")
+    assert panes._base() == ["tmux", "-L", "agent-bus-env-project"]
+    panes.use_project("proj/../x y")
+    assert panes._base() == ["tmux", "-L", "agent-bus-proj____x_y"]
+
+
+def test_missing_tmux_means_no_panes_not_an_error(monkeypatch):
+    monkeypatch.setattr(panes, "TMUX", ["agent-bus-no-such-tmux"])
+    assert panes.list_panes() == []
+    with pytest.raises(panes.PaneError, match="not installed"):
+        panes.close("x")
+
+
+@pytest.mark.parametrize("footer, expected", [
+    # Captured from Claude Code 2.1 in tmux, 2026-10.
+    ("✶ Meandering…\n  ⎿  Tip: Connect Claude to your IDE · /ide\n❯ \n  ⏵⏵ accept edits on", "working"),
+    ("· Meandering…\n❯ ", "working"),
+    ("● 1 2 3 4 5\n✻ Cooked for 9s · done 11:47 AM\n❯ \n  ⏵⏵ accept edits on", "idle"),
+    ("● Revisando…\n❯ ", "idle"),  # a reply line, not the spinner
+    (" Claude Code'll be able to read, edit, and execute files here.\n ❯ No, exit\n"
+     " Enter to confirm · Esc to cancel", "blocked"),
+])
+def test_claude_states_from_its_footer(monkeypatch, footer, expected):
+    monkeypatch.setattr(panes, "screen", lambda name, lines=panes.SCREEN_LINES: footer)
+    assert panes.state("x", "claude") == expected
