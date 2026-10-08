@@ -36,15 +36,17 @@ def panes() -> None:
 @click.option("--prompt", default=None, help="Prompt inicial de la sesión interactiva.")
 @click.option("--agent", "agent_id", default=None,
               help="Identidad de agent-bus del panel; inyecta su credencial (AGENT_BUS_*).")
+@click.option("--watch/--no-watch", default=True, show_default=True,
+              help="Con --agent: arrancar su watcher (watch --cli tmux), que close detiene.")
 def spawn(name: str, preset: str, extra_args: tuple[str, ...], cwd: str | None, model: str | None,
-          prompt: str | None, agent_id: str | None) -> None:
+          prompt: str | None, agent_id: str | None, watch: bool) -> None:
     """Abrir NAME con PRESET. Argumentos tras `--` van al CLI (ej. permisos)."""
     env = None
     if agent_id:
         from agent_bus.worker.client import worker_environment
         env = worker_environment(agent_id, per_agent=True)
     _run(backend.spawn, name, preset, cwd=cwd, model=model, prompt=prompt,
-         extra_args=tuple(extra_args), env=env)
+         extra_args=tuple(extra_args), env=env, watch=watch and env is not None)
     click.echo(f"Panel '{name}' abierto ({preset}). Míralo con: agent-bus panes view")
 
 
@@ -59,13 +61,13 @@ def close(name: str) -> None:
 @panes.command("list")
 @click.option("--json", "as_json", is_flag=True, help="Salida JSON.")
 def list_cmd(as_json: bool) -> None:
-    """Paneles abiertos y su estado: idle, working, blocked o dead."""
+    """Paneles abiertos, su estado (idle, working, blocked o dead) y su watcher."""
     items = backend.list_panes()
     if as_json:
         click.echo(json.dumps(items))
         return
     for item in items:
-        click.echo(f"{item['name']}\t{item['preset']}\t{item['state']}")
+        click.echo(f"{item['name']}\t{item['preset']}\t{item['state']}\twatcher:{item['watcher']}")
 
 
 @panes.command("send")

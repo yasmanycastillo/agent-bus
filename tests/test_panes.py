@@ -114,6 +114,7 @@ async def test_coordinator_drives_panes_through_mcp(tmux, tmp_path, monkeypatch)
                                   request=httpx.Request("GET", "http://hub" + path))
 
     monkeypatch.setattr(server, "_client", lambda: Hub())
+    monkeypatch.setattr(panes, "WATCH_COMMAND", ["sh", "-c", "exec sleep 60", "watcher"])
     monkeypatch.setattr("agent_bus.worker.client.worker_environment",
                         lambda agent_id, per_agent: {"AGENT_BUS_AGENT_ID": agent_id})
 
@@ -130,7 +131,8 @@ async def test_coordinator_drives_panes_through_mcp(tmux, tmp_path, monkeypatch)
         assert spawned == (False, {"status": "ok", "name": "a"}), spawned
         assert await call(action="send", name="a", text="pwd") == (False, {"status": "ok", "name": "a"})
         wait_for(lambda: str(tmp_path) in panes.screen("a"))
-        assert (await call(action="list"))[1]["panes"] == [{"name": "a", "preset": "claude", "state": "idle"}]
+        assert (await call(action="list"))[1]["panes"] == [
+            {"name": "a", "preset": "claude", "state": "idle", "watcher": "none"}]
         error, body = await call(action="spawn", name="a", preset="claude")
         assert error and body["code"] == "pane_error" and "already exists" in body["error"]
         error, body = await call(action="send", name="a")
@@ -145,6 +147,7 @@ async def test_coordinator_drives_panes_through_mcp(tmux, tmp_path, monkeypatch)
             False, {"status": "ok", "name": "b"})
         await call(action="send", name="b", text='echo "id=$AGENT_BUS_AGENT_ID"')
         wait_for(lambda: "id=claude-01" in panes.screen("b"))
+        assert panes.list_panes()[0]["watcher"] == "running"  # as_agent brings its watcher
         await call(action="close", name="b")
         assert (await call(action="list"))[1]["panes"] == []
 
@@ -242,3 +245,23 @@ def test_cli_answer_is_for_people_only(monkeypatch):
     # An agent's Bash has no terminal: it can read the question but never approve it.
     refused = CliRunner().invoke(panes_cli, ["answer", "x", "1"], input="y\n")
     assert refused.exit_code != 0 and "terminal interactiva" in refused.output and not answered
+
+
+def test_identified_pane_runs_its_watcher_until_closed(tmux, tmp_path, monkeypatch):
+    # Records how it was started instead of watching a hub.
+    monkeypatch.setattr(panes, "WATCH_COMMAND", [
+        "sh", "-c", 'echo "$AGENT_BUS_AGENT_ID:$*" > watcher.txt; exec sleep 60', "watcher"])
+    with pytest.raises(panes.PaneError, match="identity"):
+        panes.spawn("a", "sh", cwd=str(tmp_path), watch=True)
+    panes.spawn("a", "sh", cwd=str(tmp_path), env={"AGENT_BUS_AGENT_ID": "claude-01"}, watch=True)
+    wait_for(lambda: (tmp_path / "watcher.txt").exists() and (tmp_path / "watcher.txt").read_text())
+    assert (tmp_path / "watcher.txt").read_text() == "claude-01:--agent claude-01 --tmux-agent a\n"
+    assert panes.list_panes() == [{"name": "a", "preset": "sh", "state": "idle", "watcher": "running"}]
+    # The user's view attaches to the agents only, never to the watchers.
+    assert panes.view_command()[-1] == "=agents"
+
+    subprocess.run([*panes.TMUX, "send-keys", "-t", "watchers:=a", "C-c"])  # watcher dies
+    wait_for(lambda: panes.list_panes()[0]["watcher"] == "stopped")
+    panes.close("a")
+    assert panes.list_panes() == []
+    assert subprocess.run([*panes.TMUX, "has-session", "-t", "=watchers"], capture_output=True).returncode != 0

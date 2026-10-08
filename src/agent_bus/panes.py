@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import time
 import uuid
 from typing import Any, NamedTuple
@@ -16,6 +17,10 @@ from typing import Any, NamedTuple
 # A dedicated socket keeps these panes out of the user's own tmux server.
 TMUX = ["tmux", "-L", "agent-bus"]
 SESSION = "agents"
+# Each pane with an identity gets its watcher here, out of the session the user views.
+WATCHERS = "watchers"
+# Same code as the caller, so a watcher runs the version that opened its pane.
+WATCH_COMMAND = [sys.executable, "-m", "agent_bus.cli.main", "watch", "--cli", "tmux"]
 SCREEN_LINES = 12
 # '.' and ':' separate window and pane in tmux targets; keep names to plain words.
 NAME = re.compile(r"[A-Za-z0-9_-]{1,40}")
@@ -82,28 +87,47 @@ def _inherited_names() -> set[str]:
     return {name for name in names if name.startswith(("CLAUDE", "AGENT_BUS_"))}
 
 
-def _target(name: str) -> str:
-    return f"{SESSION}:={name}"  # '=' matches the window name exactly
+def _target(name: str, session: str = SESSION) -> str:
+    return f"{session}:={name}"  # '=' matches the window name exactly
+
+
+def _windows(session: str, fields: str) -> list[list[str]]:
+    try:
+        out = _tmux("list-windows", "-t", f"={session}", "-F", fields)
+    except PaneError:
+        return []  # no server or no session yet
+    return [line.split("\t") for line in out.splitlines()]
 
 
 def list_panes() -> list[dict[str, str]]:
-    try:
-        out = _tmux("list-windows", "-t", f"={SESSION}", "-F",
-                    "#{window_name}\t#{@agent_bus_preset}\t#{pane_dead}")
-    except PaneError:
-        return []  # no server or no session yet: no panes
-    panes = []
-    for line in out.splitlines():
-        name, preset, dead = line.split("\t")
-        panes.append({"name": name, "preset": preset,
-                      "state": "dead" if dead == "1" else state(name, preset)})
-    return panes
+    """Panes with their state and watcher: 'running', 'stopped' (exited; see its window) or 'none'."""
+    watchers = {name: "stopped" if dead == "1" else "running"
+                for name, dead in _windows(WATCHERS, "#{window_name}\t#{pane_dead}")}
+    return [{"name": name, "preset": preset, "state": "dead" if dead == "1" else state(name, preset),
+             "watcher": watchers.get(name, "none")}
+            for name, preset, dead in _windows(SESSION, "#{window_name}\t#{@agent_bus_preset}\t#{pane_dead}")]
+
+
+def _open_window(session: str, name: str, cwd: str, command: list[str], *options: str) -> None:
+    where = ["-n", name, "-c", cwd]
+    if _tmux_ok("has-session", "-t", f"={session}"):
+        create = ["new-window", "-d", "-t", f"={session}:", *where, "--", *command]
+    else:
+        create = ["new-session", "-d", "-s", session, "-x", "200", "-y", "50", *where, "--", *command]
+    # One tmux invocation, so a program that exits at once still stays visible as dead.
+    sets = [arg for option, value in zip(options[::2], options[1::2])
+            for arg in (";", "set-option", "-w", "-t", _target(name, session), option, value)]
+    _tmux(*create, ";", "set-option", "-w", "-t", _target(name, session), "remain-on-exit", "on", *sets)
 
 
 def spawn(name: str, preset: str, *, cwd: str | None = None, model: str | None = None,
           prompt: str | None = None, extra_args: tuple[str, ...] = (),
-          env: dict[str, str] | None = None) -> None:
-    """Open NAME running PRESET. `env` is filtered to PANE_ENV; prompt and model stay values."""
+          env: dict[str, str] | None = None, watch: bool = False) -> None:
+    """Open NAME running PRESET. `env` is filtered to PANE_ENV; prompt and model stay values.
+
+    watch starts `agent-bus watch --cli tmux` for the identity in `env`, so the bus can
+    wake the pane without anyone starting a watcher by hand.
+    """
     spec = PRESETS.get(preset)
     if spec is None:
         raise PaneError(f"unknown preset '{preset}'; use one of {', '.join(PRESETS)}")
@@ -111,6 +135,9 @@ def spawn(name: str, preset: str, *, cwd: str | None = None, model: str | None =
         raise PaneError(f"invalid pane name '{name}': use 1-40 letters, digits, '_' or '-'")
     if any(p["name"] == name for p in list_panes()):
         raise PaneError(f"pane '{name}' already exists")
+    agent_id = (env or {}).get("AGENT_BUS_AGENT_ID")
+    if watch and not agent_id:
+        raise PaneError("a watcher needs the pane's agent-bus identity")
     unset = [arg for var in sorted(_inherited_names()) for arg in ("-u", var)]
     identity = [f"{k}={v}" for k, v in (env or {}).items() if k in PANE_ENV]
     command = ["env", *unset, *identity, spec.program]
@@ -120,17 +147,17 @@ def spawn(name: str, preset: str, *, cwd: str | None = None, model: str | None =
     command += extra_args
     if prompt:
         command += [f"{spec.prompt_flag}={prompt}"] if spec.prompt_flag else ["--", prompt]
-    where = ["-n", name, "-c", cwd or os.getcwd()]
-    if _tmux_ok("has-session", "-t", f"={SESSION}"):
-        create = ["new-window", "-d", "-t", f"={SESSION}:", *where, "--", *command]
-    else:
-        create = ["new-session", "-d", "-s", SESSION, "-x", "200", "-y", "50", *where, "--", *command]
-    # One tmux invocation, so an agent that exits at once still stays visible as 'dead'.
-    _tmux(*create, ";", "set-option", "-w", "-t", _target(name), "remain-on-exit", "on",
-          ";", "set-option", "-w", "-t", _target(name), "@agent_bus_preset", preset)
+    cwd = cwd or os.getcwd()
+    _open_window(SESSION, name, cwd, command, "@agent_bus_preset", preset)
+    if watch:
+        _tmux_ok("kill-window", "-t", _target(name, WATCHERS))  # a stopped one left by an earlier pane
+        watcher = ["env", *unset, *identity, *WATCH_COMMAND, "--agent", str(agent_id), "--tmux-agent", name]
+        _open_window(WATCHERS, name, cwd, watcher)
 
 
 def close(name: str) -> None:
+    """Close the pane and stop its watcher, if any."""
+    _tmux_ok("kill-window", "-t", _target(name, WATCHERS))
     _tmux("kill-window", "-t", _target(name))
 
 

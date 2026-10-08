@@ -23,7 +23,7 @@ TOOL = {
     "description": (
         "Paneles TUI de agentes (claude, agy) que el usuario ve en solo lectura. "
         "action=list|spawn|send|screen|close. spawn abre name con preset en la raíz del proyecto; "
-        "as_agent le da la identidad de un agente al que asignaste trabajo con assign_work. send escribe text y lo envía sólo si el panel está idle."
+        "as_agent le da la identidad de un agente al que asignaste trabajo con assign_work y arranca su watcher, que le avisa del trabajo nuevo; close lo detiene. send escribe text y lo envía sólo si el panel está idle."
     ),
     "inputSchema": {
         "type": "object",
@@ -65,7 +65,7 @@ def _call(args: dict[str, Any], cwd: Path, assignees: list[str]) -> dict[str, An
             from agent_bus.worker.client import worker_environment
             env = worker_environment(args["as_agent"], per_agent=True)
         panes.spawn(name, args["preset"], cwd=str(cwd), model=args.get("model"),
-                    prompt=args.get("prompt"), env=env)
+                    prompt=args.get("prompt"), env=env, watch=env is not None)
         return {"status": "ok", "name": name}
     if action == "send":
         if not args.get("text", "").strip():

@@ -296,12 +296,19 @@ entrada de texto. Los lee el hub con `GET /room/api/panes`, reservado a sesiones
 administrativas porque una pantalla puede mostrar secretos; solo ve los paneles del
 equipo donde corre el hub.
 
-Para que el bus despierte al agente de un panel, arranca su watcher con
-`--cli tmux`:
+Para que el bus despierte al agente de un panel hace falta su watcher. `spawn` con
+`--agent` (o `agent_panes` con `as_agent`) lo arranca solo, en la sesión `watchers` del
+mismo tmux, que `view` no muestra; `close` lo detiene. `list` y la consola indican
+`watcher: running`, `stopped` (terminó; su error queda en
+`tmux -L agent-bus attach -t watchers`) o `none`. Con `--no-watch`, o para un panel sin
+identidad, arráncalo a mano:
 
 ```sh
 agent-bus watch --agent claude --cli tmux --tmux-agent impl-1
 ```
+
+Solo puede haber un watcher por identidad: si ya tienes uno corriendo para ese agente,
+el del panel termina (`stopped`).
 
 Escribe en el panel los mismos avisos de tareas que `--cli muxel` (tarea asignada,
 revisión liberada, implementación reabierta y los mensajes del hub que entregan
