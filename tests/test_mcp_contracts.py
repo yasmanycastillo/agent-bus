@@ -338,6 +338,21 @@ async def test_identity_omitted_after_bootstrap_comes_from_the_session(legacy_se
     assert sent[0][field] == "alice"
 
 
+@pytest.mark.parametrize("tool_name", ["read_messages", "wait_for_updates"])
+async def test_restarted_legacy_mcp_asks_to_repeat_bootstrap_not_auth_create(monkeypatch, tool_name):
+    """A new MCP process forgets the session bootstrap_agent adopted in the previous one."""
+    monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "0")
+    monkeypatch.delenv("AGENT_BUS_SESSION_FILE", raising=False)
+    restarted = McpServer(agent_id="alice")  # global `mcp-server --agent alice`, no adoption yet
+    assert restarted.session is None
+    async with Client(restarted.sdk_server()) as client:
+        result = await client.call_tool(tool_name, TOOL_ARGUMENTS[tool_name])
+    value = payload(result)
+    assert result.is_error and value["code"] == "unauthenticated"
+    assert "bootstrap_agent" in value["error"] and "project_path" in value["error"]
+    assert "auth create" not in value["error"]
+
+
 async def test_legacy_without_any_identity_reports_missing_agent_id(monkeypatch):
     monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "1")
     monkeypatch.delenv("AGENT_BUS_SESSION_FILE", raising=False)

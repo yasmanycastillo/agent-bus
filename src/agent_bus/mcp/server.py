@@ -415,9 +415,19 @@ class McpServer:
         return self._tool_result({"status": "error", **failure}, error=True)
 
     def _client(self, timeout: float | None = 30.0):
-        return async_bus_client(
-            self.agent_id, session=self.session, project_id=self.project_id, base_url=self.bus_url, timeout=timeout,
-        )
+        try:
+            return async_bus_client(
+                self.agent_id, session=self.session, project_id=self.project_id, base_url=self.bus_url, timeout=timeout,
+            )
+        except AuthenticationError:
+            if self.session is not None:
+                raise
+            # The session adopted by bootstrap_agent lives only in this process;
+            # a restarted/reconnected MCP falls back to the config-dir credential.
+            raise AuthenticationError(
+                "Este proceso MCP no tiene sesión adoptada (p. ej. el servidor MCP se reinició o reconectó). "
+                "Repite bootstrap_agent con project_path del proyecto que coordinas."
+            ) from None
 
     def _bind_identity(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         bound = dict(args)
