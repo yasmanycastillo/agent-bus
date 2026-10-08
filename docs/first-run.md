@@ -171,6 +171,23 @@ como consulta de texto sin herramientas ni ediciones. El watcher publica la
 respuesta y confirma el mensaje. No despierta una TUI ni instala un servicio de
 inicio del sistema. Un heartbeat o `--dry-run` no habilita ejecución automática.
 
+### Despertar una TUI abierta en muxel
+
+Si el agente ya está abierto en un panel de [muxel](https://github.com/projecthax/muxel),
+el watcher puede escribirle allí en lugar de lanzar un turno headless. Requiere muxel
+en ejecución con *Settings > Grok Bot > Allow outside tools to control muxel* activado:
+
+```sh
+agent-bus watch --agent claude --cli muxel --muxel-agent Claude
+```
+
+`--muxel-agent` acepta el id, el nombre o `proyecto/nombre` que muestra `muxel ctl panes`.
+El watcher escribe la solicitud solo si el panel está `idle` o `done`, espera con
+`muxel ctl wait` y publica la respuesta únicamente si el turno termina (`finished`).
+Un panel trabajando o bloqueado en una pregunta aplaza la solicitud sin contar un
+fallo, y la solicitud no se vuelve a escribir mientras se espera ese turno. Las
+preguntas de permiso del panel las responde el usuario en muxel.
+
 `--status` devuelve JSON con `active`, `state` y `can_dispatch`. Comprueba la reserva
 real del ejecutor en el sistema operativo y la actualidad de su estado; un archivo
 PID antiguo no basta. `can_dispatch=true` significa que el watcher está esperando
@@ -187,6 +204,7 @@ Los procesos de versiones anteriores que no publican estado aparecen como `unkno
 | `hub_error` | Recuperar conexión con el hub |
 | `delivery_error` | Respuesta conservada; se reintentará su entrega |
 | `attempt_limit` | Cinco fallos antes de preparar una respuesta; requiere intervención |
+| `agent_busy` | Con `--cli muxel`: el panel está trabajando o esperando al usuario; se reintenta sin contar un fallo |
 | `unknown` / `other_executor` | Estado antiguo/desconocido o un worker ocupa esa identidad |
 
 El watcher relee las credenciales del bus al consultar. Después de provisionar una

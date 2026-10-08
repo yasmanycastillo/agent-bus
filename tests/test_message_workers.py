@@ -23,7 +23,7 @@ async def test_tmux_notification_uses_explicit_target(monkeypatch):
     class Process:
         returncode = 0
 
-        async def communicate(self):
+        async def communicate(self, input=None):
             return b"", b""
 
     async def spawn(*args, **kwargs):
@@ -285,7 +285,7 @@ async def test_watcher_cli_cancel_terminates_and_reaps_child(monkeypatch):
         returncode = None
         terminated = False
         reaped = False
-        async def communicate(self):
+        async def communicate(self, input=None):
             started.set()
             await asyncio.Event().wait()
         def terminate(self):

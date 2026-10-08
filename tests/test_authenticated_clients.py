@@ -130,7 +130,7 @@ async def test_runner_passes_own_session_path(credentials, monkeypatch):
     captured = {}
     class Process:
         returncode = 0
-        async def communicate(self):
+        async def communicate(self, input=None):
             return b"ok", b""
     async def spawn(*args, **kwargs):
         captured.update(kwargs)

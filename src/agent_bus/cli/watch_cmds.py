@@ -98,14 +98,17 @@ def build_prompt(message: dict) -> str:
     )
 
 
-async def _run_cli(cmd: list[str], agent_id: str, bus_url: str | None = None) -> subprocess.CompletedProcess:
+async def _run_cli(cmd: list[str], agent_id: str, bus_url: str | None = None,
+                   input_text: str | None = None) -> subprocess.CompletedProcess:
     """Keep the event loop responsive and reap the CLI on cancellation or timeout."""
     process = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.PIPE if input_text is not None else None,
         env=worker_environment(agent_id, bus_url=bus_url),
     )
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
+        stdin = input_text.encode("utf-8") if input_text is not None else None
+        stdout, stderr = await asyncio.wait_for(process.communicate(stdin), timeout=600)
     except (asyncio.CancelledError, asyncio.TimeoutError):
         if process.returncode is None:
             try:
@@ -122,6 +125,67 @@ async def _run_cli(cmd: list[str], agent_id: str, bus_url: str | None = None) ->
         cmd, process.returncode, stdout.decode("utf-8", errors="replace"),
         stderr.decode("utf-8", errors="replace"),
     )
+
+
+class AgentBusy(Exception):
+    """The live agent is mid-turn; try again later without counting a failure."""
+
+
+MUXEL_BUSY_STATES = frozenset({"working", "blocked", "starting"})
+# Below _run_cli's own 600 s limit, so muxel reports timed_out before we kill it.
+MUXEL_WAIT_SECONDS = 540
+
+
+async def _muxel_ctl(binary: str, args: list[str], agent_id: str, bus_url: str | None,
+                     input_text: str | None = None) -> dict:
+    result = await _run_cli([binary, "ctl", *args], agent_id, bus_url=bus_url, input_text=input_text)
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        data = None
+    if result.returncode != 0 or not isinstance(data, dict):
+        error = data.get("error") if isinstance(data, dict) else result.stderr[:200]
+        raise RuntimeError(f"muxel ctl {args[0]} failed: {error}")
+    return data
+
+
+async def _muxel_turn(binary: str, target: str, prompt: str, sent_marker: Path,
+                      agent_id: str, bus_url: str | None) -> str:
+    """Type the prompt into a live muxel pane and return the reply of that turn.
+
+    The marker records that the prompt was typed, so a retry after a blocked or
+    timed-out turn waits for that same turn instead of typing it again.
+    """
+    status = (await _muxel_ctl(binary, ["status", target], agent_id, bus_url)).get("status")
+    if not sent_marker.exists():
+        if status in MUXEL_BUSY_STATES:
+            raise AgentBusy(f"muxel agent '{target}' is {status}")
+        await _muxel_ctl(binary, ["send", target, "-"], agent_id, bus_url, input_text=prompt)
+        write_private_json(sent_marker, {"target": target, "sent_at": time.time()})
+    elif status == "blocked":
+        raise AgentBusy(f"muxel agent '{target}' is waiting on the user")
+    try:
+        shown = await _muxel_ctl(binary, ["wait", target, "--timeout", str(MUXEL_WAIT_SECONDS)], agent_id, bus_url)
+        outcome = (shown.get("wait") or {}).get("outcome")
+        if outcome in ("blocked", "timed_out"):
+            # A permission prompt is the user's call and a long turn is still ours.
+            raise AgentBusy(f"muxel turn is {outcome}")
+        if outcome != "finished":
+            raise RuntimeError(f"muxel turn did not finish: {outcome}")
+        # Someone may have typed into the pane since: answer only for our prompt.
+        asked = (shown.get("last_prompt") or {}).get("text")
+        if isinstance(asked, str) and prompt.splitlines()[0][:60] not in asked:
+            raise RuntimeError("muxel pane answered a different prompt")
+        reply = (shown.get("last_reply") or {}).get("text")
+        if not isinstance(reply, str) or not reply.strip():
+            raise RuntimeError("muxel turn finished without a reply")
+        return reply.strip()
+    except AgentBusy:
+        raise
+    except Exception:
+        # The turn is over or lost: the next attempt types the prompt again.
+        sent_marker.unlink(missing_ok=True)
+        raise
 
 
 async def _record_failure(client, agent_id: str, message_id: str, error: str) -> None:
@@ -161,6 +225,7 @@ async def run_turn(
     tools: str | None = None,
     allow_mutating_tools: bool = False,
     on_state=None,
+    muxel_agent: str | None = None,
 ) -> str | None:
     """Send one durable reply and acknowledge only after the CLI succeeds."""
     validate_watch_tools(tools, allow_mutating_tools=allow_mutating_tools)
@@ -198,7 +263,14 @@ async def run_turn(
                     raise ValueError("Invalid prepared reply")
             else:
                 state("running")
-                if cli == "codex":
+                if cli == "muxel":
+                    binary = shutil.which("muxel")
+                    if not binary or not muxel_agent:
+                        raise RuntimeError("muxel CLI or --muxel-agent missing")
+                    text = await _muxel_turn(binary, muxel_agent, build_prompt(message),
+                                             prepared.with_suffix(".sent"), agent_id, bus_url)
+                    result = subprocess.CompletedProcess([], 0, json.dumps({"result": text}), "")
+                elif cli == "codex":
                     from agent_bus.worker.runner import AgentRunner
                     runner = AgentRunner(agent_id, provider="codex", bus_url=bus_url,
                                          sandbox_mode="read-only")
@@ -266,6 +338,7 @@ async def run_turn(
             )
             response.raise_for_status()
             prepared.unlink(missing_ok=True)
+            prepared.with_suffix(".sent").unlink(missing_ok=True)
             state("waiting")
             logger.info("Reply delivered and message acknowledged: %s", message_id)
             click.echo(f"Reply delivered and acknowledged: {message_id}")
@@ -273,6 +346,10 @@ async def run_turn(
         except asyncio.CancelledError:
             await asyncio.shield(_record_failure(client, agent_id, message_id, "CLI turn cancelled"))
             raise
+        except AgentBusy as exc:
+            state("agent_busy")
+            logger.info("Deferred message %s: %s", message_id, exc)
+            return None
         except Exception as exc:
             auth_error = isinstance(exc, AuthenticationError) or (
                 isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403))
@@ -286,9 +363,11 @@ class PendingMessageWatcher:
     """SSE wakes bounded polling; persisted delivery state decides what to execute."""
     def __init__(self, agent_id: str, *, cli: str = "claude", bus_url: str | None = None,
                  dry_run: bool = False, sessions_file: Path | None = None, model: str | None = None,
-                 tools: str | None = None, allow_mutating_tools: bool = False):
+                 tools: str | None = None, allow_mutating_tools: bool = False,
+                 muxel_agent: str | None = None):
         self.agent_id = agent_id
         self.cli = cli
+        self.muxel_agent = muxel_agent
         self.model = model
         validate_watch_tools(tools, allow_mutating_tools=allow_mutating_tools)
         self.tools = tools
@@ -328,7 +407,8 @@ class PendingMessageWatcher:
                 await run_turn(self.agent_id, message, self.session_map, cli=self.cli,
                                dry_run=self.dry_run, sessions_file=self.sessions_file, bus_url=self.bus_url,
                                model=self.model, tools=self.tools,
-                               allow_mutating_tools=self.allow_mutating_tools, on_state=self.status)
+                               allow_mutating_tools=self.allow_mutating_tools, on_state=self.status,
+                               muxel_agent=self.muxel_agent)
             finally:
                 self.retry_after[message_id] = time.monotonic() + 3
         # Retain only unexpired backoff entries; no durable retry ledger is claimed.
@@ -374,13 +454,19 @@ class PendingMessageWatcher:
 @click.option("--model", default=None, help="Modelo para el CLI (ej: grok-4.6, claude-3-5-sonnet-20241022).")
 @click.option("--tools", default=None, help="Herramientas permitidas para el CLI (ej: Read,Grep).")
 @click.option("--allow-mutating-tools", is_flag=True, help="Permitir herramientas de modificación/escritura en Grok/CLI.")
+@click.option("--muxel-agent", default=None,
+              help="Con --cli muxel: agente de muxel (id, nombre o proyecto/nombre) al que escribir.")
 @click.option("--status", "show_status", is_flag=True, help="Consultar estado local del ejecutor sin iniciar turnos.")
 @click.option("--bus-url", default=None, help="URL del bus")
 @click.option("--dry-run", is_flag=True, help="Solo mostrar qué se ejecutaría")
 @click.option("--once", is_flag=True, help="Procesar un solo mensaje pendiente y salir")
 def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: bool, once: bool,
-          model: str | None, tools: str | None, allow_mutating_tools: bool, show_status: bool):
-    """Escuchar solicitudes y responder con turnos headless; no inyecta en una TUI."""
+          model: str | None, tools: str | None, allow_mutating_tools: bool, show_status: bool,
+          muxel_agent: str | None):
+    """Escuchar solicitudes y responder con turnos headless.
+
+    Con --cli muxel escribe en un panel vivo de muxel mediante `muxel ctl`.
+    """
     from agent_bus.cli.display import get_current_agent
 
     if agent_id is None:
@@ -396,6 +482,8 @@ def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: b
         cli = "claude" if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") == "1" else load_session(agent_id).get("provider")
         if cli not in ("claude", "codex", "grok", "agy", "aider"):
             raise click.ClickException("Proveedor sin CLI conocido; indica --cli explícitamente")
+    if (cli == "muxel") != bool(muxel_agent):
+        raise click.UsageError("--muxel-agent se usa con --cli muxel, y --cli muxel lo requiere")
     if model and cli not in ("grok", "claude", "codex", "agy", "aider"):
         raise click.UsageError(f"--model no está disponible para --cli {cli}")
     try:
@@ -408,7 +496,7 @@ def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: b
     worker_environment(agent_id, bus_url=bus_url)
     watcher = PendingMessageWatcher(
         agent_id, cli=cli, bus_url=bus_url, dry_run=dry_run, model=model, tools=tools,
-        allow_mutating_tools=allow_mutating_tools,
+        allow_mutating_tools=allow_mutating_tools, muxel_agent=muxel_agent,
     )
     click.echo(f"👀 Watcheando el bus como '{agent_id}' (CLI: {cli})")
     click.echo("   Consulta persistida y SSE activos. Ctrl+C para salir.")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -105,3 +106,93 @@ def test_hermes_included_cost_stays_unknown(tmp_path):
     assert hermes["output_tokens"] == 3
     assert hermes["estimated_cost_usd"] is None
     assert hermes["active_seconds"] == 20
+
+
+def test_codex_finds_an_older_session_behind_other_projects(tmp_path):
+    project = tmp_path / "mine"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    sessions = tmp_path / "home" / ".codex" / "sessions"
+    sessions.mkdir(parents=True)
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+
+    def write(name, cwd, mtime):
+        log = sessions / name
+        log.write_text(json.dumps({"timestamp": start.isoformat(), "type": "session_meta", "payload": {"cwd": str(cwd)}}) + "\n", encoding="utf-8")
+        os.utime(log, (mtime, mtime))
+
+    now = start.timestamp()
+    write("mine.jsonl", project, now - 1000)
+    for index in range(40):
+        write(f"other-{index}.jsonl", other, now - index)
+    found = {item["provider"]: item for item in scan_providers(project, home=tmp_path / "home")}
+    assert found["codex"]["session_in_project"] is True
+
+
+def test_claude_live_status_comes_from_running_sessions_in_the_project(tmp_path):
+    project = tmp_path / "app"
+    project.mkdir()
+    live = tmp_path / "home" / ".claude" / "sessions"
+    live.mkdir(parents=True)
+
+    def publish(pid, cwd, status):
+        (live / f"{pid}.json").write_text(json.dumps({"pid": pid, "cwd": str(cwd), "status": status}), encoding="utf-8")
+
+    publish(os.getpid(), project / "src", "busy")
+    publish(os.getpid() + 10_000_000, project, "waiting")  # no such process: stale file
+    publish(os.getppid(), tmp_path / "elsewhere", "waiting")
+    found = {item["provider"]: item for item in scan_providers(project, home=tmp_path / "home")}
+    assert found["claude"]["live_status"] == "busy"
+    assert found["codex"]["live_status"] is None
+
+    publish(os.getpid(), project, "idle")
+    found = {item["provider"]: item for item in scan_providers(project, home=tmp_path / "home")}
+    assert found["claude"]["live_status"] == "idle"
+
+
+def test_agy_session_comes_from_history_and_its_transcript(tmp_path):
+    project = tmp_path / "app"
+    project.mkdir()
+    cli = tmp_path / "home" / ".gemini" / "antigravity-cli"
+    cli.mkdir(parents=True)
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    history = [
+        {"display": "otro", "timestamp": int(start.timestamp() * 1000), "workspace": str(tmp_path / "otro"), "conversationId": "c-other"},
+        {"display": "aquí", "timestamp": int(start.timestamp() * 1000) - 5000, "workspace": str(project), "conversationId": "c-mine"},
+    ]
+    (cli / "history.jsonl").write_text("".join(json.dumps(item) + "\n" for item in history), encoding="utf-8")
+    logs = cli / "brain" / "c-mine" / ".system_generated" / "logs"
+    logs.mkdir(parents=True)
+    steps = [{"step_index": 0, "created_at": start.isoformat()}, {"step_index": 1, "created_at": (start + timedelta(seconds=7)).isoformat()}]
+    (logs / "transcript.jsonl").write_text("".join(json.dumps(step) + "\n" for step in steps), encoding="utf-8")
+    found = {item["provider"]: item for item in scan_providers(project, home=tmp_path / "home")}
+    assert found["agy"]["session_in_project"] is True
+    assert found["agy"]["active_seconds"] == 7
+    assert found["agy"]["input_tokens"] is None
+
+
+def test_agy_history_of_other_projects_reports_no_session(tmp_path):
+    project = tmp_path / "app"
+    project.mkdir()
+    cli = tmp_path / "home" / ".gemini" / "antigravity-cli"
+    cli.mkdir(parents=True)
+    (cli / "history.jsonl").write_text(json.dumps({"workspace": str(tmp_path / "otro"), "conversationId": "c", "timestamp": 1}) + "\n", encoding="utf-8")
+    found = {item["provider"]: item for item in scan_providers(project, home=tmp_path / "home")}
+    assert found["agy"]["session_in_project"] is False
+
+
+def test_unreadable_claude_session_file_is_skipped(tmp_path):
+    project = tmp_path / "app"
+    project.mkdir()
+    live = tmp_path / "home" / ".claude" / "sessions"
+    live.mkdir(parents=True)
+    locked = live / "1.json"
+    locked.write_text("{}", encoding="utf-8")
+    locked.chmod(0)
+    (live / "2.json").write_text(json.dumps({"pid": os.getpid(), "cwd": str(project), "status": "idle"}), encoding="utf-8")
+    try:
+        found = {item["provider"]: item for item in scan_providers(project, home=tmp_path / "home")}
+    finally:
+        locked.chmod(0o600)
+    assert found["claude"]["live_status"] == "idle"

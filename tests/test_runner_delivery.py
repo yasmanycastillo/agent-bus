@@ -98,7 +98,7 @@ async def test_subprocess_cancel_and_timeout_reap_child(monkeypatch, cancel):
         returncode = None
         terminated = False
         reaped = False
-        async def communicate(self):
+        async def communicate(self, input=None):
             started.set()
             await asyncio.Event().wait()
         def terminate(self):

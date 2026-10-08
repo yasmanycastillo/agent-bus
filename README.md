@@ -95,8 +95,9 @@ agent-bus watch --agent grok --status
 
 Un mensaje con `reply_needed=true` inicia un turno headless. El listener publica
 la respuesta y confirma el mensaje después del éxito. No despierta una TUI
-existente; `--dry-run` solo observa. Grok responde consultas de texto sin herramientas
-ni ediciones. [Estados y recuperación](docs/first-run.md#listeners-para-responder-automáticamente).
+existente; `--dry-run` solo observa. Con [muxel](docs/first-run.md#despertar-una-tui-abierta-en-muxel)
+abierto, `--cli muxel` escribe en el panel vivo del agente en lugar de lanzar un
+turno headless. Grok responde consultas de texto sin herramientas ni ediciones. [Estados y recuperación](docs/first-run.md#listeners-para-responder-automáticamente).
 
 ## Coordinar trabajo
 

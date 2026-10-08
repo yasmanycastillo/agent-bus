@@ -305,7 +305,8 @@ class MessageBus:
             root = load_config().project_root
             if not root:
                 return {"providers": []}
-            providers = scan_providers(Path(root))
+            # Reads local files; keep it off the event loop.
+            providers = await asyncio.to_thread(scan_providers, Path(root))
             await remember_on_latest_attempt(self.db.conn, providers)
             return {"providers": providers}
 

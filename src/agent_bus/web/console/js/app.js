@@ -74,6 +74,7 @@
             ${item.input_tokens == null ? "" : ` · entrada ${item.input_tokens}`}
             ${item.output_tokens == null ? "" : ` · salida ${item.output_tokens}`}
             ${item.finished === true ? " · terminó" : item.finished === false ? " · en curso" : ""}
+            ${{ busy: " · ahora trabajando", waiting: " · ahora esperando al usuario", idle: " · abierto e inactivo" }[item.live_status] || ""}
           </li>`)}
         </ul>
       </section>

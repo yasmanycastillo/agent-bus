@@ -5,6 +5,8 @@ Missing measurements stay null. A zero is recorded only when the source reported
 from __future__ import annotations
 
 import json
+import os
+from collections import deque
 import re
 import shutil
 import sqlite3
@@ -37,7 +39,7 @@ def scan_providers(project_root: Path, *, home: Path | None = None) -> list[dict
         _codex(root, base),
         _claude(root, base),
         _hermes(root, base),
-        _unobserved("agy"),
+        _agy(root, base),
         _unobserved("grok"),
     ]
 
@@ -54,6 +56,7 @@ def _blank(provider: str) -> dict[str, Any]:
         "estimated_cost_usd": None,
         "files": [],
         "finished": None,
+        "live_status": None,
     }
 
 
@@ -120,7 +123,14 @@ def _codex(project_root: Path, home: Path) -> dict[str, Any]:
     files = [path for path in root.rglob("*.jsonl") if path.is_file()]
     files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     newest: dict[str, Any] | None = None
-    for path in files[:30]:
+    for index, path in enumerate(files):
+        # The newest files are read whole, because a session can enter the project
+        # after it starts. Older ones only if their opening line names the project.
+        if index >= 30:
+            if newest is not None or index >= CODEX_HEADER_SCAN_LIMIT:
+                break
+            if not _codex_starts_in(project_root, path):
+                continue
         observed = _read_codex_file(project_root, path)
         if observed is None:
             continue
@@ -131,6 +141,25 @@ def _codex(project_root: Path, home: Path) -> dict[str, Any]:
         return result
     _fill(result, newest)
     return result
+
+
+# ponytail: fixed cap on opening lines read per request; index sessions by cwd if it is not enough.
+CODEX_HEADER_SCAN_LIMIT = 2000
+
+
+def _codex_starts_in(project_root: Path, path: Path) -> bool:
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            event = json.loads(handle.readline())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(event, dict) or event.get("type") != "session_meta":
+        return False
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    roots = payload.get("runtime_workspace_roots") or []
+    return _same_project(project_root, payload.get("cwd")) or any(_same_project(project_root, item) for item in roots if isinstance(item, str))
 
 
 def _read_codex_file(project_root: Path, path: Path) -> dict[str, Any] | None:
@@ -172,8 +201,38 @@ def _read_codex_file(project_root: Path, path: Path) -> dict[str, Any] | None:
     return {"last": last, "stamps": stamps, "files": files, "input_tokens": input_tokens, "output_tokens": output_tokens, "ended": False}
 
 
+# Most urgent first: a session waiting on the user outranks one that is working.
+_LIVE_ORDER = ("waiting", "busy", "idle")
+
+
+def _claude_live_status(project_root: Path, home: Path) -> str | None:
+    """What running Claude Code processes in the project say they are doing.
+
+    Claude Code keeps ``~/.claude/sessions/<pid>.json`` with ``status`` while it
+    runs. Files of processes that are gone are ignored.
+    """
+    seen: set[str] = set()
+    for path in (home / ".claude" / "sessions").glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            pid = int(data["pid"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if pid <= 0 or not _same_project(project_root, data.get("cwd")):
+            continue
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            pass  # alive, owned by another user
+        except OSError:
+            continue
+        seen.add(data.get("status"))
+    return next((status for status in _LIVE_ORDER if status in seen), None)
+
+
 def _claude(project_root: Path, home: Path) -> dict[str, Any]:
     result = _blank("claude")
+    result["live_status"] = _claude_live_status(project_root, home)
     # Claude Code names the folder by turning every non-alphanumeric character into "-".
     encoded = re.sub(r"[^A-Za-z0-9]", "-", project_root.as_posix())
     folder = home / ".claude" / "projects" / encoded
@@ -270,6 +329,61 @@ def _fill(result: dict[str, Any], observed: dict[str, Any]) -> None:
     result["estimated_cost_usd"] = observed.get("cost")
     result["files"] = observed["files"]
     result["finished"] = _finished(last, bool(observed["ended"]))
+
+
+_AGY_CONVERSATION_ID = re.compile(r"^[A-Za-z0-9-]{1,100}$")
+
+
+def _agy(project_root: Path, home: Path) -> dict[str, Any]:
+    """Antigravity CLI: ``history.jsonl`` names each prompt's folder and conversation."""
+    result = _blank("agy")
+    root = home / ".gemini" / "antigravity-cli"
+    history = root / "history.jsonl"
+    if not history.is_file():
+        return result
+    newest: tuple[int, str] | None = None
+    try:
+        with history.open(encoding="utf-8", errors="replace") as lines:
+            for line in lines:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict) or not _same_project(project_root, entry.get("workspace")):
+                    continue
+                conversation, stamp = entry.get("conversationId"), entry.get("timestamp")
+                # The id becomes a path below, so it must be a plain name.
+                if isinstance(conversation, str) and _AGY_CONVERSATION_ID.match(conversation) and isinstance(stamp, int):
+                    if newest is None or stamp > newest[0]:
+                        newest = (stamp, conversation)
+    except OSError:
+        return result
+    result["session_in_project"] = newest is not None
+    if newest is None:
+        return result
+    stamps: list[datetime] = []
+    transcript = root / "brain" / newest[1] / ".system_generated" / "logs" / "transcript.jsonl"
+    try:
+        with transcript.open(encoding="utf-8", errors="replace") as lines:
+            # The end of a long conversation is what says when it was last active.
+            for line in deque(lines, maxlen=4000):
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                stamp = _parse_time(event.get("created_at")) if isinstance(event, dict) else None
+                if stamp is not None:
+                    stamps.append(stamp)
+    except OSError:
+        pass
+    if not stamps:
+        try:
+            stamps.append(datetime.fromtimestamp(newest[0] / 1000, tz=timezone.utc))
+        except (OverflowError, OSError, ValueError):
+            return result
+    _fill(result, {"last": max(stamps), "stamps": stamps, "files": [], "input_tokens": None,
+                   "output_tokens": None, "ended": False})
+    return result
 
 
 def _int_or_none(value: Any) -> int | None:
