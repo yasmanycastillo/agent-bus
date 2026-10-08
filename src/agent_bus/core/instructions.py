@@ -163,20 +163,15 @@ async def assign_work(bus, instruction_id: str, assignee: str, role: str, title:
     await bus.tasks.create(
         task_id, name, description, owner=assignee,
         requirements=ROLE_REQUIREMENTS[role],
-        independent_from=implement_ids if role == "review" else [],
     )
-    if role == "implement":
+    # A review covers (independent_from) and waits for (depends_on) every
+    # implementation of the instruction, whichever was assigned first.
+    if role == "review":
+        await bus.tasks.hold_for_review(task_id, implement_ids)
+    elif role == "implement":
         for row in existing:
-            if row["role"] != "review":
-                continue
-            task = await bus.tasks.get(row["task_id"])
-            if task is None or task_id in task.independent_from:
-                continue
-            await bus.db.conn.execute(
-                "UPDATE tasks SET independent_from = ? WHERE task_id = ?",
-                (json.dumps([*task.independent_from, task_id]), row["task_id"]),
-            )
-        await bus.db.conn.commit()
+            if row["role"] == "review":
+                await bus.tasks.hold_for_review(row["task_id"], [task_id])
     await log.add_assignment(instruction_id, assignee, roster[assignee], role, name, task_id)
     await bus.inbox.send(Envelope(
         from_agent=stored["coordinator"],

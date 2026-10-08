@@ -177,6 +177,23 @@ async def test_handoff_done_unblocks_only_actual_dependents(flow):
     assert (await bus.tasks.get('manual')).status.value == 'blocked'
 
 
+async def test_handoff_in_review_starts_the_held_review(flow):
+    from agent_bus.core.instructions import InstructionLog, assign_work
+    bus, client, alice, bob = flow
+    log = InstructionLog(bus.db)
+    await log.ensure_schema()
+    instruction = await log.submit('coordinator', 'Fix taxes', True, [
+        {'agent_id': 'alice', 'provider': 'codex'}, {'agent_id': 'bob', 'provider': 'claude'},
+    ])
+    review = (await assign_work(bus, instruction['instruction_id'], 'bob', 'review', 'Review'))['task_id']
+    written = (await assign_work(bus, instruction['instruction_id'], 'alice', 'implement', 'Write'))['task_id']
+    assert (await bus.tasks.get(review)).status.value == 'blocked'
+    result = await handoff(client, alice, task_id=written)
+    assert result.status_code == 200, result.text
+    assert (await bus.tasks.get(written)).status.value == 'in_review'
+    assert (await bus.tasks.get(review)).status.value == 'in_progress'
+
+
 async def test_revoked_unsigned_and_forged_identities_rejected(flow, monkeypatch):
     bus, client, alice, bob = flow
     assert (await client.post('/coordination/bootstrap', headers=headers(alice), json={'agent_id': 'bob'})).status_code == 422

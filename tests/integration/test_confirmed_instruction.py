@@ -82,3 +82,70 @@ async def test_coordinator_assigns_only_a_confirmed_instruction(tmp_path):
         listed = (await client.get("/agents/claude-01/assignments")).json()
         assert writing.json()["task_id"] in {row["task_id"] for row in listed["assignments"]}
     await db.close()
+
+
+async def _status(client, task_id):
+    return (await client.get(f"/tasks/{task_id}")).json()["status"]
+
+
+@pytest.mark.asyncio
+async def test_review_waits_for_every_implementation_assigned_before_or_after(tmp_path):
+    db = Database(str(tmp_path / "bus.db"))
+    await db.initialize()
+    bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+    async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        async def submit(text):
+            saved = await client.post("/instructions", json={
+                "agent_id": "coordinator", "instruction": text, "confirmed": True, "agents": AGENTS,
+            })
+            return saved.json()["instruction_id"]
+
+        async def assign(instruction_id, agent_id, role):
+            response = await client.post(f"/instructions/{instruction_id}/assignments", json={
+                "agent_id": agent_id, "role": role, "title": f"{role} {agent_id}",
+            })
+            assert response.status_code == 200, response.text
+            return response.json()["task_id"]
+
+        instruction_id = await submit("Corregir impuestos")
+        # Review assigned before any implementation: nothing to review yet.
+        review = await assign(instruction_id, "codex-01", "review")
+        assert await _status(client, review) == "blocked"
+        plan = await assign(instruction_id, "hermes-01", "plan")
+        assert (await client.post(f"/tasks/{plan}/done", json={"agent_id": "hermes-01"})).status_code == 200
+        assert await _status(client, review) == "blocked"
+        # The worker only executes its own in_progress or pending tasks.
+        for status in ("in_progress", "pending"):
+            owned = (await client.get("/tasks", params={"owner": "codex-01", "status": status})).json()
+            assert review not in {task["task_id"] for task in owned}
+
+        first = await assign(instruction_id, "claude-01", "implement")
+        second = await assign(instruction_id, "grok-01", "implement")
+        task = (await client.get(f"/tasks/{review}")).json()
+        assert task["status"] == "blocked"
+        assert set(task["depends_on"]) == {first, second}
+        assert set(task["independent_from"]) == {first, second}
+
+        assert (await client.post(f"/tasks/{first}/review", json={"agent_id": "claude-01"})).status_code == 200
+        assert await _status(client, review) == "blocked"
+        assert (await client.post(f"/tasks/{second}/done", json={"agent_id": "grok-01"})).status_code == 200
+        assert await _status(client, review) == "in_progress"
+
+        # A new implementation after the review started: it waits again.
+        third = await assign(instruction_id, "agy-01", "implement")
+        assert await _status(client, review) == "blocked"
+        assert (await client.post(f"/tasks/{third}/review", json={"agent_id": "agy-01"})).status_code == 200
+        assert await _status(client, review) == "in_progress"
+        # Reviewer and implementer stay separate.
+        refused = await client.post(f"/instructions/{instruction_id}/assignments", json={
+            "agent_id": "claude-01", "role": "review", "title": "self review",
+        })
+        assert refused.status_code == 409
+
+        # Review assigned after its implementation is already in review starts at once.
+        other = await submit("Otro encargo")
+        written = await assign(other, "claude-01", "implement")
+        assert (await client.post(f"/tasks/{written}/review", json={"agent_id": "claude-01"})).status_code == 200
+        late = await assign(other, "codex-01", "review")
+        assert await _status(client, late) == "in_progress"
+    await db.close()

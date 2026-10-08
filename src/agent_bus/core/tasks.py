@@ -10,6 +10,33 @@ from agent_bus.reputation.database import Database
 from agent_bus.types import Task, TaskStatus
 
 
+REVIEW_WAIT = "waiting for the implementations under review"
+
+
+def release_reviews(connection, now: str) -> None:
+    """Start held reviews once every implementation they depend on is in_review or done.
+
+    A review needs submitted work, not merged work: implementations reach done only
+    after approval, so the usual done-only depends_on release would deadlock here.
+    """
+    held = connection.execute(
+        "SELECT task_id, depends_on FROM tasks WHERE status = 'blocked' AND blocked_reason = ?", (REVIEW_WAIT,),
+    ).fetchall()
+    for task_id, raw in held:
+        deps = json.loads(raw or "[]")
+        if not deps:
+            continue
+        ready = connection.execute(
+            f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({','.join('?' * len(deps))})"
+            " AND status IN ('in_review', 'done')", tuple(deps),
+        ).fetchone()[0]
+        if ready == len(deps):
+            connection.execute(
+                "UPDATE tasks SET status = 'in_progress', blocked_reason = NULL, updated_at = ?"
+                " WHERE task_id = ? AND status = 'blocked'", (now, task_id),
+            )
+
+
 class TaskDependencyError(ValueError):
     """Base exception for task dependency errors."""
 
@@ -356,9 +383,10 @@ class TaskManager:
                         ("complete_with_evidence", task_id, actor or "unknown", session_id or "", previous_owner, "done", evidence_json, now),
                     )
 
+                release_reviews(connection, now)
                 # Unblock any blocked tasks whose dependencies are now all 'done'
                 blocked_rows = connection.execute(
-                    "SELECT * FROM tasks WHERE status = 'blocked'"
+                    "SELECT * FROM tasks WHERE status = 'blocked' AND blocked_reason IS NOT ?", (REVIEW_WAIT,),
                 ).fetchall()
                 for b_row in blocked_rows:
                     b_deps_raw = b_row["depends_on"] if hasattr(b_row, "keys") else b_row[10]
@@ -457,8 +485,37 @@ class TaskManager:
             "UPDATE tasks SET status = 'in_review', updated_at = ? "
             "WHERE task_id = ? AND status = 'in_progress'" + condition + " RETURNING *", params,
         )
+        if rows:
+            await self._db.conn._execute(release_reviews, self._db.conn._conn, now)
         await self._db.conn.commit()
         return self._row_to_task(rows[0]) if rows else None
+
+    async def hold_for_review(self, task_id: str, implementation_ids: list[str]) -> None:
+        """Make a review depend on these implementations and wait until all are submitted."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        def transaction(connection):
+            row = connection.execute(
+                "SELECT depends_on, independent_from FROM tasks WHERE task_id = ?", (task_id,),
+            ).fetchone()
+            if row is None:
+                return
+            depends = json.loads(row[0] or "[]")
+            independent = json.loads(row[1] or "[]")
+            depends += [i for i in implementation_ids if i not in depends]
+            independent += [i for i in implementation_ids if i not in independent]
+            # Reviews already submitted or done, or blocked for another reason, keep their state.
+            connection.execute(
+                "UPDATE tasks SET depends_on = ?, independent_from = ?, updated_at = ?,"
+                " status = CASE WHEN status IN ('in_progress', 'pending') THEN 'blocked' ELSE status END,"
+                " blocked_reason = CASE WHEN status IN ('in_progress', 'pending') THEN ? ELSE blocked_reason END"
+                " WHERE task_id = ?",
+                (json.dumps(depends), json.dumps(independent), now, REVIEW_WAIT, task_id),
+            )
+            release_reviews(connection, now)
+
+        await self._db.conn._execute(transaction, self._db.conn._conn)
+        await self._db.conn.commit()
 
     async def block(self, task_id: str, reason: str | None = None, actor: str | None = None) -> Task | None:
         """Mark a task as blocked. A named actor must own it; admins pass no actor."""

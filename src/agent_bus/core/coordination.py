@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from agent_bus.core.lock_paths import server_lock_path
 from agent_bus.core.locks import LockBusyError, LockError
 from agent_bus.core.inbox import IdempotencyConflict, MessageNotFound
+from agent_bus.core.tasks import release_reviews
 from agent_bus.types import AgentInfo, Envelope, MessageType
 
 
@@ -234,6 +235,8 @@ class Coordination:
                 ("complete_handoff", req.task_id, principal.agent_id, principal.session_id,
                  principal.agent_id, principal.agent_id, timestamp),
             )
+            if req.task_status in ("in_review", "done"):
+                release_reviews(conn, timestamp)
             if req.task_status == "done":
                 for blocked in conn.execute("SELECT task_id,depends_on FROM tasks WHERE status='blocked'").fetchall():
                     dependencies = json.loads(blocked["depends_on"] or "[]")
