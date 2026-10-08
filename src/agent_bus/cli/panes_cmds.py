@@ -42,8 +42,7 @@ def spawn(name: str, preset: str, extra_args: tuple[str, ...], cwd: str | None, 
     env = None
     if agent_id:
         from agent_bus.worker.client import worker_environment
-        full = worker_environment(agent_id, per_agent=True)
-        env = {key: value for key, value in full.items() if key.startswith("AGENT_BUS_")}
+        env = worker_environment(agent_id, per_agent=True)
     _run(backend.spawn, name, preset, cwd=cwd, model=model, prompt=prompt,
          extra_args=tuple(extra_args), env=env)
     click.echo(f"Panel '{name}' abierto ({preset}). Míralo con: agent-bus panes view")

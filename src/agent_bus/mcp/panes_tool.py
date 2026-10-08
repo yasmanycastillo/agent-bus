@@ -28,7 +28,7 @@ TOOL = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["list", "spawn", "send", "screen", "close"]},
-            "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,40}$"},
+            "name": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,40}$"},
             "preset": {"type": "string", "enum": sorted(panes.PRESETS)},
             "as_agent": {"type": "string", "description": "spawn: identidad con credencial en el proyecto"},
             "model": {"type": "string"},
@@ -60,8 +60,7 @@ def _call(args: dict[str, Any], cwd: Path) -> dict[str, Any]:
         env = None
         if args.get("as_agent"):
             from agent_bus.worker.client import worker_environment
-            full = worker_environment(args["as_agent"], per_agent=True)
-            env = {key: value for key, value in full.items() if key.startswith("AGENT_BUS_")}
+            env = worker_environment(args["as_agent"], per_agent=True)
         panes.spawn(name, args["preset"], cwd=str(cwd), model=args.get("model"),
                     prompt=args.get("prompt"), env=env)
         return {"status": "ok", "name": name}

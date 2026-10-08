@@ -10,17 +10,23 @@ import os
 import re
 import subprocess
 import time
+import uuid
 from typing import NamedTuple
 
 # A dedicated socket keeps these panes out of the user's own tmux server.
 TMUX = ["tmux", "-L", "agent-bus"]
 SESSION = "agents"
 SCREEN_LINES = 12
+# '.' and ':' separate window and pane in tmux targets; keep names to plain words.
+NAME = re.compile(r"[A-Za-z0-9_-]{1,40}")
+# A pane gets only these from the caller: the identity of one agent-bus credential.
+PANE_ENV = frozenset({"AGENT_BUS_AGENT_ID", "AGENT_BUS_SESSION_FILE", "AGENT_BUS_URL", "AGENT_BUS_PROJECT_ID",
+                      "AGENT_BUS_PROJECT_ROOT", "AGENT_BUS_CONFIG_DIR", "AGENT_BUS_DATABASE_PATH"})
 
 
 class Preset(NamedTuple):
     program: str
-    prompt_flag: str | None  # None: the initial prompt is a positional argument
+    prompt_flag: str | None  # None: the initial prompt is a positional argument after "--"
     working: str  # regex (per line) drawn only while a turn runs
     blocked: str  # regex (per line) drawn while a trust or permission question waits
 
@@ -53,6 +59,23 @@ def _tmux_ok(*args: str) -> bool:
         return False
 
 
+def _inherited_names() -> set[str]:
+    """CLAUDE* and AGENT_BUS_* names a new pane would inherit.
+
+    Panes get the tmux server's global environment (copied from whoever started the
+    server), not the caller's, so both are scanned. A coordinator running in Claude
+    Code leaks its session through CLAUDE* (a nested claude then misbehaves; it
+    re-applies settings.json env itself) and its own identity through AGENT_BUS_*.
+    """
+    names = set(os.environ)
+    try:
+        names |= {line.split("=", 1)[0] for line in _tmux("show-environment", "-g").splitlines()
+                  if not line.startswith("-")}
+    except PaneError:
+        pass  # no server yet: it starts with this process's environment
+    return {name for name in names if name.startswith(("CLAUDE", "AGENT_BUS_"))}
+
+
 def _target(name: str) -> str:
     return f"{SESSION}:={name}"  # '=' matches the window name exactly
 
@@ -74,28 +97,31 @@ def list_panes() -> list[dict[str, str]]:
 def spawn(name: str, preset: str, *, cwd: str | None = None, model: str | None = None,
           prompt: str | None = None, extra_args: tuple[str, ...] = (),
           env: dict[str, str] | None = None) -> None:
+    """Open NAME running PRESET. `env` is filtered to PANE_ENV; prompt and model stay values."""
     spec = PRESETS.get(preset)
     if spec is None:
         raise PaneError(f"unknown preset '{preset}'; use one of {', '.join(PRESETS)}")
+    if not NAME.fullmatch(name):
+        raise PaneError(f"invalid pane name '{name}': use 1-40 letters, digits, '_' or '-'")
     if any(p["name"] == name for p in list_panes()):
         raise PaneError(f"pane '{name}' already exists")
-    # A coordinator running in Claude Code leaks its session (id, socket, token) through
-    # CLAUDE*; a nested claude then misbehaves. Claude re-applies settings.json env itself.
-    unset = [arg for var in os.environ if var.startswith("CLAUDE") for arg in ("-u", var)]
-    command = ["env", *unset, *(f"{k}={v}" for k, v in (env or {}).items()), spec.program]
+    unset = [arg for var in sorted(_inherited_names()) for arg in ("-u", var)]
+    identity = [f"{k}={v}" for k, v in (env or {}).items() if k in PANE_ENV]
+    command = ["env", *unset, *identity, spec.program]
+    # "--x=value" and "--" keep a model or prompt starting with '-' from becoming a flag.
     if model:
-        command += ["--model", model]
+        command.append(f"--model={model}")
     command += extra_args
     if prompt:
-        command += [spec.prompt_flag, prompt] if spec.prompt_flag else [prompt]
+        command += [f"{spec.prompt_flag}={prompt}"] if spec.prompt_flag else ["--", prompt]
     where = ["-n", name, "-c", cwd or os.getcwd()]
     if _tmux_ok("has-session", "-t", f"={SESSION}"):
-        _tmux("new-window", "-d", "-t", f"={SESSION}:", *where, "--", *command)
+        create = ["new-window", "-d", "-t", f"={SESSION}:", *where, "--", *command]
     else:
-        _tmux("new-session", "-d", "-s", SESSION, "-x", "200", "-y", "50", *where, "--", *command)
-    _tmux("set-option", "-w", "-t", _target(name), "@agent_bus_preset", preset)
-    # Keep an exited agent visible as 'dead' until the coordinator closes it.
-    _tmux("set-option", "-w", "-t", _target(name), "remain-on-exit", "on")
+        create = ["new-session", "-d", "-s", SESSION, "-x", "200", "-y", "50", *where, "--", *command]
+    # One tmux invocation, so an agent that exits at once still stays visible as 'dead'.
+    _tmux(*create, ";", "set-option", "-w", "-t", _target(name), "remain-on-exit", "on",
+          ";", "set-option", "-w", "-t", _target(name), "@agent_bus_preset", preset)
 
 
 def close(name: str) -> None:
@@ -127,8 +153,9 @@ def send(name: str, text: str, *, force: bool = False) -> None:
         raise PaneError(f"no pane '{name}'")
     if pane["state"] != "idle" and not force:
         raise PaneError(f"pane '{name}' is {pane['state']}")
-    _tmux("load-buffer", "-b", "agent-bus", "-", input_text=text)
-    _tmux("paste-buffer", "-p", "-d", "-b", "agent-bus", "-t", _target(name))
+    buffer = f"agent-bus-{uuid.uuid4().hex}"  # concurrent sends must not share a buffer
+    _tmux("load-buffer", "-b", buffer, "-", input_text=text)
+    _tmux("paste-buffer", "-p", "-d", "-b", buffer, "-t", _target(name))
     # ponytail: fixed settle delay; TUIs that read the paste slowly take Enter as a newline.
     time.sleep(0.3)
     _tmux("send-keys", "-t", _target(name), "Enter")
