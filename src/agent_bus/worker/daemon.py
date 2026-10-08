@@ -4,6 +4,7 @@ import asyncio
 import logging
 import hashlib
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -21,6 +22,32 @@ from agent_bus.worker.notifier import ExternalNotifier
 from agent_bus.worker.runner import AgentRunner, RunnerResult
 
 logger = logging.getLogger("agent_bus.worker.daemon")
+
+# A review task (independent_from set by assign_work) ends with one line per
+# implementation; the daemon records each through POST /tasks/{id}/verdict.
+VERDICT_LINE = re.compile(
+    r"^\s*VERDICT:\s*(approve|changes_requested)\s+IMPLEMENTATION:\s*(\S+)\s+REASON:\s*(.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def review_instructions(implementations: list[str]) -> str:
+    return (
+        "This is a review task: inspect the delivered work of each implementation, do not edit files "
+        "and do not run `agent-bus work done`. End your answer with exactly one line per implementation:\n"
+        "VERDICT: approve|changes_requested IMPLEMENTATION: <task_id> REASON: <one-line reason>\n"
+        f"Implementations to judge: {', '.join(implementations)}. "
+        "The worker records these verdicts; a review without them stays open."
+    )
+
+
+def parse_verdicts(output: str, implementations: list[str]) -> dict[str, tuple[str, str]]:
+    """Last verdict line per implementation under review; other task ids are ignored."""
+    found = {}
+    for verdict, task_id, reason in VERDICT_LINE.findall(output):
+        if task_id in implementations:
+            found[task_id] = (verdict.lower(), reason)
+    return found
 
 
 def _turn_timeout() -> float:
@@ -362,20 +389,50 @@ class WorkerDaemon:
 
         decisions = await self._fetch_recent_decisions()
         task = {**task, "runtime_messages": await self._runtime_messages(task_id)}
-        prompt = self.runner.assemble_prompt(task=task, decisions=decisions)
+        reviewed = [item for item in task.get("independent_from") or [] if isinstance(item, str)]
+        prompt = self.runner.assemble_prompt(
+            task=task, decisions=decisions,
+            extra_instructions=review_instructions(reviewed) if reviewed else None,
+        )
 
         result = await self.runner.execute_turn(prompt, timeout_seconds=self.turn_timeout_seconds)
+        if result.success and reviewed:
+            result = await self._record_verdicts(task_id, reviewed, result)
         await self._finish_attempt(task_id, "completed" if result.success else "failed")
         if not result.success:
             logger.warning("Turn for task %s failed: %s", task_id, (result.error or "no error details").strip()[:500])
 
-        if result.success and await self._closes_workflow_step(task):
-            await self._client.post(f"/tasks/{task_id}/done", json={"agent_id": self.agent_id})
-        elif result.success:
-            await self._commit_and_submit_review(task_id)
+        # A review has nothing to commit; the hub moves it on from its verdicts.
+        if result.success and not reviewed:
+            if await self._closes_workflow_step(task):
+                await self._client.post(f"/tasks/{task_id}/done", json={"agent_id": self.agent_id})
+            else:
+                await self._commit_and_submit_review(task_id)
 
         await self._set_agent_status(AgentStatus.ONLINE, work=None)
         return result
+
+    async def _record_verdicts(self, task_id: str, reviewed: list[str], result: RunnerResult) -> RunnerResult:
+        """Post each parsed verdict; never approve by default when a line is missing or refused."""
+        verdicts = parse_verdicts(result.output, reviewed)
+        problems = [f"{item}: no VERDICT line" for item in reviewed if item not in verdicts]
+        # changes_requested holds the review for redelivery, so approvals go first.
+        ordered = sorted(verdicts.items(), key=lambda item: item[1][0] != "approve")
+        for implementation, (verdict, reason) in ordered:
+            try:
+                response = await self._client.post(f"/tasks/{task_id}/verdict", json={
+                    "agent_id": self.agent_id, "verdict": verdict, "reason": reason,
+                    "implementation_task_id": implementation,
+                })
+                if response.status_code >= 400:
+                    problems.append(f"{implementation}: hub refused ({response.status_code}) {response.text[:200]}")
+            except Exception as exc:
+                problems.append(f"{implementation}: {exc}")
+        if not problems:
+            return result
+        error = f"Review {task_id} left without a recorded VERDICT for " + "; ".join(problems)
+        logger.error(error)
+        return RunnerResult(success=False, output=result.output, session_id=result.session_id, error=error)
 
     async def _closes_workflow_step(self, task: dict[str, Any]) -> bool:
         description = str(task.get("description") or "")

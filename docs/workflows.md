@@ -72,6 +72,8 @@ MCP expone la misma operación como `record_verdict`.
 
 Una review asignada con `assign_work` cubre todas las implementaciones del encargo. Cada implementador entrega con `complete_handoff` y `candidate_sha` (SHA completo de su commit); ese SHA es el candidato. El veredicto juzga una implementación: si hay varias, pasa `--implementation <task_id>` (`implementation_task_id` en MCP) o `--sha`; sin ellos el error lista las candidatas. `changes_requested` reabre sólo esa implementación y la review vuelve a `blocked` hasta su nueva entrega.
 
+Si la review la ejecuta un worker headless (`worker start`), el prompt pide terminar con una línea por implementación, `VERDICT: approve|changes_requested IMPLEMENTATION: <task_id> REASON: <motivo>`, y el worker registra esos veredictos. Si falta una línea o el hub la rechaza, no aprueba por defecto: la review queda como está y el intento se marca `failed` con el motivo.
+
 `approve` es lo que la integración lee. Tiene que ser sobre el SHA de ese intento y del revisor asignado. `changes_requested` devuelve implementation a `pending`, avisa al implementador y deja integration en `pending`. El intento nuevo tiene otro SHA: el `approve` anterior no vale. `main` no se mueve.
 
 Si integration llega a `waiting_for_review`, el dueño de review recibe un mensaje con el SHA y el motivo. El mismo SHA y el mismo motivo no se reenvían.

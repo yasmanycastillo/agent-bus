@@ -180,3 +180,85 @@ async def test_worker_logs_why_a_task_turn_failed(test_bus, tmp_path, caplog):
         with caplog.at_level("WARNING", logger="agent_bus.worker.daemon"):
             await daemon._handle_active_task({"task_id": "T-fail", "title": "Implement"})
     assert any("T-fail" in r.getMessage() and "provider exploded" in r.getMessage() for r in caplog.records)
+
+
+async def _review_ready(bus, implementations):
+    """A review assigned over finished implementations that each delivered a candidate."""
+    await bus.registry.register(AgentInfo(agent_id="worker_bob", display_name="Bob"))
+    for task_id in implementations:
+        await bus.tasks.create(task_id, "Implement", owner="alice")
+    for index, task_id in enumerate(implementations):
+        await bus.db.conn.execute(
+            """INSERT INTO runtime_attempts
+               (attempt_id, task_id, idempotency_key, state, external_ref, workspace_ref, updated_at,
+                outcome, candidate_sha, log_refs)
+               VALUES (?, ?, ?, 'completed', 'external:1', '', '2026-01-01T00:00:00+00:00', 'completed', ?, '[]')""",
+            (f"att-{task_id}", task_id, f"dispatch:{task_id}", f"{index + 1:040x}"),
+        )
+        await bus.db.conn.execute("UPDATE tasks SET status = 'in_review' WHERE task_id = ?", (task_id,))
+    await bus.db.conn.commit()
+    await bus.tasks.create("R1", "Review", "Papel: review", owner="worker_bob")
+    await bus.tasks.hold_for_review("R1", implementations)
+    from agent_bus.core.instructions import InstructionLog
+    await InstructionLog(bus.db).add_assignment("ins-1", "worker_bob", "codex", "review", "Review", "R1")
+    return await bus.tasks.get("R1")
+
+
+async def _run_review(bus, tmp_path, output):
+    prompts = []
+
+    async def review_exec(prompt: str, session_id: str | None) -> RunnerResult:
+        prompts.append(prompt)
+        return RunnerResult(success=True, output=output)
+
+    async def allow(task_id: str) -> bool:
+        return True
+
+    runner = AgentRunner(agent_id="worker_bob", custom_executor=review_exec, worktree_dir=tmp_path)
+    async with AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        daemon = WorkerDaemon(agent_id="worker_bob", runner=runner, bus_url="http://test")
+        daemon._client = client
+        daemon._runtime_allows_execution = allow
+        task = (await client.get("/tasks/R1")).json()
+        result = await daemon._handle_active_task(task)
+        reviews = (await client.get("/tasks/R1/reviews")).json()
+    return prompts, result, reviews
+
+
+@pytest.mark.asyncio
+async def test_worker_review_records_one_verdict_per_implementation(test_bus, tmp_path):
+    review = await _review_ready(test_bus, ["I1", "I2"])
+    assert review.status.value == "in_progress"
+    prompts, result, reviews = await _run_review(test_bus, tmp_path, (
+        "Revisé ambos cambios.\n"
+        # changes_requested holds the review, so the approval must still be recorded
+        "VERDICT: changes_requested IMPLEMENTATION: I2 REASON: falta manejar el caso vacío\n"
+        "VERDICT: approve IMPLEMENTATION: I1 REASON: tests pasan y el diff es correcto\n"
+    ))
+    assert "VERDICT:" in prompts[0] and "I1" in prompts[0] and "I2" in prompts[0]
+    assert result.success
+    judged = {r["evidence"]["implementation_task_id"]: (r["verdict"], r["reason"]) for r in reviews}
+    assert judged == {
+        "I1": ("approve", "tests pasan y el diff es correcto"),
+        "I2": ("changes_requested", "falta manejar el caso vacío"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_worker_review_without_verdict_line_records_nothing_and_logs(test_bus, tmp_path, caplog):
+    await _review_ready(test_bus, ["I1"])
+    with caplog.at_level("ERROR", logger="agent_bus.worker.daemon"):
+        _, result, reviews = await _run_review(test_bus, tmp_path, "Me parece bien, apruebo.")
+    assert reviews == []
+    assert not result.success and "VERDICT" in result.error
+    assert any("R1" in r.getMessage() and "I1" in r.getMessage() for r in caplog.records)
+    assert (await test_bus.tasks.get("R1")).status.value == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_worker_review_ignores_verdicts_for_tasks_outside_the_review(test_bus, tmp_path):
+    await _review_ready(test_bus, ["I1"])
+    _, result, reviews = await _run_review(
+        test_bus, tmp_path, "VERDICT: approve IMPLEMENTATION: OTHER REASON: no es mía",
+    )
+    assert reviews == [] and not result.success
