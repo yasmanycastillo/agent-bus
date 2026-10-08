@@ -31,6 +31,7 @@ logger = logging.getLogger("agent_bus.mcp")
 
 SERVER_NAME = "agent-bus"
 SERVER_VERSION = "0.2.1"
+IDENTITY_FIELDS = ("agent_id", "from_agent", "decided_by")
 
 
 class DecisionToolArguments(BaseModel):
@@ -308,13 +309,18 @@ class McpServer:
         self.tools = copy.deepcopy(TOOLS_DEFINITIONS + coordination.TOOLS)
         for tool in self.tools:
             tool["description"] += " " + coordination.TOOL_GUIDANCE[tool["name"]]
-        if self.session:
-            for tool in self.tools:
-                schema = tool["inputSchema"]
-                for field in ("agent_id", "from_agent", "decided_by"):
-                    schema.get("properties", {}).pop(field, None)
-                    if field in schema.get("required", []):
-                        schema["required"].remove(field)
+        # Identity is bound from the session (or --agent), never required as input:
+        # bootstrap_agent may adopt a session after this catalog was published.
+        self._identity_fields = {}
+        for tool in self.tools:
+            schema = tool["inputSchema"]
+            properties = schema.get("properties", {})
+            self._identity_fields[tool["name"]] = [f for f in IDENTITY_FIELDS if f in properties]
+            for field in self._identity_fields[tool["name"]]:
+                if self.session:
+                    properties.pop(field)
+                if field in schema.get("required", []):
+                    schema["required"].remove(field)
 
         self._validators = {}
         for tool in self.tools:
@@ -385,20 +391,23 @@ class McpServer:
             self.agent_id, session=self.session, project_id=self.project_id, base_url=self.bus_url, timeout=timeout,
         )
 
-    def _bind_identity(self, args: dict[str, Any]) -> dict[str, Any]:
-        if not self.session:
-            return dict(args)
+    def _bind_identity(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         bound = dict(args)
-        for field in ("agent_id", "from_agent", "decided_by"):
-            if field in bound and bound[field] != self.agent_id:
-                raise ValueError(f"{field} must match the authenticated MCP session")
-            bound[field] = self.agent_id
+        for field in self._identity_fields.get(name, IDENTITY_FIELDS):
+            if self.session:
+                if field in bound and bound[field] != self.agent_id:
+                    raise ValueError(f"{field} must match the authenticated MCP session")
+                bound[field] = self.agent_id
+            elif field not in bound:
+                if not self.agent_id:
+                    raise ValueError(f"{field} is required: call bootstrap_agent or start the MCP with --agent")
+                bound[field] = self.agent_id
         return bound
 
     async def execute_tool(self, name: str, args: dict[str, Any]) -> Any:
         if name in coordination.MODELS:
             return await coordination.execute(self, name, args)
-        args = self._bind_identity(args)
+        args = self._bind_identity(name, args)
         if name == "wait_for_updates":
             wait = WaitArguments.model_validate(args)
             return await self._wait_for_updates(wait.agent_id, wait.timeout, wait.event_cursor)

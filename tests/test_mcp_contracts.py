@@ -243,3 +243,70 @@ async def test_recovery_guidance_is_actionable_without_leaking_backend(bound_ser
     value = payload(result)
     assert expected in value["guidance"]
     assert "private" not in json.dumps(value)
+
+
+IDENTITY_FIELDS = {"agent_id", "from_agent", "decided_by"}
+SESSION = {"agent_id": "alice", "session_id": "s", "project_id": "contracts",
+           "role": "agent", "token": "t", "expires_at": time.time() + 3600}
+
+
+@pytest.fixture
+def legacy_server(monkeypatch):
+    """MCP started before bootstrap_agent: no session yet, as in a global install."""
+    monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "1")
+    monkeypatch.delenv("AGENT_BUS_SESSION_FILE", raising=False)
+    return McpServer(agent_id="alice")
+
+
+@pytest.mark.parametrize("mode", ["bound", "legacy"])
+async def test_every_tool_schema_matches_what_the_server_requires(mode, bound_server, legacy_server):
+    server = bound_server if mode == "bound" else legacy_server
+    async with Client(server.sdk_server()) as client:
+        tools = (await client.list_tools()).tools
+    assert {tool.name for tool in tools} == TOOL_ARGUMENTS.keys()
+    for tool in tools:
+        schema = tool.input_schema
+        required = set(schema.get("required", []))
+        assert required <= schema["properties"].keys(), tool.name
+        # Identity comes from the session (or --agent); it is never mandatory input.
+        assert not IDENTITY_FIELDS & required, tool.name
+        # The server validates exactly the published schema...
+        assert server._validators[tool.name].schema == schema, tool.name
+        # ...so the documented arguments, without identity, pass it.
+        server._validators[tool.name].validate(TOOL_ARGUMENTS[tool.name])
+
+
+def capture_backend(sent, response):
+    @asynccontextmanager
+    async def backend():
+        def handler(request):
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, json=response)
+        async with httpx.AsyncClient(base_url="http://test", transport=httpx.MockTransport(handler)) as client:
+            yield client
+    return backend
+
+
+@pytest.mark.parametrize("tool_name,field", [
+    ("submit_instruction", "agent_id"), ("complete_task", "agent_id"), ("claim_task", "agent_id"),
+    ("record_verdict", "agent_id"), ("post_message", "from_agent"), ("record_decision", "decided_by"),
+])
+async def test_identity_omitted_after_bootstrap_comes_from_the_session(legacy_server, monkeypatch, tool_name, field):
+    sent = []
+    monkeypatch.setattr(legacy_server, "_client", capture_backend(sent, {"ok": True}))
+    # bootstrap_agent adopts the project credential after the catalog was published.
+    legacy_server.session = dict(SESSION)
+    async with Client(legacy_server.sdk_server()) as client:
+        result = await client.call_tool(tool_name, TOOL_ARGUMENTS[tool_name])
+    assert not result.is_error, payload(result)
+    assert sent[0][field] == "alice"
+
+
+async def test_legacy_without_any_identity_reports_missing_agent_id(monkeypatch):
+    monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "1")
+    monkeypatch.delenv("AGENT_BUS_SESSION_FILE", raising=False)
+    async with Client(McpServer().sdk_server()) as client:
+        result = await client.call_tool("complete_task", {"task_id": "T1"})
+    assert result.is_error
+    assert payload(result)["code"] == "invalid_arguments"
+    assert "agent_id" in payload(result)["error"]
