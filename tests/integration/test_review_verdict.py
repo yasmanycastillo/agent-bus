@@ -218,5 +218,7 @@ async def test_assigned_reviewer_records_the_verdict(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_BUS_ALLOW_UNSIGNED", "1")
     server = McpServer()
     tool = next(item for item in server.tools if item["name"] == "record_verdict")
-    assert tool["inputSchema"]["required"] == ["task_id", "verdict", "agent_id"]
+    # Legacy mode accepts agent_id but, like every tool, binds it from --agent/session when omitted.
+    assert tool["inputSchema"]["required"] == ["task_id", "verdict"]
+    assert "agent_id" in tool["inputSchema"]["properties"]
     assert "dueño de la tarea de review" in tool["description"]
