@@ -212,6 +212,19 @@ la solicitud si muestran un indicador de turno en curso: `esc to interrupt`
 (Codex, Claude Code), `Thinking…` o `[stop]` (Grok). Si `screen` falla, lo
 registra y sigue con las demás comprobaciones.
 
+Con `--cli muxel` el watcher también avisa al panel cuando cambian sus tareas:
+una tarea nueva asignada, una revisión liberada (pasa de `blocked` a `in_progress`
+al entregarse las implementaciones que cubre) o una implementación reabierta por
+`changes_requested` (queda `pending` y libre; hay que reclamarla de nuevo). Escribe
+un aviso breve que pide ejecutar `my_pending_items` y seguir el protocolo; no espera
+el turno ni publica nada en el bus. El watcher compara cada pocos segundos las tareas
+propias (`GET /tasks?owner=<agente>`) con las ya avisadas, guardadas en
+`task_nudges.json` dentro de su directorio de estado, así que cada cambio se avisa
+una vez aunque se reinicie; al arrancar por primera vez avisa de las tareas activas
+que ya tenga. Usa las mismas comprobaciones de ocupado: un panel ocupado aplaza el
+aviso sin perderlo. Las solicitudes con respuesta pendiente van antes que los
+avisos. Desactívalo con `--no-task-nudges`.
+
 Abre muxel desde el escritorio o desde una terminal normal, no desde una sesión de
 Claude Code: si hereda sus variables `CLAUDE_CODE_*`, el Claude de cada panel
 arranca sin sesión iniciada (`Not logged in`). Las

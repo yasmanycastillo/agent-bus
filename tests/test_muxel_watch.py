@@ -185,3 +185,111 @@ async def test_unreadable_screen_does_not_block_the_turn(hub, monkeypatch, tmp_p
                          sessions_file=tmp_path / 'sessions.json')
     assert [verb for verb, _ in muxel.calls] == ['status', 'screen', 'send', 'wait']
     assert hub.message['acknowledged']
+
+
+# --- Task nudges: wake a live pane when its tasks change, without a reply turn ---
+
+def test_task_nudge_plan_follows_status_transitions():
+    plan = watch.plan_task_nudges
+    assert set(plan({}, {'T1': 'pending', 'R1': 'blocked'})) == {'T1'}
+    assert 'liberada' in plan({'R1': 'blocked'}, {'R1': 'in_progress'})['R1']
+    assert plan({'T1': 'pending'}, {'T1': 'in_progress'}) == {}  # the agent claimed it itself
+    assert plan({'T1': 'in_progress'}, {'T1': 'in_review'}) == {}
+
+
+@pytest.fixture
+def task_hub(hub):
+    import httpx
+    hub.message['acknowledged'] = True
+    hub.tasks = [{'task_id': 'T1', 'owner': 'bob', 'status': 'pending'}]
+    hub.task_queries = []
+    original = hub.handle
+
+    def handle(request):
+        path = request.url.path
+        if path == '/tasks':
+            hub.task_queries.append(dict(request.url.params))
+            owner = request.url.params.get('owner')
+            return httpx.Response(200, json=[t for t in hub.tasks if t['owner'] == owner])
+        if path.startswith('/tasks/'):
+            task = next(t for t in hub.tasks if t['task_id'] == path.rsplit('/', 1)[1])
+            return httpx.Response(200, json=task)
+        return original(request)
+    hub.handle = handle
+    return hub
+
+
+def _watcher(tmp_path, **kw):
+    return watch.PendingMessageWatcher('bob', cli='muxel', muxel_agent='Codex',
+                                       sessions_file=tmp_path / 'sessions.json', **kw)
+
+
+async def test_assigned_task_is_nudged_once_without_waiting_or_replying(task_hub, monkeypatch, tmp_path):
+    muxel = FakeMuxel()
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await _watcher(tmp_path).tick()
+    assert [verb for verb, _ in muxel.calls] == ['status', 'screen', 'send']
+    text = muxel.calls[2][1]
+    assert 'T1' in text and 'my_pending_items' in text
+    assert not task_hub.replies and task_hub.task_queries == [{'owner': 'bob'}]
+    await _watcher(tmp_path).tick()  # a restarted watcher remembers the delivered nudge
+    assert [verb for verb, _ in muxel.calls].count('send') == 1
+
+
+async def test_busy_pane_keeps_the_nudge_for_later(task_hub, monkeypatch, tmp_path):
+    muxel = FakeMuxel(status='working')
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await _watcher(tmp_path).tick()
+    assert 'send' not in [verb for verb, _ in muxel.calls]
+    muxel.status = 'idle'
+    await _watcher(tmp_path).tick()
+    assert [verb for verb, _ in muxel.calls].count('send') == 1
+
+
+async def test_released_review_and_reopened_implementation_are_nudged(task_hub, monkeypatch, tmp_path):
+    muxel = FakeMuxel()
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    task_hub.tasks = [{'task_id': 'R1', 'owner': 'bob', 'status': 'blocked'},
+                      {'task_id': 'I1', 'owner': 'bob', 'status': 'in_review'}]
+    watcher = _watcher(tmp_path)
+    await watcher.tick()
+    assert 'send' not in [verb for verb, _ in muxel.calls]
+    task_hub.tasks = [{'task_id': 'R1', 'owner': 'bob', 'status': 'in_progress'},
+                      {'task_id': 'I1', 'owner': 'free', 'status': 'pending'}]
+    await watcher.tick()
+    sent = [text for verb, text in muxel.calls if verb == 'send']
+    assert len(sent) == 1 and 'R1' in sent[0] and 'I1' in sent[0] and 'reclám' in sent[0]
+    task_hub.tasks[1].update(owner='bob', status='in_progress')  # reclaimed by the agent itself
+    await watcher.tick()
+    assert [verb for verb, _ in muxel.calls].count('send') == 1
+
+
+async def test_nudge_goes_stale_when_the_task_is_no_longer_actionable(task_hub, monkeypatch, tmp_path):
+    muxel = FakeMuxel(status='working')
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await _watcher(tmp_path).tick()
+    task_hub.tasks[0]['status'] = 'in_review'
+    muxel.status = 'idle'
+    await _watcher(tmp_path).tick()
+    assert 'send' not in [verb for verb, _ in muxel.calls]
+
+
+async def test_reply_needed_message_goes_before_task_nudges(task_hub, monkeypatch, tmp_path):
+    task_hub.message['acknowledged'] = False
+    muxel = FakeMuxel()
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    watcher = _watcher(tmp_path)
+    await watcher.tick()
+    assert [verb for verb, _ in muxel.calls] == ['status', 'screen', 'send', 'wait']
+    assert task_hub.message['acknowledged'] and not task_hub.task_queries
+    await watcher.tick()
+    assert [verb for verb, _ in muxel.calls].count('send') == 2
+
+
+async def test_task_nudges_can_be_disabled(task_hub, monkeypatch, tmp_path):
+    muxel = FakeMuxel()
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await _watcher(tmp_path, task_nudges=False).tick()
+    assert not muxel.calls and not task_hub.task_queries
+    from click.testing import CliRunner
+    assert '--no-task-nudges' in CliRunner().invoke(watch.watch, ['--help']).output

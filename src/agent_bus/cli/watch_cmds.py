@@ -158,6 +158,37 @@ async def _muxel_ctl(binary: str, args: list[str], agent_id: str, bus_url: str |
     return data
 
 
+async def _ensure_muxel_idle(binary: str, target: str, info: dict, agent_id: str,
+                             bus_url: str | None) -> None:
+    """Raise AgentBusy unless the pane described by `muxel ctl status` can take a prompt now."""
+    status = info.get("status")
+    if status in MUXEL_BUSY_STATES:
+        raise AgentBusy(f"muxel agent '{target}' is {status}")
+    # Right after a prompt, muxel still reports the previous turn's state
+    # until the agent visibly starts; awaiting_reply covers that gap.
+    if info.get("awaiting_reply") is True:
+        raise AgentBusy(f"muxel agent '{target}' has not started its last prompt yet")
+    # muxel 0.2.8 does not see current Claude Code working; Claude's own status file does.
+    cwd = info.get("cwd")
+    if isinstance(cwd, str) and not info.get("remote"):
+        from agent_bus.observe.sessions import claude_live_status
+        live = claude_live_status(Path(cwd), Path.home())
+        if live in ("busy", "waiting"):
+            raise AgentBusy(f"Claude in {cwd} is {live}")
+    try:
+        screen = await _muxel_ctl(binary, ["screen", target, "--lines", str(MUXEL_SCREEN_LINES)],
+                                  agent_id, bus_url)
+    except Exception as exc:  # the screen is only a fallback; never block the turn on it
+        logger.warning("muxel screen check skipped for '%s': %s", target, exc)
+        screen = {}
+    text = screen.get("text")
+    if isinstance(text, str):
+        footer = "\n".join(text.splitlines()[-MUXEL_SCREEN_LINES:])
+        marker = next((m for m in MUXEL_WORKING_MARKERS if m in footer), None)
+        if marker:
+            raise AgentBusy(f"muxel agent '{target}' screen shows {marker!r}")
+
+
 async def _muxel_turn(binary: str, target: str, prompt: str, sent_marker: Path,
                       agent_id: str, bus_url: str | None) -> str:
     """Type the prompt into a live muxel pane and return the reply of that turn.
@@ -168,31 +199,7 @@ async def _muxel_turn(binary: str, target: str, prompt: str, sent_marker: Path,
     info = await _muxel_ctl(binary, ["status", target], agent_id, bus_url)
     status = info.get("status")
     if not sent_marker.exists():
-        if status in MUXEL_BUSY_STATES:
-            raise AgentBusy(f"muxel agent '{target}' is {status}")
-        # Right after a prompt, muxel still reports the previous turn's state
-        # until the agent visibly starts; awaiting_reply covers that gap.
-        if info.get("awaiting_reply") is True:
-            raise AgentBusy(f"muxel agent '{target}' has not started its last prompt yet")
-        # muxel 0.2.8 does not see current Claude Code working; Claude's own status file does.
-        cwd = info.get("cwd")
-        if isinstance(cwd, str) and not info.get("remote"):
-            from agent_bus.observe.sessions import claude_live_status
-            live = claude_live_status(Path(cwd), Path.home())
-            if live in ("busy", "waiting"):
-                raise AgentBusy(f"Claude in {cwd} is {live}")
-        try:
-            screen = await _muxel_ctl(binary, ["screen", target, "--lines", str(MUXEL_SCREEN_LINES)],
-                                      agent_id, bus_url)
-        except Exception as exc:  # the screen is only a fallback; never block the turn on it
-            logger.warning("muxel screen check skipped for '%s': %s", target, exc)
-            screen = {}
-        text = screen.get("text")
-        if isinstance(text, str):
-            footer = "\n".join(text.splitlines()[-MUXEL_SCREEN_LINES:])
-            marker = next((m for m in MUXEL_WORKING_MARKERS if m in footer), None)
-            if marker:
-                raise AgentBusy(f"muxel agent '{target}' screen shows {marker!r}")
+        await _ensure_muxel_idle(binary, target, info, agent_id, bus_url)
         await _muxel_ctl(binary, ["send", target, "-"], agent_id, bus_url, input_text=prompt)
         write_private_json(sent_marker, {"target": target, "sent_at": time.time()})
     elif status == "blocked":
@@ -392,15 +399,43 @@ async def run_turn(
             return None
 
 
+ACTIVE_TASK_STATES = ("pending", "in_progress")
+REOPENED_REASON = "cambios solicitados; la implementación quedó libre, reclámala de nuevo"
+
+
+def plan_task_nudges(seen: dict[str, str], owned: dict[str, str]) -> dict[str, str]:
+    """Reasons to wake the agent, from the statuses it was last told about to its owned tasks now.
+
+    Moving between active states (the agent claiming its own task) is not news.
+    """
+    due = {}
+    for task_id, status in owned.items():
+        before = seen.get(task_id)
+        if status not in ACTIVE_TASK_STATES or before in ACTIVE_TASK_STATES:
+            continue
+        due[task_id] = ("tarea asignada" if before is None
+                        else "revisión liberada: las implementaciones que cubre ya se entregaron"
+                        if before == "blocked" else "la tarea vuelve a estar activa")
+    return due
+
+
+def build_nudge(due: dict[str, str]) -> str:
+    items = "; ".join(f"{task_id}: {reason}" for task_id, reason in sorted(due.items()))
+    return (f"agent-bus: tienes trabajo pendiente — {items}. Ejecuta my_pending_items y continúa "
+            "según el protocolo (reclama, implementa o revisa, y entrega con complete_handoff/record_verdict).")
+
+
 class PendingMessageWatcher:
     """SSE wakes bounded polling; persisted delivery state decides what to execute."""
     def __init__(self, agent_id: str, *, cli: str = "claude", bus_url: str | None = None,
                  dry_run: bool = False, sessions_file: Path | None = None, model: str | None = None,
                  tools: str | None = None, allow_mutating_tools: bool = False,
-                 muxel_agent: str | None = None):
+                 muxel_agent: str | None = None, task_nudges: bool = True):
         self.agent_id = agent_id
         self.cli = cli
         self.muxel_agent = muxel_agent
+        # Only a live muxel pane can be woken; headless CLIs start their own turns.
+        self.task_nudges = task_nudges and cli == "muxel" and not dry_run
         self.model = model
         validate_watch_tools(tools, allow_mutating_tools=allow_mutating_tools)
         self.tools = tools
@@ -421,7 +456,68 @@ class PendingMessageWatcher:
         # Events are hints only; never execute unverified event payloads.
         self.wake.set()
 
-    async def poll_once(self, *, limit: int = 10) -> None:
+    async def tick(self, *, limit: int = 10) -> None:
+        """Reply turns first; nudge about tasks only when no reply_needed message is pending."""
+        if await self.poll_once(limit=limit) == 0 and self.task_nudges:
+            await self.nudge_tasks()
+
+    async def nudge_tasks(self) -> None:
+        """Type one short notice into the pane when the agent's tasks change; no reply is awaited.
+
+        Owned task statuses are the source of truth: review release has no inbox event,
+        and SSE events are hints that a restarted watcher may have missed. `seen` holds
+        the statuses already accounted for and `due` the notices not yet typed, both
+        persisted so each change is announced once across restarts.
+        """
+        if time.monotonic() < self.retry_after.get("task-nudge", 0):
+            return
+        path = self.sessions_file.parent / "task_nudges.json"
+        try:
+            state = json.loads(path.read_text())
+        except (OSError, ValueError):
+            state = {}
+        seen, due = dict(state.get("seen") or {}), dict(state.get("due") or {})
+        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10) as client:
+            response = await client.get("/tasks", params={"owner": self.agent_id})
+            response.raise_for_status()
+            owned = {task["task_id"]: task["status"] for task in response.json()}
+            for task_id, before in list(seen.items()):
+                # A changes_requested verdict frees the implementation, so it leaves our list.
+                if task_id in owned or before not in ("in_progress", "in_review"):
+                    continue
+                reply = await client.get(f"/tasks/{task_id}")
+                task = reply.json() if reply.status_code == 200 else {}
+                if task.get("status") == "pending" and task.get("owner") in (None, "free"):
+                    due[task_id], seen[task_id] = REOPENED_REASON, "pending"
+                else:
+                    seen[task_id] = "released"
+        due.update(plan_task_nudges(seen, owned))
+        seen.update(owned)
+        due = {task_id: reason for task_id, reason in due.items()
+               if owned.get(task_id, "pending") in ACTIVE_TASK_STATES}
+        if {"seen": seen, "due": due} != state:
+            write_private_json(path, {"seen": seen, "due": due})
+        if not due:
+            return
+        binary = shutil.which("muxel")
+        try:
+            if not binary:
+                raise RuntimeError("muxel CLI missing")
+            info = await _muxel_ctl(binary, ["status", self.muxel_agent], self.agent_id, self.bus_url)
+            await _ensure_muxel_idle(binary, self.muxel_agent, info, self.agent_id, self.bus_url)
+            await _muxel_ctl(binary, ["send", self.muxel_agent, "-"], self.agent_id, self.bus_url,
+                             input_text=build_nudge(due))
+        except AgentBusy as exc:
+            logger.info("Deferred task nudge: %s", exc)
+            return
+        except Exception as exc:
+            self.retry_after["task-nudge"] = time.monotonic() + 30
+            logger.warning("Task nudge not delivered: %s", exc)
+            return
+        write_private_json(path, {"seen": seen, "due": {}})
+        click.echo(f"Task nudge sent: {', '.join(sorted(due))}")
+
+    async def poll_once(self, *, limit: int = 10) -> int:
         params = {"limit": limit, "reply_needed": "true"}
         if self.cursor:
             params["cursor"] = self.cursor
@@ -446,6 +542,7 @@ class PendingMessageWatcher:
                 self.retry_after[message_id] = time.monotonic() + 3
         # Retain only unexpired backoff entries; no durable retry ledger is claimed.
         self.retry_after = {key: value for key, value in self.retry_after.items() if value > time.monotonic()}
+        return len(page["messages"])
 
     async def run(self, *, once: bool = False) -> None:
         guard = nullcontext() if self.dry_run else ExecutionGuard(self.agent_id, kind="watcher")
@@ -463,7 +560,7 @@ class PendingMessageWatcher:
             while True:
                 self.wake.clear()
                 try:
-                    await self.poll_once(limit=1 if once else 10)
+                    await self.tick(limit=1 if once else 10)
                 except Exception as exc:
                     auth_error = isinstance(exc, AuthenticationError) or (
                         isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403))
@@ -489,13 +586,15 @@ class PendingMessageWatcher:
 @click.option("--allow-mutating-tools", is_flag=True, help="Permitir herramientas de modificación/escritura en Grok/CLI.")
 @click.option("--muxel-agent", default=None,
               help="Con --cli muxel: agente de muxel (id, nombre o proyecto/nombre) al que escribir.")
+@click.option("--task-nudges/--no-task-nudges", default=True,
+              help="Con --cli muxel: avisar en el panel de tareas asignadas, liberadas o reabiertas.")
 @click.option("--status", "show_status", is_flag=True, help="Consultar estado local del ejecutor sin iniciar turnos.")
 @click.option("--bus-url", default=None, help="URL del bus")
 @click.option("--dry-run", is_flag=True, help="Solo mostrar qué se ejecutaría")
 @click.option("--once", is_flag=True, help="Procesar un solo mensaje pendiente y salir")
 def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: bool, once: bool,
           model: str | None, tools: str | None, allow_mutating_tools: bool, show_status: bool,
-          muxel_agent: str | None):
+          muxel_agent: str | None, task_nudges: bool):
     """Escuchar solicitudes y responder con turnos headless.
 
     Con --cli muxel escribe en un panel vivo de muxel mediante `muxel ctl`.
@@ -529,7 +628,7 @@ def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: b
     worker_environment(agent_id, bus_url=bus_url)
     watcher = PendingMessageWatcher(
         agent_id, cli=cli, bus_url=bus_url, dry_run=dry_run, model=model, tools=tools,
-        allow_mutating_tools=allow_mutating_tools, muxel_agent=muxel_agent,
+        allow_mutating_tools=allow_mutating_tools, muxel_agent=muxel_agent, task_nudges=task_nudges,
     )
     click.echo(f"👀 Watcheando el bus como '{agent_id}' (CLI: {cli})")
     click.echo("   Consulta persistida y SSE activos. Ctrl+C para salir.")
