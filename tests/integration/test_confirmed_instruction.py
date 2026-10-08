@@ -220,3 +220,17 @@ async def test_cross_review_covers_only_the_named_implementations(tmp_path):
         assert outside.status_code == 409
     await db.close()
 
+
+@pytest.mark.asyncio
+async def test_missing_instruction_explains_the_404(tmp_path):
+    db = Database(str(tmp_path / "bus.db"))
+    await db.initialize()
+    bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+    async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        missing = await client.post("/instructions/ins-nope/assignments", json={
+            "agent_id": "codex-01", "role": "implement", "title": "x",
+        })
+        assert missing.status_code == 404
+        detail = missing.json()["error"]
+        assert "ins-nope" in detail and "alpha" in detail
+    await db.close()

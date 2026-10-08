@@ -154,7 +154,7 @@ async def assign_work(
     log = InstructionLog(bus.db)
     stored = await log.get(instruction_id)
     if stored is None:
-        raise InstructionError("instruction not found", 404)
+        raise InstructionError(f"instruction {instruction_id} does not exist in project {bus.project_id}", 404)
     roster = {item["agent_id"]: item["provider"] for item in stored["agents"]}
     if assignee not in roster:
         raise InstructionError(f"{assignee} is not available for this instruction", 409)

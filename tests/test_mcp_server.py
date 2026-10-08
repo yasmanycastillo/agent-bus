@@ -150,3 +150,7 @@ async def test_mcp_assign_work_forwards_the_review_scope(live_bus_url):
     async with httpx.AsyncClient(base_url=live_bus_url) as client:
         task = (await client.get(f"/tasks/{review['task_id']}")).json()
     assert task["independent_from"] == [frontend["task_id"]]
+    missing = await call_tool(server, "assign_work", {
+        **base, "instruction_id": "ins-nope", "assignee": "codex", "role": "plan", "title": "x",
+    }, expected_error=True)
+    assert "ins-nope" in missing["detail"]
