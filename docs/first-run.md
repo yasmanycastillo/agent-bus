@@ -220,10 +220,26 @@ un aviso breve que pide ejecutar `my_pending_items` y seguir el protocolo; no es
 el turno ni publica nada en el bus. El watcher compara cada pocos segundos las tareas
 propias (`GET /tasks?owner=<agente>`) con las ya avisadas, guardadas en
 `task_nudges.json` dentro de su directorio de estado, así que cada cambio se avisa
-una vez aunque se reinicie; al arrancar por primera vez avisa de las tareas activas
-que ya tenga. Usa las mismas comprobaciones de ocupado: un panel ocupado aplaza el
-aviso sin perderlo. Las solicitudes con respuesta pendiente van antes que los
-avisos. Desactívalo con `--no-task-nudges`.
+una vez aunque se reinicie. La primera vez que arranca, sin ese archivo, avisa una
+vez de las tareas activas (`pending` o `in_progress`) que el agente ya tenga. Usa
+las mismas comprobaciones de ocupado: un panel ocupado aplaza el aviso sin perderlo.
+Las solicitudes con respuesta pendiente van antes que los avisos. Desactiva esta
+consulta de tareas con `--no-task-nudges`.
+
+Los mensajes con los que el hub entrega trabajo (el de `assign_work` al asignado,
+con `body.role`; el de asignación del War Room, con `body.type = task_assigned`; y
+el de `changes_requested` al implementador, con `body.verdict`) no se escriben como
+consulta de solo lectura: se convierten en el mismo aviso, fusionado con el de la
+tarea si coincide, y se confirman con `/inbox/<agente>/ack` solo tras un `send`
+correcto, sin respuesta ni intentos fallidos. Esto vale también con
+`--no-task-nudges`. Las preguntas normales entre agentes siguen el flujo de
+consulta descrito arriba.
+
+Al asignar una revisión con `assign_work`, el hub crea la tarea en `pending` y la
+bloquea justo después hasta que se entreguen las implementaciones. Si la consulta
+del watcher cae entre ambos pasos, el agente recibe un aviso de "tarea asignada"
+para una revisión que aún no puede empezar; `my_pending_items` la mostrará
+`blocked` y llegará otro aviso cuando se libere.
 
 Abre muxel desde el escritorio o desde una terminal normal, no desde una sesión de
 Claude Code: si hereda sus variables `CLAUDE_CODE_*`, el Claude de cada panel

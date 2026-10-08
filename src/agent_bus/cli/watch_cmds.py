@@ -419,6 +419,28 @@ def plan_task_nudges(seen: dict[str, str], owned: dict[str, str]) -> dict[str, s
     return due
 
 
+def task_notice(message: dict) -> tuple[str, str] | None:
+    """(task_id, reason) when the hub sent this reply_needed message to hand over task work.
+
+    assign_work and the War Room send the task to its new owner (body.role or
+    body.type task_assigned); a changes_requested verdict frees the implementation
+    for its previous owner (body.verdict). Plain agent questions carry neither.
+    """
+    from agent_bus.core.instructions import ROLE_REQUIREMENTS
+
+    body, task_id = message.get("body"), message.get("related_task")
+    if not isinstance(body, dict) or not isinstance(task_id, str) or not task_id:
+        return None
+    if body.get("verdict") == "changes_requested":
+        return task_id, REOPENED_REASON
+    role = body.get("role")
+    if role in ROLE_REQUIREMENTS:
+        return task_id, f"tarea asignada ({role})"
+    if body.get("type") == "task_assigned":
+        return task_id, "tarea asignada"
+    return None
+
+
 def build_nudge(due: dict[str, str]) -> str:
     items = "; ".join(f"{task_id}: {reason}" for task_id, reason in sorted(due.items()))
     return (f"agent-bus: tienes trabajo pendiente — {items}. Ejecuta my_pending_items y continúa "
@@ -436,6 +458,9 @@ class PendingMessageWatcher:
         self.muxel_agent = muxel_agent
         # Only a live muxel pane can be woken; headless CLIs start their own turns.
         self.task_nudges = task_nudges and cli == "muxel" and not dry_run
+        # Hub task notices become nudges in a pane, not read-only reply turns.
+        self.task_notices = cli == "muxel" and not dry_run
+        self.notices: dict[str, tuple[str, str]] = {}  # message_id -> (task_id, reason)
         self.model = model
         validate_watch_tools(tools, allow_mutating_tools=allow_mutating_tools)
         self.tools = tools
@@ -458,7 +483,7 @@ class PendingMessageWatcher:
 
     async def tick(self, *, limit: int = 10) -> None:
         """Reply turns first; nudge about tasks only when no reply_needed message is pending."""
-        if await self.poll_once(limit=limit) == 0 and self.task_nudges:
+        if await self.poll_once(limit=limit) == 0 and (self.task_nudges or self.notices):
             await self.nudge_tasks()
 
     async def nudge_tasks(self) -> None:
@@ -467,7 +492,9 @@ class PendingMessageWatcher:
         Owned task statuses are the source of truth: review release has no inbox event,
         and SSE events are hints that a restarted watcher may have missed. `seen` holds
         the statuses already accounted for and `due` the notices not yet typed, both
-        persisted so each change is announced once across restarts.
+        persisted so each change is announced once across restarts. Hub task notices
+        join the same nudge and are acknowledged only after it was typed; `typed`
+        remembers them so a failed acknowledgement does not type them again.
         """
         if time.monotonic() < self.retry_after.get("task-nudge", 0):
             return
@@ -477,28 +504,62 @@ class PendingMessageWatcher:
         except (OSError, ValueError):
             state = {}
         seen, due = dict(state.get("seen") or {}), dict(state.get("due") or {})
+        typed = set(state.get("typed") or [])
+        notices = dict(self.notices)
         async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10) as client:
-            response = await client.get("/tasks", params={"owner": self.agent_id})
-            response.raise_for_status()
-            owned = {task["task_id"]: task["status"] for task in response.json()}
-            for task_id, before in list(seen.items()):
-                # A changes_requested verdict frees the implementation, so it leaves our list.
-                if task_id in owned or before not in ("in_progress", "in_review"):
-                    continue
-                reply = await client.get(f"/tasks/{task_id}")
-                task = reply.json() if reply.status_code == 200 else {}
-                if task.get("status") == "pending" and task.get("owner") in (None, "free"):
-                    due[task_id], seen[task_id] = REOPENED_REASON, "pending"
-                else:
-                    seen[task_id] = "released"
+            if self.task_nudges:
+                seen, due = await self._task_changes(client, seen, due)
+            # A notice for a task already announced by an earlier nudge needs no new text.
+            if self.task_nudges:
+                typed |= {message_id for message_id, (task_id, _) in notices.items()
+                          if seen.get(task_id) in ACTIVE_TASK_STATES and task_id not in due}
+            text = {**due, **{task_id: reason for message_id, (task_id, reason) in notices.items()
+                              if message_id not in typed}}
+            current = {"seen": seen, "due": due, "typed": sorted(typed)}
+            if current != state:
+                write_private_json(path, current)
+            if text:
+                if not await self._type_nudge(text):
+                    return
+                typed |= notices.keys()
+                write_private_json(path, {"seen": seen, "due": {}, "typed": sorted(typed)})
+                click.echo(f"Task nudge sent: {', '.join(sorted(text))}")
+            acknowledge = sorted(typed & notices.keys())
+            if acknowledge:
+                try:
+                    response = await client.post(f"/inbox/{self.agent_id}/ack",
+                                                 json={"message_ids": acknowledge})
+                    response.raise_for_status()
+                except Exception as exc:
+                    logger.warning("Task notice typed but not acknowledged: %s", exc)
+                    return
+                for message_id in acknowledge:
+                    self.notices.pop(message_id, None)
+                write_private_json(path, {"seen": seen, "due": {}, "typed": sorted(typed - set(acknowledge))})
+
+    async def _task_changes(self, client, seen: dict[str, str],
+                            due: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+        seen, due = dict(seen), dict(due)
+        response = await client.get("/tasks", params={"owner": self.agent_id})
+        response.raise_for_status()
+        owned = {task["task_id"]: task["status"] for task in response.json()}
+        for task_id, before in list(seen.items()):
+            # A changes_requested verdict frees the implementation, so it leaves our list.
+            if task_id in owned or before not in ("in_progress", "in_review"):
+                continue
+            reply = await client.get(f"/tasks/{task_id}")
+            task = reply.json() if reply.status_code == 200 else {}
+            if task.get("status") == "pending" and task.get("owner") in (None, "free"):
+                due[task_id], seen[task_id] = REOPENED_REASON, "pending"
+            else:
+                seen[task_id] = "released"
         due.update(plan_task_nudges(seen, owned))
         seen.update(owned)
-        due = {task_id: reason for task_id, reason in due.items()
-               if owned.get(task_id, "pending") in ACTIVE_TASK_STATES}
-        if {"seen": seen, "due": due} != state:
-            write_private_json(path, {"seen": seen, "due": due})
-        if not due:
-            return
+        return seen, {task_id: reason for task_id, reason in due.items()
+                      if owned.get(task_id, "pending") in ACTIVE_TASK_STATES}
+
+    async def _type_nudge(self, due: dict[str, str]) -> bool:
+        """Send the nudge with the same busy checks as a reply turn; never wait for the turn."""
         binary = shutil.which("muxel")
         try:
             if not binary:
@@ -509,13 +570,12 @@ class PendingMessageWatcher:
                              input_text=build_nudge(due))
         except AgentBusy as exc:
             logger.info("Deferred task nudge: %s", exc)
-            return
+            return False
         except Exception as exc:
             self.retry_after["task-nudge"] = time.monotonic() + 30
             logger.warning("Task nudge not delivered: %s", exc)
-            return
-        write_private_json(path, {"seen": seen, "due": {}})
-        click.echo(f"Task nudge sent: {', '.join(sorted(due))}")
+            return False
+        return True
 
     async def poll_once(self, *, limit: int = 10) -> int:
         params = {"limit": limit, "reply_needed": "true"}
@@ -528,8 +588,14 @@ class PendingMessageWatcher:
         self.cursor = page.get("next_cursor")
         if not page["messages"]:
             self.status("waiting")
+        replies = 0
         for message in page["messages"]:
             message_id = message["message_id"]
+            notice = task_notice(message) if self.task_notices else None
+            if notice:
+                self.notices[message_id] = notice
+                continue
+            replies += 1
             if time.monotonic() < self.retry_after.get(message_id, 0):
                 continue
             try:
@@ -542,7 +608,7 @@ class PendingMessageWatcher:
                 self.retry_after[message_id] = time.monotonic() + 3
         # Retain only unexpired backoff entries; no durable retry ledger is claimed.
         self.retry_after = {key: value for key, value in self.retry_after.items() if value > time.monotonic()}
-        return len(page["messages"])
+        return replies
 
     async def run(self, *, once: bool = False) -> None:
         guard = nullcontext() if self.dry_run else ExecutionGuard(self.agent_id, kind="watcher")

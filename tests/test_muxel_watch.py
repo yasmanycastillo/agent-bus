@@ -214,7 +214,14 @@ def task_hub(hub):
         if path.startswith('/tasks/'):
             task = next(t for t in hub.tasks if t['task_id'] == path.rsplit('/', 1)[1])
             return httpx.Response(200, json=task)
+        if path == '/inbox/bob/ack':
+            hub.acks.append(json.loads(request.content)['message_ids'])
+            if hub.ack_status != 200:
+                return httpx.Response(hub.ack_status, json={'error': 'down'})
+            hub.message['acknowledged'] = True
+            return httpx.Response(200, json={'acknowledged': hub.acks[-1]})
         return original(request)
+    hub.acks, hub.ack_status = [], 200
     hub.handle = handle
     return hub
 
@@ -293,3 +300,69 @@ async def test_task_nudges_can_be_disabled(task_hub, monkeypatch, tmp_path):
     assert not muxel.calls and not task_hub.task_queries
     from click.testing import CliRunner
     assert '--no-task-nudges' in CliRunner().invoke(watch.watch, ['--help']).output
+
+
+# --- Hub task notices (assign_work, changes_requested) become the same nudge ---
+
+ASSIGNED = {'text': 'Implementa la parte A', 'title': 'Parte A', 'role': 'implement'}
+CHANGES = {'text': 'Changes requested on abc: falta un test.', 'verdict': 'changes_requested', 'sha': 'abc'}
+
+
+def _notice(hub, body, task_id='T1'):
+    hub.message.update(acknowledged=False, body=body, related_task=task_id)
+
+
+@pytest.mark.parametrize('body, expected', [(ASSIGNED, 'asignada'), (CHANGES, 'reclám')])
+async def test_task_notice_is_typed_as_a_nudge_and_acknowledged(task_hub, monkeypatch, tmp_path, body, expected):
+    _notice(task_hub, body)
+    task_hub.tasks = [] if body is CHANGES else task_hub.tasks
+    muxel = FakeMuxel()
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await _watcher(tmp_path).tick()
+    assert [verb for verb, _ in muxel.calls] == ['status', 'screen', 'send']
+    text = muxel.calls[2][1]
+    assert 'T1' in text and expected in text and 'sin modificar archivos' not in text
+    assert task_hub.acks == [['source']] and task_hub.message['acknowledged']
+    assert not task_hub.replies and not task_hub.failures
+
+
+async def test_task_notice_waits_for_a_busy_pane_without_failing(task_hub, monkeypatch, tmp_path):
+    _notice(task_hub, ASSIGNED)
+    muxel = FakeMuxel(status='working')
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    for _ in range(6):  # more than the attempt limit of reply turns
+        await _watcher(tmp_path).tick()
+    assert not task_hub.acks and not task_hub.failures and 'send' not in [v for v, _ in muxel.calls]
+    muxel.status = 'idle'
+    await _watcher(tmp_path).tick()
+    assert [verb for verb, _ in muxel.calls].count('send') == 1 and task_hub.message['acknowledged']
+
+
+async def test_task_notice_typed_but_not_acknowledged_is_not_typed_again(task_hub, monkeypatch, tmp_path):
+    _notice(task_hub, CHANGES)
+    task_hub.ack_status = 503
+    muxel = FakeMuxel()
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await _watcher(tmp_path).tick()
+    assert not task_hub.message['acknowledged']
+    task_hub.ack_status = 200
+    await _watcher(tmp_path).tick()  # restarted watcher
+    assert [verb for verb, _ in muxel.calls].count('send') == 1 and task_hub.message['acknowledged']
+
+
+async def test_task_notice_already_announced_by_a_nudge_is_only_acknowledged(task_hub, monkeypatch, tmp_path):
+    muxel = FakeMuxel()
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await _watcher(tmp_path).tick()  # T1 nudged from the task list
+    _notice(task_hub, ASSIGNED)
+    await _watcher(tmp_path).tick()
+    assert [verb for verb, _ in muxel.calls].count('send') == 1 and task_hub.message['acknowledged']
+
+
+async def test_task_notice_is_a_nudge_even_without_task_polling(task_hub, monkeypatch, tmp_path):
+    _notice(task_hub, ASSIGNED)
+    muxel = FakeMuxel()
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await _watcher(tmp_path, task_nudges=False).tick()
+    assert [verb for verb, _ in muxel.calls] == ['status', 'screen', 'send']
+    assert not task_hub.task_queries and task_hub.message['acknowledged']
