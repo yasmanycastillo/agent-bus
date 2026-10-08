@@ -101,6 +101,17 @@ class InstructionLog:
         )
         return [dict(row) for row in rows]
 
+    async def assignees(self, coordinator: str) -> list[str]:
+        """Agents given work in any instruction this coordinator submitted."""
+        await self.ensure_schema()
+        rows = await self._db.conn.execute_fetchall(
+            """SELECT DISTINCT a.agent_id FROM work_assignments a
+               JOIN instructions i ON i.instruction_id = a.instruction_id
+               WHERE i.coordinator_agent_id = ? ORDER BY a.agent_id""",
+            (coordinator,),
+        )
+        return [row["agent_id"] for row in rows]
+
     async def holder(self, task_id: str) -> dict | None:
         await self.ensure_schema()
         rows = await self._db.conn.execute_fetchall(

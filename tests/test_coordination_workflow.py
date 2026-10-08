@@ -324,3 +324,18 @@ async def test_review_of_two_mcp_handoffs_records_a_verdict_per_implementation(f
     final = await verdict('approve', implementation_task_id=frontend)
     assert final.status_code == 200, final.text
     assert final.json()['sha'] == revised
+
+
+async def test_assignees_answer_only_for_the_authenticated_coordinator(flow):
+    bus, client, alice, bob = flow
+    saved = await client.post('/instructions', headers=headers(alice), json={
+        'instruction': 'Corregir', 'confirmed': True, 'agents': [{'agent_id': 'bob', 'provider': 'claude'}],
+    })
+    assigned = await client.post(f"/instructions/{saved.json()['instruction_id']}/assignments",
+                                 headers=headers(alice), json={'agent_id': 'bob', 'role': 'implement', 'title': 'Corregir'})
+    assert assigned.status_code == 200, assigned.text
+    mine = await client.get('/instructions/assignees', headers=headers(alice))
+    assert mine.json() == {'coordinator': 'alice', 'agents': ['bob']}
+    # Naming another coordinator does not reveal (or let bob borrow) alice's assignees.
+    other = await client.get('/instructions/assignees', headers=headers(bob), params={'coordinator': 'alice'})
+    assert other.json() == {'coordinator': 'bob', 'agents': []}

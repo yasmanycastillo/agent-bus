@@ -4,6 +4,7 @@ import subprocess
 import time
 import uuid
 
+import httpx
 import pytest
 
 from agent_bus import panes
@@ -98,6 +99,23 @@ async def test_coordinator_drives_panes_through_mcp(tmux, tmp_path, monkeypatch)
     monkeypatch.setenv("AGENT_BUS_PANES", "1")
     server = McpServer(agent_id="alice")
     server._lock_project_root = tmp_path
+    asked = []
+
+    class Hub:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, path):
+            asked.append(path)
+            return httpx.Response(200, json={"coordinator": "alice", "agents": ["claude-01"]},
+                                  request=httpx.Request("GET", "http://hub" + path))
+
+    monkeypatch.setattr(server, "_client", lambda: Hub())
+    monkeypatch.setattr("agent_bus.worker.client.worker_environment",
+                        lambda agent_id, per_agent: {"AGENT_BUS_AGENT_ID": agent_id})
 
     async with Client(server.sdk_server()) as client:
         async def call(**args):
@@ -118,4 +136,14 @@ async def test_coordinator_drives_panes_through_mcp(tmux, tmp_path, monkeypatch)
         error, body = await call(action="send", name="a")
         assert error and body["code"] == "invalid_arguments"
         assert (await call(action="close", name="a"))[0] is False
+
+        # A pane may only borrow the identity of an agent this coordinator assigned work to.
+        error, body = await call(action="spawn", name="b", preset="claude", as_agent="admin")
+        assert error and body["code"] == "invalid_arguments" and "claude-01" in body["error"]
+        assert asked == ["/instructions/assignees"]
+        assert await call(action="spawn", name="b", preset="claude", as_agent="claude-01") == (
+            False, {"status": "ok", "name": "b"})
+        await call(action="send", name="b", text='echo "id=$AGENT_BUS_AGENT_ID"')
+        wait_for(lambda: "id=claude-01" in panes.screen("b"))
+        await call(action="close", name="b")
         assert (await call(action="list"))[1]["panes"] == []

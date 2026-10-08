@@ -440,3 +440,23 @@ async def test_coordinator_closes_an_implementation_only_with_a_current_approve(
         assert evidence["actor_agent_id"] == "coordinator"
         assert evidence["evidence"] == {"merged_sha": "abc1234", "approved_sha": "b2"}
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_learns_only_the_agents_it_assigned_work_to(tmp_path):
+    db = Database(str(tmp_path / "bus.db"))
+    await db.initialize()
+    bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+    async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        for coordinator, assignee in (("coordinator", "claude-01"), ("other", "agy-01")):
+            saved = await client.post("/instructions", json={
+                "agent_id": coordinator, "instruction": "Corregir", "confirmed": True, "agents": AGENTS,
+            })
+            assigned = await client.post(f"/instructions/{saved.json()['instruction_id']}/assignments", json={
+                "agent_id": assignee, "role": "implement", "title": "Corregir",
+            })
+            assert assigned.status_code == 200, assigned.text
+        # On the roster is not enough: only agents given work count.
+        mine = await client.get("/instructions/assignees", params={"coordinator": "coordinator"})
+        assert mine.json() == {"coordinator": "coordinator", "agents": ["claude-01"]}
+        assert (await client.get("/instructions/assignees")).status_code == 422

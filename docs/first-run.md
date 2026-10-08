@@ -283,7 +283,11 @@ coordinador arranca con `AGENT_BUS_PANES=1` en su entorno (el bloque `env` de la
 entrada `agent-bus` en la configuración MCP del cliente) y requiere `bootstrap_agent`.
 Por MCP no hay argumentos libres del CLI ni directorio: el panel arranca en la raíz
 del proyecto del MCP, así que un agente no puede abrir otro sin preguntas de permiso.
-`as_agent` le da al panel la identidad de una credencial del proyecto.
+`as_agent` le da al panel la identidad de un agente al que ese coordinador asignó
+trabajo con `assign_work` en alguno de sus encargos (`GET /instructions/assignees`,
+que responde siempre por la sesión autenticada); estar en el roster no basta. La
+opción `--agent` de la CLI no tiene esa restricción: la usa quien ya tiene acceso
+local a las credenciales.
 
 `--status` devuelve JSON con `active`, `state` y `can_dispatch`. Comprueba la reserva
 real del ejecutor en el sistema operativo y la actualidad de su estado; un archivo
