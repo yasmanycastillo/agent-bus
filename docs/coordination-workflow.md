@@ -29,7 +29,9 @@ El bootstrap reutiliza la sesión autenticada, registra/actualiza presencia y
 entrega instrucciones, vencimiento, agentes, decisiones recientes, tareas libres
 y pendientes propios. No rota tokens ni cierra otras sesiones. Los listados del
 bootstrap están limitados; `available_task_count` y `agent_count` indican el total.
-`get_project_status` conserva la consulta global de tareas, agentes y locks.
+`get_project_status` conserva la consulta global de tareas, agentes y locks; recorta
+cada descripción a 200 caracteres (`description_truncated`) y con `task_id` devuelve
+esa tarea completa.
 `get_agent_instructions` devuelve las instrucciones sin escribir en el hub.
 
 `my_pending_items` devuelve:

@@ -361,3 +361,39 @@ async def test_legacy_without_any_identity_reports_missing_agent_id(monkeypatch)
     assert result.is_error
     assert payload(result)["code"] == "invalid_arguments"
     assert "agent_id" in payload(result)["error"]
+
+
+def _hub_backend(routes):
+    """Serve fixed JSON per path, as the hub would after authentication."""
+    @asynccontextmanager
+    async def backend():
+        def handler(request):
+            body = routes.get(request.url.path)
+            if isinstance(body, int):
+                return httpx.Response(body, json={"error": "unavailable"})
+            return httpx.Response(200, json=body) if body is not None else httpx.Response(404, json={})
+        async with httpx.AsyncClient(base_url="http://test", transport=httpx.MockTransport(handler)) as client:
+            yield client
+    return backend
+
+
+async def test_project_status_summarizes_long_task_descriptions(bound_server, monkeypatch):
+    long_text = "Encargo completo. " * 200
+    task = {"task_id": "T1", "title": "Implementar", "description": long_text}
+    monkeypatch.setattr(bound_server, "_client", _hub_backend({
+        "/status": {"bus_version": "0.2.1"}, "/locks": [], "/agents": [],
+        "/project/provider-sessions": {"providers": []},
+        "/tasks": [task, {"task_id": "T2", "title": "Corto", "description": "breve"}],
+        "/tasks/T1": task,
+    }))
+    async with Client(bound_server.sdk_server()) as client:
+        status = payload(await client.call_tool("get_project_status", {}))
+        detail = payload(await client.call_tool("get_project_status", {"task_id": "T1"}))
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+    first, second = status["tasks"]
+    assert len(first["description"]) <= 201 and first["description_truncated"] is True
+    assert long_text.startswith(first["description"].rstrip("…"))
+    assert second["description"] == "breve" and "description_truncated" not in second
+    assert detail == {"task": task}
+    assert "task_id" in tools["get_project_status"].input_schema["properties"]
+    assert "task_id" in tools["get_project_status"].description

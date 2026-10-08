@@ -10,6 +10,7 @@ import logging
 import sys
 from typing import Any, Literal
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
@@ -32,6 +33,15 @@ logger = logging.getLogger("agent_bus.mcp")
 SERVER_NAME = "agent-bus"
 SERVER_VERSION = "0.2.1"
 IDENTITY_FIELDS = ("agent_id", "from_agent", "decided_by")
+# assign_work copies the whole instruction into each task; keep the overview small.
+TASK_SUMMARY_CHARS = 200
+
+
+def _summarize_task(task: dict[str, Any]) -> dict[str, Any]:
+    description = task.get("description")
+    if not isinstance(description, str) or len(description) <= TASK_SUMMARY_CHARS:
+        return task
+    return {**task, "description": description[:TASK_SUMMARY_CHARS] + "…", "description_truncated": True}
 
 
 class DecisionToolArguments(BaseModel):
@@ -295,8 +305,15 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "get_project_status",
-        "description": "Obtener el resumen global del estado del bus, tareas y agentes.",
-        "inputSchema": {"type": "object", "properties": {}},
+        "description": (
+            "Obtener el resumen global del estado del bus, tareas y agentes. Las descripciones de "
+            f"tareas se recortan a {TASK_SUMMARY_CHARS} caracteres (description_truncated=true); "
+            "pasa task_id para recibir solo esa tarea con su descripción completa."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "task_id": {"type": "string", "minLength": 1,
+                        "description": "Devuelve solo esta tarea, con la descripción completa."},
+        }},
     },
     {
         "name": "record_decision",
@@ -609,8 +626,10 @@ class McpServer:
                     response.raise_for_status()
                     return response.json()
 
+                if args.get("task_id"):
+                    return {"task": await get_json("/tasks/" + quote(args["task_id"], safe=""))}
                 status = await get_json("/status")
-                tasks = await get_json("/tasks")
+                tasks = [_summarize_task(task) for task in await get_json("/tasks")]
                 locks = await get_json("/locks")
                 agents = await get_json("/agents")
                 try:
