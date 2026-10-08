@@ -33,6 +33,11 @@ la revisión e integración Git son operaciones separadas.
 
 - Ejecuta primero las pruebas del área modificada y luego la suite completa
   antes de integrar código en `main`.
+- Para la suite completa usa `uv run pytest -q -n auto` (pytest-xdist, extra
+  `dev`). Cada prueba usa `tmp_path`, puertos efímeros y su propia
+  configuración, así que no hay pruebas seriales. En una máquina de 12 núcleos
+  tarda 66–103 s frente a 380–790 s en serie; el rango depende de la carga del
+  equipo. `uv run pytest -q` en serie sigue siendo válido.
 - Usa `git diff --check` para detectar errores de espacios.
 - Al editar guías, comprueba sus enlaces locales y los comandos con `--help`.
 - Conserva las distinciones entre pruebas con actores programados, modelos reales
