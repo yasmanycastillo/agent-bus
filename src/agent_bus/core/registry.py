@@ -21,13 +21,15 @@ class AgentRegistry:
         agent = self._agents.get(agent_id)
         if agent:
             agent.last_heartbeat = datetime.now(timezone.utc)
-            if agent.status == AgentStatus.AWAY:
-                agent.status = AgentStatus.ONLINE
+            if agent.status in (AgentStatus.AWAY, AgentStatus.OFFLINE):
+                agent.status = AgentStatus.BUSY if agent.active_work else AgentStatus.ONLINE
 
     async def get(self, agent_id: str) -> AgentInfo | None:
+        await self.check_heartbeats()
         return self._agents.get(agent_id)
 
     async def list_all(self) -> list[AgentInfo]:
+        await self.check_heartbeats()
         return list(self._agents.values())
 
     async def update_status(self, agent_id: str, status: AgentStatus) -> None:
@@ -42,7 +44,11 @@ class AgentRegistry:
             agent.status = AgentStatus.BUSY if work else AgentStatus.ONLINE
 
     async def check_heartbeats(self) -> list[str]:
-        """Check for stale agents. Returns list of agent IDs that went OFFLINE."""
+        """Check for stale agents. Returns list of agent IDs that went OFFLINE.
+
+        Runs on every read, so a worker stopped or crashed without a clean shutdown
+        stops showing busy once its heartbeats lapse; its active work is dropped.
+        """
         now = datetime.now(timezone.utc)
         went_offline: list[str] = []
 
@@ -52,6 +58,7 @@ class AgentRegistry:
                 continue
             if diff > self._heartbeat_miss_threshold * 30:
                 agent.status = AgentStatus.OFFLINE
+                agent.active_work = None
                 went_offline.append(agent_id)
             elif diff > 30:
                 agent.status = AgentStatus.AWAY

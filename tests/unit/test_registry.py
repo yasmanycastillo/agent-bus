@@ -93,3 +93,16 @@ async def test_heartbeat_detection_away(registry: AgentRegistry):
     result = await registry.get("claude")
     assert result is not None
     assert result.status == AgentStatus.AWAY
+
+
+async def test_stale_agent_is_listed_offline_without_active_work(registry: AgentRegistry):
+    # A stopped or crashed worker sends no more heartbeats; its work must not stay busy.
+    await registry.register(AgentInfo(agent_id="codex", display_name="Codex"))
+    await registry.update_active_work("codex", {"message_id": "m1"})
+    (await registry.get("codex")).last_heartbeat = datetime.now(timezone.utc) - timedelta(minutes=5)
+    [agent] = await registry.list_all()
+    assert agent.status == AgentStatus.OFFLINE
+    assert agent.active_work is None
+    await registry.heartbeat("codex")
+    assert (await registry.get("codex")).status == AgentStatus.ONLINE
+
