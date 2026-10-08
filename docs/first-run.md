@@ -272,10 +272,23 @@ Un agente que termina queda `dead` hasta `close`.
 Con `--agent` el panel recibe las variables `AGENT_BUS_*` de esa credencial, como un
 worker. El panel no hereda las variables `CLAUDE*` de quien lo abre (sesión, socket y
 token de un Claude Code coordinador); Claude vuelve a aplicar el `env` de su
-`settings.json`. Como solo escribe el coordinador y el prototipo aún no navega los menús
-de permiso, evítalos con los argumentos de permisos del CLI tras `--` y confía antes en
-la carpeta del proyecto; un panel `blocked` lo resuelve el usuario con `tmux -L agent-bus
-attach` (sin `-r`).
+`settings.json`.
+
+Un panel `blocked` espera una pregunta de confianza o permiso, y la responde una persona:
+
+```sh
+agent-bus panes answer impl-1        # muestra el comando y las opciones
+agent-bus panes answer impl-1 4      # elige la opción 4 tras confirmar
+```
+
+`answer` con opción exige una terminal interactiva y confirmación, así que un agente
+(sin TTY en su Bash) puede leer la pregunta pero no aprobarla; no hay versión MCP.
+Muestra el comando en los menús de agy; en los de Claude Code solo las opciones.
+Alternativa: `tmux -L agent-bus attach -t agents` (sin `-r`) y responder en el panel.
+
+Las reglas `permissions.allow` de agy (`command(git status)`) revisan cada parte de un
+comando compuesto (`a; b` pide permiso para `b`), pero no las redirecciones: un comando
+permitido puede escribir archivos con `>`. Ten en cuenta eso al permitir comandos.
 
 La consola web (`/console`) muestra los mismos paneles en *Agentes en vivo*: nombre,
 preset, estado y las últimas 50 líneas de pantalla, actualizadas cada 2 s y sin

@@ -89,6 +89,35 @@ def screen(name: str, lines: int) -> None:
     click.echo(_run(backend.screen, name, lines))
 
 
+@panes.command("answer")
+@click.argument("name")
+@click.argument("option", type=int, required=False)
+def answer(name: str, option: int | None) -> None:
+    """Responder la pregunta de permiso del panel NAME (sin OPTION, solo la muestra).
+
+    Es para personas: exige una terminal interactiva y confirmación, de modo que un
+    agente no apruebe los comandos de otro.
+    """
+    asked = _run(backend.question, name)
+    if asked is None:
+        raise click.ClickException(f"el panel '{name}' no muestra una pregunta")
+    if asked["command"]:
+        click.echo(f"Comando:\n{asked['command']}\n")
+    for item in asked["options"]:
+        mark = ">" if item["number"] == asked["selected"] else " "
+        click.echo(f"{mark} {item['number']}. {item['label']}")
+    if option is None:
+        return
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise click.ClickException("answer requiere una terminal interactiva: lo responde una persona")
+    label = next((i["label"] for i in asked["options"] if i["number"] == option), None)
+    if label is None:
+        raise click.UsageError(f"no hay opción {option}")
+    click.confirm(f"¿Elegir {option}. {label} en '{name}'?", abort=True)
+    _run(backend.answer, name, option)
+    click.echo(f"Respondido: {option}. {label}")
+
+
 @panes.command("view")
 def view() -> None:
     """Ver los paneles en solo lectura (desconectar: prefijo + d)."""

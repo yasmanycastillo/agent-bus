@@ -182,3 +182,63 @@ async def test_console_shows_each_pane_screen_read_only(tmux, tmp_path):
 def test_agy_states_from_its_footer(monkeypatch, footer, expected):
     monkeypatch.setattr(panes, "screen", lambda name, lines=panes.SCREEN_LINES: footer)
     assert panes.state("x", "agy") == expected
+
+
+AGY_PERMISSION = """\
+● Ran (git status --short; touch /tmp/x) (ctrl+o to expand)
+Command
+Requesting permission for:
+   git status --short; touch /tmp/x
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with
+'touch'
+  3. Yes, and always allow for commands that start with 'touch' (Persist to
+settings.json)
+  4. No, cancel
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+esc to cancel"""
+
+
+def test_question_reads_the_menu_and_ignores_numbered_transcript(monkeypatch):
+    monkeypatch.setattr(panes, "screen", lambda name, lines=0: AGY_PERMISSION)
+    asked = panes.question("x")
+    assert asked["command"] == "   git status --short; touch /tmp/x"
+    assert [o["number"] for o in asked["options"]] == [1, 2, 3, 4] and asked["selected"] == 1
+    assert asked["options"][3]["label"] == "No, cancel"
+    monkeypatch.setattr(panes, "screen", lambda name, lines=0: "Pasos:\n  1. Instala\n  2. Arranca\n>")
+    assert panes.question("x") is None
+    monkeypatch.setattr(panes, "screen", lambda name, lines=0: "Do you want to proceed?\n❯ 1. Yes\n  2. No")
+    assert panes.question("x") == {"command": None, "selected": 1,
+                                   "options": [{"number": 1, "label": "Yes"}, {"number": 2, "label": "No"}]}
+
+
+def test_answer_moves_the_cursor_then_confirms(monkeypatch):
+    sent = []
+    monkeypatch.setattr(panes, "list_panes", lambda: [{"name": "x", "preset": "agy", "state": "blocked"}])
+    monkeypatch.setattr(panes, "screen", lambda name, lines=0: AGY_PERMISSION)
+    monkeypatch.setattr(panes, "_tmux", lambda *args, **kw: sent.append(args) or "")
+    panes.answer("x", 4)
+    assert sent == [("send-keys", "-t", "agents:=x", "-N", "3", "Down"), ("send-keys", "-t", "agents:=x", "Enter")]
+    with pytest.raises(panes.PaneError, match="no option 9"):
+        panes.answer("x", 9)
+    monkeypatch.setattr(panes, "list_panes", lambda: [{"name": "x", "preset": "agy", "state": "working"}])
+    with pytest.raises(panes.PaneError, match="not waiting"):
+        panes.answer("x", 1)
+
+
+def test_cli_answer_is_for_people_only(monkeypatch):
+    from click.testing import CliRunner
+
+    from agent_bus.cli.panes_cmds import panes as panes_cli
+
+    monkeypatch.setattr(panes, "question", lambda name: {
+        "command": "touch /tmp/x", "selected": 1,
+        "options": [{"number": 1, "label": "Yes, run command"}, {"number": 2, "label": "No, cancel"}]})
+    answered = []
+    monkeypatch.setattr(panes, "answer", lambda name, n: answered.append(n))
+    shown = CliRunner().invoke(panes_cli, ["answer", "x"])
+    assert shown.exit_code == 0 and "touch /tmp/x" in shown.output and "> 1. Yes, run command" in shown.output
+    # An agent's Bash has no terminal: it can read the question but never approve it.
+    refused = CliRunner().invoke(panes_cli, ["answer", "x", "1"], input="y\n")
+    assert refused.exit_code != 0 and "terminal interactiva" in refused.output and not answered

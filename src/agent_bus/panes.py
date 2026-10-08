@@ -11,7 +11,7 @@ import re
 import subprocess
 import time
 import uuid
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 # A dedicated socket keeps these panes out of the user's own tmux server.
 TMUX = ["tmux", "-L", "agent-bus"]
@@ -166,6 +166,43 @@ def send(name: str, text: str, *, force: bool = False) -> None:
     _tmux("paste-buffer", "-p", "-d", "-b", buffer, "-t", _target(name))
     # ponytail: fixed settle delay; TUIs that read the paste slowly take Enter as a newline.
     time.sleep(0.3)
+    _tmux("send-keys", "-t", _target(name), "Enter")
+
+
+# A menu option line: "> 1. Yes, run command" (agy) or "❯ 1. Yes" (Claude Code).
+OPTION = re.compile(r"^\s*([>❯])?\s*(\d+)\.\s+(\S.*)$")
+
+
+def question(name: str) -> dict[str, Any] | None:
+    """The menu a blocked pane shows: its options, the selected one and, for agy, the command.
+
+    A numbered list in the transcript is not a menu: one option must carry the cursor.
+    """
+    lines = screen(name, 40).splitlines()
+    found = [m for m in map(OPTION.match, lines) if m]
+    if not any(m.group(1) for m in found):
+        return None
+    command = None
+    if "Requesting permission for:" in lines and "Run this command?" in lines:
+        start, end = lines.index("Requesting permission for:"), lines.index("Run this command?")
+        command = "\n".join(line.rstrip() for line in lines[start + 1:end] if line.strip())
+    return {"command": command,
+            "options": [{"number": int(m.group(2)), "label": m.group(3).strip()} for m in found],
+            "selected": next((int(m.group(2)) for m in found if m.group(1)), None)}
+
+
+def answer(name: str, number: int) -> None:
+    """Move the menu cursor to option NUMBER and confirm it."""
+    pane = next((p for p in list_panes() if p["name"] == name), None)
+    if pane is None or pane["state"] != "blocked":
+        raise PaneError(f"pane '{name}' is not waiting on a question")
+    asked = question(name)
+    numbers = [o["number"] for o in asked["options"]] if asked else []
+    if asked is None or asked["selected"] is None or number not in numbers:
+        raise PaneError(f"pane '{name}' has no option {number}: {numbers}")
+    moves = number - asked["selected"]
+    if moves:
+        _tmux("send-keys", "-t", _target(name), "-N", str(abs(moves)), "Down" if moves > 0 else "Up")
     _tmux("send-keys", "-t", _target(name), "Enter")
 
 
