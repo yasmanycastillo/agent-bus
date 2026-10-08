@@ -33,8 +33,9 @@ IDENTITY_ENV = frozenset({"AGENT_BUS_AGENT_ID", "AGENT_BUS_SESSION_FILE", "AGENT
 # the agent CLIs read their own login from files under HOME.
 BASE_ENV = frozenset({"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE",
                       "LC_MESSAGES", "TERM", "COLORTERM", "TMPDIR", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
-                      "XDG_DATA_HOME", "XDG_CACHE_HOME", "SSH_AUTH_SOCK", "DISPLAY", "WAYLAND_DISPLAY",
+                      "XDG_DATA_HOME", "XDG_CACHE_HOME", "DISPLAY", "WAYLAND_DISPLAY",
                       "DBUS_SESSION_BUS_ADDRESS"})
+# SSH_AUTH_SOCK is left out on purpose: it would let an agent use the user's SSH keys.
 # C0/C1 controls except tab and newline: an ESC[201~ would end the bracketed paste early and
 # turn the rest of a message into real keystrokes in the agent's TUI.
 CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
@@ -52,7 +53,7 @@ class Preset(NamedTuple):
 # to confirm or navigate a menu.
 PRESETS = {
     # Only the spinner glyphs: a reply line "● Revisando…" is not a running turn.
-    "claude": Preset("claude", None, r"^[·✢✳✶✻✽*] \S+…|esc to interrupt",
+    "claude": Preset("claude", None, r"^[·✢✳✶✻✽] \S+…|esc to interrupt",
                      r"Enter to confirm|Do you want to proceed\?"),
     # agy permission menus also show "esc to cancel", so blocked is checked first.
     "agy": Preset("agy", "-i", r"esc to cancel", r"enter Confirm|↑/↓ Navigate|^Run this command\?"),
@@ -130,16 +131,35 @@ def _windows(session: str, fields: str) -> list[list[str]]:
     return [line.split("\t") for line in out.splitlines()]
 
 
-def list_panes() -> list[dict[str, str]]:
-    """Panes with their state and watcher: 'running', 'stopped' (exited; see its window) or 'none'."""
+def list_panes(screen_lines: int | None = None) -> list[dict[str, str]]:
+    """Panes with their state and watcher: 'running', 'stopped' (exited; see its window) or 'none'.
+
+    With screen_lines each pane also carries its last screen_lines lines, captured once and
+    used for its state as well. A pane closed between listing and capture is left out.
+    """
     watchers = {name: "stopped" if dead == "1" else "running"
                 for name, dead in _windows(WATCHERS, "#{window_name}\t#{pane_dead}")}
-    return [{"name": name, "preset": preset, "state": "dead" if dead == "1" else state(name, preset),
-             "watcher": watchers.get(name, "none")}
-            for name, preset, dead in _windows(SESSION, "#{window_name}\t#{@agent_bus_preset}\t#{pane_dead}")]
+    items = []
+    for name, preset, dead in _windows(SESSION, "#{window_name}\t#{@agent_bus_preset}\t#{pane_dead}"):
+        item = {"name": name, "preset": preset, "watcher": watchers.get(name, "none")}
+        try:
+            text = screen(name, max(screen_lines or 0, SCREEN_LINES)) if screen_lines or dead != "1" else ""
+        except PaneError:
+            continue  # closed between list and capture
+        item["state"] = "dead" if dead == "1" else state_of(preset, text)
+        if screen_lines:
+            item["screen"] = "\n".join(text.splitlines()[-screen_lines:])
+        items.append(item)
+    return items
 
 
 def _open_window(session: str, name: str, cwd: str, command: list[str], *options: str) -> None:
+    # tmux ends a command at an argument ending in ';', and expands '#' formats such as
+    # #(cmd) in -c: refuse both instead of trusting how they would be read.
+    if any(arg.endswith(";") for arg in command):
+        raise PaneError("an argument ending in ';' would split the tmux command")
+    if "#" in cwd:
+        raise PaneError("a working directory containing '#' is not supported")
     where = ["-n", name, "-c", cwd]
     if _tmux_ok("has-session", "-t", f"={session}"):
         create = ["new-window", "-d", "-t", f"={session}:", *where, "--", *command]
@@ -199,10 +219,15 @@ def screen(name: str, lines: int = SCREEN_LINES) -> str:
 
 def state(name: str, preset: str) -> str:
     """'blocked', 'working' or 'idle' from the footer; transcript above it is ignored."""
+    return state_of(preset, screen(name)) if preset in PRESETS else "unknown"
+
+
+def state_of(preset: str, text: str) -> str:
+    """The state of an already captured screen; only its last SCREEN_LINES lines count."""
     spec = PRESETS.get(preset)
     if spec is None:
         return "unknown"
-    footer = screen(name)
+    footer = "\n".join(text.splitlines()[-SCREEN_LINES:])
     if re.search(spec.blocked, footer, re.MULTILINE):
         return "blocked"
     if re.search(spec.working, footer, re.MULTILINE):

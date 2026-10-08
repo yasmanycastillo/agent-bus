@@ -313,9 +313,39 @@ def test_missing_tmux_means_no_panes_not_an_error(monkeypatch):
     ("· Meandering…\n❯ ", "working"),
     ("● 1 2 3 4 5\n✻ Cooked for 9s · done 11:47 AM\n❯ \n  ⏵⏵ accept edits on", "idle"),
     ("● Revisando…\n❯ ", "idle"),  # a reply line, not the spinner
+    ("* Revisando…\n❯ ", "idle"),  # a markdown bullet in the reply, not the spinner
     (" Claude Code'll be able to read, edit, and execute files here.\n ❯ No, exit\n"
      " Enter to confirm · Esc to cancel", "blocked"),
 ])
 def test_claude_states_from_its_footer(monkeypatch, footer, expected):
     monkeypatch.setattr(panes, "screen", lambda name, lines=panes.SCREEN_LINES: footer)
     assert panes.state("x", "claude") == expected
+
+
+def test_tmux_command_separators_and_formats_are_refused(monkeypatch):
+    monkeypatch.setattr(panes, "_tmux", lambda *args, **kwargs: "")
+    with pytest.raises(panes.PaneError, match="';'"):
+        panes.spawn("x", "claude", model="sonnet;")
+    with pytest.raises(panes.PaneError, match="';'"):
+        panes.spawn("y", "claude", prompt="haz esto;")
+    with pytest.raises(panes.PaneError, match="'#'"):
+        panes.spawn("z", "claude", cwd="/tmp/a#(id)b")
+
+
+def test_panes_do_not_inherit_the_ssh_agent():
+    assert "SSH_AUTH_SOCK" not in panes.BASE_ENV
+
+
+def test_console_listing_captures_each_screen_once(monkeypatch):
+    captures = []
+
+    def fake_tmux(*args, **kwargs):
+        if args[0] == "list-windows":
+            return "a\tclaude\t0\n" if "agents" in args[2] else ""
+        captures.append(args)
+        return "respuesta\n✶ Meandering…\n❯ \n"
+
+    monkeypatch.setattr(panes, "_tmux", fake_tmux)
+    [pane] = panes.list_panes(50)
+    assert pane["state"] == "working" and "Meandering" in pane["screen"]
+    assert len(captures) == 1

@@ -1453,16 +1453,8 @@ class MessageBus:
 
             panes.use_project(self.project_id)
 
-            def snapshot() -> list[dict[str, str]]:
-                items = []
-                for pane in panes.list_panes():
-                    try:
-                        screen = panes.screen(pane["name"], 50)
-                    except panes.PaneError:
-                        continue  # closed between list and capture
-                    items.append({**pane, "screen": screen})
-                return items
-            return {"panes": await asyncio.to_thread(snapshot)}
+            # One capture per pane gives both its screen and its state.
+            return {"panes": await asyncio.to_thread(panes.list_panes, 50)}
 
         @self.app.get("/room/api/usage")
         async def room_usage():

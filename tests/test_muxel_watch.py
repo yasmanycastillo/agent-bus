@@ -155,6 +155,8 @@ async def test_reply_to_someone_elses_prompt_is_not_delivered(hub, monkeypatch, 
 @pytest.mark.parametrize('footer', [
     '• Working (1m 07s • esc to interrupt)',  # Codex
     '✻ Cogitating… (12s · ↑ 1.2k tokens · esc to interrupt)',  # Claude Code
+    '✶ Meandering…',  # Claude Code 2.1: no "esc to interrupt" any more
+    '  esc to cancel',  # agy
     '⠋ Thinking…',  # Grok
     'grok-4.6 · [stop]',  # Grok
 ])

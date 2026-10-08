@@ -272,10 +272,13 @@ Un agente que termina queda `dead` hasta `close`.
 
 Con `--agent` el panel recibe las variables `AGENT_BUS_*` de esa credencial, como un
 worker. Del resto del entorno solo hereda una lista permitida (`PATH`, `HOME`, `USER`,
-`SHELL`, `TERM`, idioma, `XDG_*`, `SSH_AUTH_SOCK`, `DISPLAY`…): ni claves como
+`SHELL`, `TERM`, idioma, `XDG_*`, `DISPLAY`…): ni claves como
 `ANTHROPIC_API_KEY` o `GITHUB_TOKEN`, ni la sesión de un Claude Code coordinador
-(`CLAUDE*`). Los CLIs leen su login de archivos bajo `HOME`, y Claude vuelve a aplicar
-el `env` de su `settings.json`.
+(`CLAUDE*`), ni `SSH_AUTH_SOCK`, que daría al agente tus claves SSH. Los CLIs leen su
+login de archivos bajo `HOME`, y Claude vuelve a aplicar el `env` de su `settings.json`.
+
+`spawn` rechaza argumentos que terminen en `;` (tmux los toma como fin de comando) y
+directorios de trabajo con `#` (tmux expande formatos como `#(cmd)` en ellos).
 
 `send` quita los caracteres de control (salvo tabulador y salto de línea) antes de
 pegar: un `ESC[201~` en un mensaje cerraría el pegado y el resto llegaría como teclas.

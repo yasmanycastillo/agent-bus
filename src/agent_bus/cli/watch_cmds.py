@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import logging
 import hashlib
 import time
@@ -142,8 +143,22 @@ MUXEL_WAIT_SECONDS = 540
 #   "[stop]"            Grok stop button
 # Only the last MUXEL_SCREEN_LINES lines are scanned so that transcript text scrolled
 # above the footer (an earlier reply quoting a marker) does not count.
+# Claude Code 2.1 no longer prints "esc to interrupt": its spinner line ("✶ Verbo…") and
+# agy's "esc to cancel" are matched with the same patterns agent-bus panes use.
 MUXEL_WORKING_MARKERS = ("esc to interrupt", "Thinking…", "[stop]")
 MUXEL_SCREEN_LINES = 12
+
+
+def _muxel_working_marker(footer: str) -> str | None:
+    from agent_bus.panes import PRESETS
+    marker = next((m for m in MUXEL_WORKING_MARKERS if m in footer), None)
+    if marker:
+        return marker
+    for preset in PRESETS.values():
+        found = re.search(preset.working, footer, re.MULTILINE)
+        if found:
+            return found.group(0)
+    return None
 
 
 async def _muxel_ctl(binary: str, args: list[str], agent_id: str, bus_url: str | None,
@@ -185,7 +200,7 @@ async def _ensure_muxel_idle(binary: str, target: str, info: dict, agent_id: str
     text = screen.get("text")
     if isinstance(text, str):
         footer = "\n".join(text.splitlines()[-MUXEL_SCREEN_LINES:])
-        marker = next((m for m in MUXEL_WORKING_MARKERS if m in footer), None)
+        marker = _muxel_working_marker(footer)
         if marker:
             raise AgentBusy(f"muxel agent '{target}' screen shows {marker!r}")
 

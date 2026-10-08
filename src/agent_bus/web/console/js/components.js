@@ -327,8 +327,11 @@
         .then(data => { if (alive) { setPanes(data.panes); setError(""); } })
         .catch(err => { if (alive && err.name !== "AbortError") setError(err.error || "No se pudieron leer los paneles"); });
       load();
-      const timer = setInterval(load, 2000);
-      return () => { alive = false; clearInterval(timer); };
+      // A hidden tab stops asking: each request captures every pane's screen.
+      const timer = setInterval(() => { if (!document.hidden) load(); }, 2000);
+      const onVisible = () => { if (!document.hidden) load(); };
+      document.addEventListener("visibilitychange", onVisible);
+      return () => { alive = false; clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
     }, []);
     return html`
       <section className="card"><h2>Agentes en vivo</h2>
