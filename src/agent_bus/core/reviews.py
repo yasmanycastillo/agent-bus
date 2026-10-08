@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from agent_bus.core.tasks import REVIEW_WAIT
 from agent_bus.reputation.database import Database
 from agent_bus.worker.gatekeeper import ReviewDecision, Verdict
 
@@ -20,14 +21,22 @@ class ReviewLog:
 
     async def record_task_verdict(
         self, task_id: str, reviewer: str, sha: str | None, verdict: str, reason: str = "",
+        implementation_task_id: str | None = None,
     ) -> ReviewDecision:
+        """Judge one implementation's latest candidate; the decision names it in evidence.
+
+        With several implementations the caller must pick one by implementation_task_id
+        or sha. An assigned review that requested changes is held until the new handoff.
+        """
         rows = await self._db.conn.execute_fetchall(
-            "SELECT owner, independent_from FROM tasks WHERE task_id = ?", (task_id,),
+            "SELECT owner, independent_from, status, blocked_reason FROM tasks WHERE task_id = ?", (task_id,),
         )
         if not rows:
             raise VerdictError("Task not found", 404)
         if rows[0]["owner"] != reviewer:
             raise VerdictError("only the review task owner can record the verdict")
+        if rows[0]["status"] == "blocked" and rows[0]["blocked_reason"] == REVIEW_WAIT:
+            raise VerdictError("review is waiting for the implementations to be handed off again")
         raw = rows[0]["independent_from"] or "[]"
         independent = json.loads(raw) if isinstance(raw, str) else list(raw or [])
         if not independent:
@@ -38,22 +47,44 @@ class ReviewLog:
             )
             if dependency and dependency[0]["owner"] == reviewer:
                 raise VerdictError("the implementer cannot record the independent review")
-        placeholders = ",".join("?" * len(independent))
-        attempts = await self._db.conn.execute_fetchall(
-            f"""SELECT candidate_sha FROM runtime_attempts
-                WHERE task_id IN ({placeholders}) AND state = 'completed' AND candidate_sha IS NOT NULL
-                ORDER BY updated_at DESC LIMIT 1""",
-            tuple(independent),
-        )
-        if not attempts:
-            raise VerdictError("implementation attempt is missing")
-        candidate = attempts[0]["candidate_sha"]
-        if sha and sha != candidate:
-            raise VerdictError("sha does not match the implementation candidate")
+        if implementation_task_id is not None:
+            if implementation_task_id not in independent:
+                raise VerdictError(
+                    f"{implementation_task_id} is not under this review; implementations: {', '.join(independent)}"
+                )
+            independent = [implementation_task_id]
+        candidates = {item: await self._candidate(item) for item in independent}
+        listing = ", ".join(f"{item} ({candidate or 'no candidate_sha delivered'})"
+                            for item, candidate in candidates.items())
+        if sha:
+            chosen = next((item for item, candidate in candidates.items() if candidate == sha), None)
+            if chosen is None:
+                raise VerdictError(f"sha does not match the implementation candidate; candidates: {listing}")
+        elif len(candidates) > 1:
+            raise VerdictError(
+                f"review covers several implementations; pass implementation_task_id or sha: {listing}"
+            )
+        else:
+            chosen = independent[0]
+            if candidates[chosen] is None:
+                raise VerdictError(
+                    "implementation attempt is missing: the implementer must hand off with candidate_sha"
+                )
         return await self.add(ReviewDecision(
-            task_id=task_id, sha=candidate, verdict=Verdict(verdict), reason=reason or verdict,
+            task_id=task_id, sha=candidates[chosen], verdict=Verdict(verdict), reason=reason or verdict,
             reviewer_agent_id=reviewer, reviewer_session_id="",
+            evidence={"implementation_task_id": chosen},
         ))
+
+    async def _candidate(self, implementation_id: str) -> str | None:
+        """Latest completed candidate SHA of one implementation."""
+        rows = await self._db.conn.execute_fetchall(
+            """SELECT candidate_sha FROM runtime_attempts
+               WHERE task_id = ? AND state = 'completed' AND candidate_sha IS NOT NULL
+               ORDER BY updated_at DESC LIMIT 1""",
+            (implementation_id,),
+        )
+        return rows[0]["candidate_sha"] if rows else None
 
     async def add(self, review: ReviewDecision) -> ReviewDecision:
         evidence_json = json.dumps(review.evidence)

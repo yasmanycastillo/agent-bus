@@ -222,3 +222,6 @@ async def test_assigned_reviewer_records_the_verdict(tmp_path, monkeypatch):
     assert tool["inputSchema"]["required"] == ["task_id", "verdict"]
     assert "agent_id" in tool["inputSchema"]["properties"]
     assert "dueño de la tarea de review" in tool["description"]
+    assert "implementation_task_id" in tool["inputSchema"]["properties"]
+    handoff = next(item for item in server.tools if item["name"] == "complete_handoff")
+    assert "candidate_sha" in handoff["inputSchema"]["properties"]

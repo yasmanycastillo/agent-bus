@@ -30,7 +30,7 @@ DESCRIPTIONS = {
     "bootstrap_agent": "Entrar al proyecto. Pasa project_path del proyecto que coordinas. La credencial se crea allí. No la crees en el directorio de agent-bus.",
     "my_pending_items": "Consultar mensajes y tareas propios sin confirmar. Pagina con next_cursor y next_task_offset.",
     "prepare_edit": "Reservar todos los archivos o ninguno. Conserva operation_key, acquisition_id y expires_at; reintentar no renueva locks.",
-    "complete_handoff": "Entregar tarea, evidencia declarada, ACK y liberaciones en una transacción. in_review por defecto; conserva operation_key al reintentar.",
+    "complete_handoff": "Entregar tarea, evidencia declarada, ACK y liberaciones en una transacción. in_review por defecto; conserva operation_key al reintentar. Si entregas código, pasa candidate_sha (SHA completo de tu commit): la revisión lo necesita.",
     "get_agent_instructions": "Obtener el protocolo de coordinación sin crear sesión ni cambiar estado.",
 }
 TOOLS = [{"name": name, "description": DESCRIPTIONS[name], "inputSchema": model.model_json_schema()}
@@ -42,7 +42,7 @@ TOOL_GUIDANCE = {
     "get_agent_instructions": "Requiere sesión provisionada. Para incorporarte al proyecto, continúa con bootstrap_agent({}).",
     "my_pending_items": "Empieza con bootstrap_agent. Después procesa pendientes y usa ack_messages o reply_message según corresponda.",
     "prepare_edit": "Antes: bootstrap_agent y una tarea propia. Edita sólo tras authorized=true; después renueva con renew_lock o entrega con complete_handoff.",
-    "complete_handoff": "Antes: bootstrap_agent, tarea propia y tokens vigentes de los locks que liberas. Adjunta evidencia real; después consulta pendientes o espera respuesta.",
+    "complete_handoff": "Antes: bootstrap_agent, tarea propia y tokens vigentes de los locks que liberas. Adjunta evidencia real y candidate_sha de tu commit; después consulta pendientes o espera respuesta.",
     "wait_for_updates": "Antes: bootstrap_agent y my_pending_items. Conserva event_cursor; al recibir trabajo, procésalo antes de confirmar.",
     "post_message": "Antes: bootstrap_agent. Conserva destinatario, contenido e idempotency_key al reintentar; si pides respuesta, continúa con wait_for_updates.",
     "read_messages": "Para entrar al proyecto usa bootstrap_agent. Lee todas las páginas; después confirma sólo lo procesado con ack_messages.",
@@ -60,7 +60,7 @@ TOOL_GUIDANCE = {
     "renew_lock": "Requiere el token vigente de la misma sesión. Si vence o falla la renovación, detén la edición y consulta get_project_status antes de adquirir de nuevo.",
     "get_project_status": "Para incorporarte al proyecto usa primero bootstrap_agent. Después selecciona una tarea disponible o consulta tus pendientes con my_pending_items.",
     "record_decision": "Antes: bootstrap_agent y revisión de decisiones recientes. Registra sólo un acuerdo alcanzado; después comunica el resultado si corresponde.",
-    "record_verdict": "Sólo el dueño de la tarea de review. Sin SHA usa el último intento de implementación. approve autoriza la integración. changes_requested reabre la implementación y deja la integración pendiente.",
+    "record_verdict": "Sólo el dueño de la tarea de review. Juzga el último candidate_sha de una implementación; si la review cubre varias, indica implementation_task_id o sha (sin ellos el error lista las candidatas). approve autoriza la integración de ese SHA. changes_requested reabre sólo esa implementación y la review espera su nueva entrega.",
     "submit_instruction": "Sólo tras la confirmación del humano. confirmed=true. Agentes reales: hermes, grok, claude, codex o agy. No uses un subagente ni empieces el trabajo aquí.",
     "assign_work": "Entrega una parte del encargo confirmado a uno de esos agentes. Quien revisa no puede ser quien implementa. No la reclames tú ni se la des a un subagente.",
 }

@@ -263,3 +263,64 @@ async def test_pending_transaction_not_committed_and_expired_session_not_replaye
     assert (await prepare(client, alice)).status_code == 200
     bus.locks._clock = lambda: alice['expires_at'] + 1
     assert (await prepare(client, alice)).status_code == 401
+
+
+async def test_handoff_rejects_a_malformed_candidate_sha(flow):
+    bus, client, alice, bob = flow
+    await make_task(bus)
+    assert (await handoff(client, alice, candidate_sha='abc123')).status_code == 422
+    assert (await handoff(client, alice, candidate_sha='a' * 40, task_status='blocked')).status_code == 422
+    assert (await bus.tasks.get('T1')).status.value == 'in_progress'
+    assert not await bus.db.conn.execute_fetchall('SELECT * FROM runtime_attempts')
+
+
+async def test_review_of_two_mcp_handoffs_records_a_verdict_per_implementation(flow):
+    from agent_bus.core.instructions import InstructionLog, assign_work
+    bus, client, alice, bob = flow
+    carol = await bus.sessions.create('carol')
+    log = InstructionLog(bus.db)
+    await log.ensure_schema()
+    instruction = await log.submit('coordinator', 'Ship it', True, [
+        {'agent_id': 'alice', 'provider': 'codex'}, {'agent_id': 'carol', 'provider': 'grok'},
+        {'agent_id': 'bob', 'provider': 'claude'},
+    ])
+    review = (await assign_work(bus, instruction['instruction_id'], 'bob', 'review', 'Review'))['task_id']
+    backend = (await assign_work(bus, instruction['instruction_id'], 'alice', 'implement', 'Backend'))['task_id']
+    frontend = (await assign_work(bus, instruction['instruction_id'], 'carol', 'implement', 'Frontend'))['task_id']
+    first, second, revised = 'a' * 40, 'c' * 40, 'd' * 40
+    assert (await handoff(client, alice, task_id=backend, candidate_sha=first)).status_code == 200
+    delivered = await handoff(client, carol, task_id=frontend, candidate_sha=second)
+    assert delivered.status_code == 200, delivered.text
+    assert (await bus.inbox.get_inbox('bob'))[-1].body['candidate_sha'] == second
+    assert (await bus.tasks.get(review)).status.value == 'in_progress'
+
+    async def verdict(name, **extra):
+        return await client.post(f'/tasks/{review}/verdict', headers=headers(bob),
+                                 json={'verdict': name, 'reason': 'checked', **extra})
+
+    ambiguous = await verdict('approve')
+    assert ambiguous.status_code == 409
+    for expected in (backend, frontend, first, second):
+        assert expected in ambiguous.json()['error']
+    assert (await verdict('approve', implementation_task_id='other')).status_code == 409
+    approved = await verdict('approve', implementation_task_id=backend)
+    assert approved.status_code == 200, approved.text
+    assert approved.json()['sha'] == first
+    assert approved.json()['evidence']['implementation_task_id'] == backend
+
+    rejected = await verdict('changes_requested', sha=second)
+    assert rejected.status_code == 200, rejected.text
+    assert (await bus.tasks.get(backend)).status.value == 'in_review'
+    reopened = await bus.tasks.get(frontend)
+    assert reopened.status.value == 'pending' and reopened.owner == 'free'
+    assert (await bus.tasks.get(review)).status.value == 'blocked'
+    assert (await verdict('approve', implementation_task_id=frontend)).status_code == 409
+
+    assert await bus.tasks.claim(frontend, 'carol')
+    redelivered = await handoff(client, carol, task_id=frontend, candidate_sha=revised, operation_key='again')
+    assert redelivered.status_code == 200, redelivered.text
+    assert (await bus.tasks.get(review)).status.value == 'in_progress'
+    assert (await verdict('approve', sha=second)).status_code == 409
+    final = await verdict('approve', implementation_task_id=frontend)
+    assert final.status_code == 200, final.text
+    assert final.json()['sha'] == revised

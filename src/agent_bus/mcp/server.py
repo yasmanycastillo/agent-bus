@@ -246,13 +246,20 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "record_verdict",
-        "description": "Registrar approve o changes_requested sobre el SHA del intento de implementación.",
+        "description": (
+            "Registrar approve o changes_requested sobre una implementación de la review: usa el "
+            "candidate_sha que entregó con complete_handoff. Si la review cubre varias, indica "
+            "implementation_task_id o sha; changes_requested reabre sólo esa."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "task_id": {"type": "string"},
+                "task_id": {"type": "string", "description": "Tarea de review"},
                 "verdict": {"type": "string", "enum": ["approve", "changes_requested"]},
-                "sha": {"type": "string"},
+                "implementation_task_id": {
+                    "type": "string", "description": "Implementación juzgada; obligatoria si hay varias y no pasas sha",
+                },
+                "sha": {"type": "string", "description": "candidate_sha entregado por la implementación"},
                 "reason": {"type": "string"},
                 "agent_id": {"type": "string"},
             },
@@ -560,8 +567,9 @@ class McpServer:
                     "verdict": args["verdict"],
                     "reason": args.get("reason") or "",
                 }
-                if args.get("sha"):
-                    payload["sha"] = args["sha"]
+                for key in ("sha", "implementation_task_id"):
+                    if args.get(key):
+                        payload[key] = args[key]
                 resp = await client.post(f"/tasks/{args['task_id']}/verdict", json=payload)
                 resp.raise_for_status()
                 return resp.json()

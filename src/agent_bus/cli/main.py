@@ -567,11 +567,15 @@ def work_reassign(task_id: str, new_owner: str):
 @click.option("--verdict", type=click.Choice(["approve", "changes_requested"]), required=True)
 @click.option("--sha", default=None)
 @click.option("--reason", default="")
-def work_verdict(task_id: str, verdict: str, sha: str | None, reason: str):
+@click.option("--implementation", "implementation_task_id", default=None,
+              help="Tarea de implementación juzgada, si la review cubre varias.")
+def work_verdict(task_id: str, verdict: str, sha: str | None, reason: str, implementation_task_id: str | None):
     """Registrar el veredicto del dueño de la tarea de review."""
     payload = {"agent_id": _require_agent(), "verdict": verdict, "reason": reason}
     if sha:
         payload["sha"] = sha
+    if implementation_task_id:
+        payload["implementation_task_id"] = implementation_task_id
     with _client() as client:
         resp = client.post(f"/tasks/{task_id}/verdict", json=payload)
         if resp.status_code == 200:

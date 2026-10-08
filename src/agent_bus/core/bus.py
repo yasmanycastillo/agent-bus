@@ -1142,12 +1142,20 @@ class MessageBus:
                 return JSONResponse({"error": "sha is required"}, status_code=422)
             sha = raw_sha.strip() if isinstance(raw_sha, str) and raw_sha.strip() else None
             reason = body.get("reason") if isinstance(body.get("reason"), str) else ""
+            implementation = body.get("implementation_task_id")
+            if implementation is not None and (not isinstance(implementation, str) or not implementation.strip()):
+                return JSONResponse({"error": "implementation_task_id must be a task id"}, status_code=422)
             try:
-                saved = await self.reviews.record_task_verdict(task_id, actor, sha, verdict, reason)
+                saved = await self.reviews.record_task_verdict(
+                    task_id, actor, sha, verdict, reason,
+                    implementation_task_id=implementation.strip() if implementation else None,
+                )
             except VerdictError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
             if verdict == "changes_requested":
-                await self._reopen_rejected_implementation(task_id, actor, saved.sha, reason or verdict)
+                await self._reopen_rejected_implementation(
+                    task_id, actor, saved.sha, reason or verdict, saved.evidence["implementation_task_id"],
+                )
             return saved.model_dump(mode="json")
 
         @self.app.get("/reviews")
@@ -1804,16 +1812,17 @@ class MessageBus:
             ), [task.owner])
 
     async def _reopen_rejected_implementation(
-        self, review_task_id: str, reviewer: str, sha: str, reason: str,
+        self, review_task_id: str, reviewer: str, sha: str, reason: str, implementation_id: str,
     ) -> None:
+        """Reopen only the rejected implementation; an assigned review waits for its new handoff."""
+        from agent_bus.core.instructions import InstructionLog
+
         review = await self.tasks.get(review_task_id)
         if review is None:
             return
         now = datetime.now(timezone.utc).isoformat()
-        for implementation_id in review.independent_from:
-            implementation = await self.tasks.get(implementation_id)
-            if implementation is None:
-                continue
+        implementation = await self.tasks.get(implementation_id)
+        if implementation is not None:
             previous = implementation.owner
             if implementation.status != TaskStatus.PENDING or previous != "free":
                 await self.db.conn.execute(
@@ -1829,7 +1838,8 @@ class MessageBus:
                     reply_needed=True,
                     related_task=implementation_id,
                     body={
-                        "text": f"Changes requested on {sha}: {reason[:300]}",
+                        "text": (f"Changes requested on {sha}: {reason[:300]}. "
+                                 "Claim the task again and hand off the new commit with candidate_sha."),
                         "verdict": "changes_requested",
                         "sha": sha,
                     },
@@ -1841,6 +1851,15 @@ class MessageBus:
                     (now, task.task_id),
                 )
         await self.db.conn.commit()
+        # Reviews from assign_work are released by handoffs (release_reviews); hold this one
+        # again so it restarts when the reopened implementation is handed off anew.
+        # Workflow reviews keep their own dispatch and are left alone.
+        await InstructionLog(self.db).ensure_schema()
+        assigned = await self.db.conn.execute_fetchall(
+            "SELECT 1 FROM work_assignments WHERE task_id = ? AND role = 'review'", (review_task_id,),
+        )
+        if assigned:
+            await self.tasks.hold_for_review(review_task_id, [implementation_id])
 
     @staticmethod
     def _transition_actor(request: Request, body: dict) -> tuple[str | None, JSONResponse | None]:
