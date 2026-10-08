@@ -144,3 +144,58 @@ async def test_claude_runner_passes_model(monkeypatch):
     assert result.output == "success from claude"
     assert "--model" in calls[0]
     assert calls[0][calls[0].index("--model") + 1] == "glm-5.3"
+
+
+_AGY_DENIED_STDERR = (
+    "warming up\n"
+    'jetski: no output produced — a tool required the "command" permission that headless mode '
+    "cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in "
+    "settings.json (e.g. command(<target>)). Alternatively, re-run with "
+    "--dangerously-skip-permissions to auto-approve all tools.\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_agy_denied_actions_and_stderr_explain_the_failure(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    output = ('{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"",'
+              '"denied_actions":[{"action":"command","display_name":"RunCommand"}]}}')
+
+    async def fake_subprocess(cmd, timeout, thread_id=None):
+        return RunnerResult(True, output, metadata={"stderr": _AGY_DENIED_STDERR})
+
+    runner = AgentRunner("agy", provider="agy")
+    monkeypatch.setattr(runner, "_run_subprocess", fake_subprocess)
+    result = await runner.execute_turn("hello", thread_id="t")
+    assert result.success is False
+    assert "command (RunCommand)" in result.error
+    assert "permissions.allow" in result.error
+    assert "warming up" not in result.error
+    assert len(result.error) <= 700
+
+
+@pytest.mark.asyncio
+async def test_run_subprocess_keeps_stderr_of_successful_process(tmp_path):
+    runner = AgentRunner("x", provider="openai", worktree_dir=tmp_path)
+    result = await runner._run_subprocess(["sh", "-c", "echo out; echo diag >&2"], 10)
+    assert result.success is True
+    assert result.metadata["stderr"].strip() == "diag"
+
+
+@pytest.mark.asyncio
+async def test_agy_extra_args_are_opt_in(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    calls = []
+
+    async def fake_subprocess(cmd, timeout, thread_id=None):
+        calls.append(cmd)
+        return RunnerResult(True, '{"event":"result","result":{"status":"SUCCESS","response":"ok"}}')
+
+    runner = AgentRunner("agy", provider="agy")
+    monkeypatch.setattr(runner, "_run_subprocess", fake_subprocess)
+    monkeypatch.delenv("AGENT_BUS_AGY_ARGS", raising=False)
+    await runner.execute_turn("hello")
+    assert not any("dangerously" in part for part in calls[0])
+    monkeypatch.setenv("AGENT_BUS_AGY_ARGS", "--add-dir '/tmp/my dir' --sandbox")
+    await runner.execute_turn("hello")
+    assert calls[1][-3:] == ["--add-dir", "/tmp/my dir", "--sandbox"]

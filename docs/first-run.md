@@ -137,6 +137,21 @@ después de generar y entregar la respuesta.
 También puedes usar `--foreground` bajo un supervisor; conserva la variable
 `AGENT_BUS_TMUX_TARGET` o `AGENT_BUS_NOTIFY_DESKTOP` en el entorno del servicio.
 
+Un worker `--provider agy` no puede pedir permisos: agy headless deniega cualquier
+herramienta que los necesite (por ejemplo ejecutar `pytest` o `git diff` al revisar)
+y el turno falla; `last_error` del mensaje indica las acciones denegadas. Añade a
+`permissions.allow` del `settings.json` de agy reglas para los comandos de revisión
+(p. ej. `command(<target>)`). Para pasar flags extra a agy, usa
+`AGENT_BUS_AGY_ARGS` (se divide como en el shell y se añade al final del comando):
+
+```sh
+export AGENT_BUS_AGY_ARGS='--sandbox --effort high'
+agent-bus --project /ruta/mi-proyecto worker start --agent agy --provider agy
+```
+
+agent-bus nunca añade `--dangerously-skip-permissions` por su cuenta; hacerlo
+mediante esa variable aprueba todas las herramientas y es decisión del operador.
+
 No uses `watch` y `worker` simultáneamente con la misma identidad: ambos intentan
 ser el ejecutor automático y `ExecutionGuard` rechazará uno. Si además mantienes
 una TUI abierta para supervisar, trátala como interfaz manual; no es el componente
