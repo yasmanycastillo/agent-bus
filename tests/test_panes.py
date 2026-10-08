@@ -168,3 +168,17 @@ async def test_console_shows_each_pane_screen_read_only(tmux, tmp_path):
         [pane] = (await client.get("/room/api/panes")).json()["panes"]
         assert pane["name"] == "a" and pane["state"] == "idle" and "VISIBLE-IN-CONSOLE" in pane["screen"]
     await db.close()
+
+
+@pytest.mark.parametrize("footer, expected", [
+    ("⡿  Generating...\n>\nesc to cancel    Claude Opus 5.5 · medium", "working"),
+    # Captured from agy 2026-10: its permission menu keeps the "esc to cancel" footer.
+    ("Run this command?\n> 1. Yes, run command\n  4. No, cancel\n"
+     "  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command\nesc to cancel", "blocked"),
+    ("Do you trust the contents of this project?\n> Yes, I trust this folder\n"
+     "  ↑/↓ Navigate · enter Confirm", "blocked"),
+    ("  ok\n>\n? for shortcuts", "idle"),
+])
+def test_agy_states_from_its_footer(monkeypatch, footer, expected):
+    monkeypatch.setattr(panes, "screen", lambda name, lines=panes.SCREEN_LINES: footer)
+    assert panes.state("x", "agy") == expected

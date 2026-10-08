@@ -32,11 +32,13 @@ class Preset(NamedTuple):
 
 
 # Markers measured in tmux, 2026-10: Claude Code 2.1 spinner line "✶ Meandering…" (older
-# builds: "esc to interrupt"); agy footer "esc to cancel"; both trust prompts ask to confirm.
+# builds: "esc to interrupt"); agy footer "esc to cancel"; trust and permission prompts ask
+# to confirm or navigate a menu.
 PRESETS = {
     "claude": Preset("claude", None, r"^\S \w+…|esc to interrupt",
                      r"Enter to confirm|Do you want to proceed\?"),
-    "agy": Preset("agy", "-i", r"esc to cancel", r"enter Confirm"),
+    # agy permission menus also show "esc to cancel", so blocked is checked first.
+    "agy": Preset("agy", "-i", r"esc to cancel", r"enter Confirm|↑/↓ Navigate|^Run this command\?"),
 }
 
 
