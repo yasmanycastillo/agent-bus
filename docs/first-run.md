@@ -277,6 +277,14 @@ de permiso, evítalos con los argumentos de permisos del CLI tras `--` y confía
 la carpeta del proyecto; un panel `blocked` lo resuelve el usuario con `tmux -L agent-bus
 attach` (sin `-r`).
 
+El coordinador también los maneja por MCP con la herramienta `agent_panes`
+(`action` = `list`, `spawn`, `send`, `screen` o `close`). Solo aparece si el MCP del
+coordinador arranca con `AGENT_BUS_PANES=1` en su entorno (el bloque `env` de la
+entrada `agent-bus` en la configuración MCP del cliente) y requiere `bootstrap_agent`.
+Por MCP no hay argumentos libres del CLI ni directorio: el panel arranca en la raíz
+del proyecto del MCP, así que un agente no puede abrir otro sin preguntas de permiso.
+`as_agent` le da al panel la identidad de una credencial del proyecto.
+
 `--status` devuelve JSON con `active`, `state` y `can_dispatch`. Comprueba la reserva
 real del ejecutor en el sistema operativo y la actualidad de su estado; un archivo
 PID antiguo no basta. `can_dispatch=true` significa que el watcher está esperando

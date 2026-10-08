@@ -27,7 +27,7 @@ from agent_bus import __version__
 from agent_bus.security import AuthenticationError, async_bus_client, load_session
 from agent_bus.core.sse import iter_sse_frames
 from agent_bus.mcp.transport import cancellable_stdio
-from agent_bus.mcp import coordination
+from agent_bus.mcp import coordination, panes_tool
 
 logger = logging.getLogger("agent_bus.mcp")
 
@@ -370,6 +370,9 @@ class McpServer:
         self.tools = copy.deepcopy(TOOLS_DEFINITIONS + coordination.TOOLS)
         for tool in self.tools:
             tool["description"] += " " + coordination.TOOL_GUIDANCE[tool["name"]]
+        if panes_tool.enabled():
+            self.tools.append(copy.deepcopy(panes_tool.TOOL))
+            self.tools[-1]["description"] += " " + panes_tool.GUIDANCE
         # Identity is bound from the session (or --agent), never required as input:
         # bootstrap_agent may adopt a session after this catalog was published.
         self._identity_fields = {}
@@ -481,6 +484,10 @@ class McpServer:
     async def execute_tool(self, name: str, args: dict[str, Any]) -> Any:
         if name in coordination.MODELS:
             return await coordination.execute(self, name, args)
+        if name == panes_tool.NAME:
+            if self.session is None:
+                raise AuthenticationError("Llama bootstrap_agent antes de manejar paneles.")
+            return await panes_tool.call(args, Path(self._lock_project_root or self._lock_cwd))
         args = self._bind_identity(name, args)
         if name == "wait_for_updates":
             wait = WaitArguments.model_validate(args)
