@@ -97,7 +97,7 @@ async def test_external_cancellation_propagates_and_closes_stream(monkeypatch):
         if request.url.path.endswith("/messages"):
             return httpx.Response(200, json={"messages":[]})
         return httpx.Response(200, stream=stream)
-    task = asyncio.create_task(install(monkeypatch, handler)._wait_for_updates("alice", 120))
+    task = asyncio.create_task(install(monkeypatch, handler)._wait_for_updates("alice", 50))
     await asyncio.wait_for(stream.started.wait(), 1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

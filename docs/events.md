@@ -41,7 +41,7 @@ Al vencer un cursor, guardar el cursor nuevo **antes** de recorrer el inbox pend
 
 ## MCP, worker y panel
 
-`wait_for_updates` acepta `timeout` entero de 1 a 120 segundos y `event_cursor` opcional. Su plazo total incluye checkpoint, lectura inicial, conexión y recepción, aun con comentarios o checkpoints continuos. Devuelve como máximo cinco pendientes; `next_cursor` continúa las páginas del inbox y `event_cursor` reanuda eventos. Conserva el cursor por agente mientras vive la instancia MCP; el cliente puede guardar y reenviar el cursor devuelto para sobrevivir a su propio reinicio.
+`wait_for_updates` acepta `timeout` entero de 1 a 50 segundos (por defecto 50; muchos clientes MCP cortan la petición a los 60 s) y `event_cursor` opcional. Su plazo total incluye checkpoint, lectura inicial, conexión y recepción, aun con comentarios o checkpoints continuos. Devuelve como máximo cinco pendientes; `next_cursor` continúa las páginas del inbox y `event_cursor` reanuda eventos. Conserva el cursor por agente mientras vive la instancia MCP; el cliente puede guardar y reenviar el cursor devuelto para sobrevivir a su propio reinicio.
 
 Los resultados son `pending_messages`, `event_received`, `timeout` o `error`. Este último incluye `code`: `cursor_expired` (con `recovery: read_messages`), `cursor_invalid`, `stream_closed`, `bus_unavailable`, `unauthenticated`, `forbidden`, `hub_error` o `protocol_error`. EOF no se presenta como un timeout. Cancelar la coroutine cierra la conexión; el SDK permite cancelación concurrente por JSON-RPC/stdio. Los resultados con `status: error` se entregan con `isError: true`; timeout es un resultado normal.
 

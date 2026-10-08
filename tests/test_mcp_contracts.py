@@ -64,6 +64,14 @@ def payload(result):
     return value
 
 
+async def test_wait_for_updates_returns_before_common_60s_client_timeouts(bound_server):
+    async with Client(bound_server.sdk_server()) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+    timeout = tools["wait_for_updates"].input_schema["properties"]["timeout"]
+    assert timeout["maximum"] == 50 and timeout["default"] == 50
+    assert "50" in tools["wait_for_updates"].description
+
+
 async def test_secure_tool_catalog_has_no_actor_input_and_forbids_extra_fields(bound_server):
     async with Client(bound_server.sdk_server()) as client:
         result = await client.list_tools()
@@ -152,7 +160,7 @@ async def test_even_matching_actor_is_not_public_tool_input(bound_server, monkey
 
 @pytest.mark.parametrize("tool_name,args", [
     ("wait_for_updates", {"timeout": True}),
-    ("wait_for_updates", {"timeout": 121}),
+    ("wait_for_updates", {"timeout": 51}),
     ("post_message", {"to_agent": "bob", "text": "Missing key"}),
     ("read_messages", {"limit": 101}),
     ("ack_messages", {"message_ids": []}),

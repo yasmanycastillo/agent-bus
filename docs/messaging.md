@@ -56,7 +56,7 @@ ack_messages(message_ids=["OTRO_ID_RECIBIDO"])
 
 Guardar la clave de la operación antes de llamar a `post_message` o `reply_message` y conservarla si se pierde la respuesta. Generar otra clave en cada reintento crea otra operación.
 
-`read_messages` devuelve un objeto con `messages` y `next_cursor`. Las claves son obligatorias en las herramientas MCP de envío/respuesta. `wait_for_updates` devuelve como máximo cinco mensajes pendientes y el cursor correspondiente; los confirmados dejan de aparecer como pendientes. La espera tiene un plazo total de 1 a 120 segundos y un event_cursor separado; El SDK permite cancelar solicitudes por stdio. Cancelar no revierte una mutación ya guardada: conservar su clave de idempotencia al reintentar.
+`read_messages` devuelve un objeto con `messages` y `next_cursor`. Las claves son obligatorias en las herramientas MCP de envío/respuesta. `wait_for_updates` devuelve como máximo cinco mensajes pendientes y el cursor correspondiente; los confirmados dejan de aparecer como pendientes. La espera tiene un plazo total de 1 a 50 segundos y un event_cursor separado; El SDK permite cancelar solicitudes por stdio. Cancelar no revierte una mutación ya guardada: conservar su clave de idempotencia al reintentar.
 
 ## CLI
 

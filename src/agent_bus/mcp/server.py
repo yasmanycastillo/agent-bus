@@ -43,9 +43,16 @@ class DecisionToolArguments(BaseModel):
     context: StrictStr = Field(default="", description="Contexto adicional")
 
 
+WAIT_MAX_SECONDS = 50
+
+
 class WaitArguments(BaseModel):
     agent_id: StrictStr = Field(min_length=1)
-    timeout: StrictInt = Field(default=120, ge=1, le=120, description="Plazo total en segundos, incluida la consulta inicial")
+    # 50 s: MCP clients commonly abort a request at 60 s (Claude Code and the TS
+    # SDK default, Codex tool_timeout_sec). The margin covers hub latency and
+    # transport so the client gets the empty "timeout" result, not an error.
+    timeout: StrictInt = Field(default=WAIT_MAX_SECONDS, ge=1, le=WAIT_MAX_SECONDS,
+                               description="Plazo total en segundos (máx. 50), incluida la consulta inicial")
     event_cursor: StrictStr | None = Field(default=None, min_length=1, max_length=2048,
                                            description="Cursor de eventos para reanudar; distinto del cursor del inbox")
 
@@ -102,7 +109,9 @@ class RenewLockArguments(ReleaseLockArguments):
 TOOLS_DEFINITIONS = [
     {
         "name": "wait_for_updates",
-        "description": "Bloquea la ejecución hasta recibir un nuevo mensaje, tarea o evento del bus por SSE (patrón long-polling reactivo).",
+        "description": ("Bloquea la ejecución hasta recibir un nuevo mensaje, tarea o evento del bus por SSE "
+                        "(patrón long-polling reactivo). Espera como máximo 50 s y, al agotar el plazo, "
+                        "devuelve status=timeout sin pendientes y el event_cursor; vuelve a llamar para seguir esperando."),
         "inputSchema": WaitArguments.model_json_schema(),
     },
     {
