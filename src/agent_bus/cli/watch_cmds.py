@@ -134,6 +134,15 @@ class AgentBusy(Exception):
 MUXEL_BUSY_STATES = frozenset({"working", "blocked", "starting"})
 # Below _run_cli's own 600 s limit, so muxel reports timed_out before we kill it.
 MUXEL_WAIT_SECONDS = 540
+# Fallback when `muxel ctl status` misses a running turn (seen with muxel 0.2.8 for
+# Codex and Claude Code). Each marker is drawn by the TUI only while a turn runs:
+#   "esc to interrupt"  Codex ("• Working (1m 07s • esc to interrupt)") and Claude Code spinner
+#   "Thinking…"         Grok spinner (Unicode ellipsis, not "...")
+#   "[stop]"            Grok stop button
+# Only the last MUXEL_SCREEN_LINES lines are scanned so that transcript text scrolled
+# above the footer (an earlier reply quoting a marker) does not count.
+MUXEL_WORKING_MARKERS = ("esc to interrupt", "Thinking…", "[stop]")
+MUXEL_SCREEN_LINES = 12
 
 
 async def _muxel_ctl(binary: str, args: list[str], agent_id: str, bus_url: str | None,
@@ -172,6 +181,18 @@ async def _muxel_turn(binary: str, target: str, prompt: str, sent_marker: Path,
             live = claude_live_status(Path(cwd), Path.home())
             if live in ("busy", "waiting"):
                 raise AgentBusy(f"Claude in {cwd} is {live}")
+        try:
+            screen = await _muxel_ctl(binary, ["screen", target, "--lines", str(MUXEL_SCREEN_LINES)],
+                                      agent_id, bus_url)
+        except Exception as exc:  # the screen is only a fallback; never block the turn on it
+            logger.warning("muxel screen check skipped for '%s': %s", target, exc)
+            screen = {}
+        text = screen.get("text")
+        if isinstance(text, str):
+            footer = "\n".join(text.splitlines()[-MUXEL_SCREEN_LINES:])
+            marker = next((m for m in MUXEL_WORKING_MARKERS if m in footer), None)
+            if marker:
+                raise AgentBusy(f"muxel agent '{target}' screen shows {marker!r}")
         await _muxel_ctl(binary, ["send", target, "-"], agent_id, bus_url, input_text=prompt)
         write_private_json(sent_marker, {"target": target, "sent_at": time.time()})
     elif status == "blocked":

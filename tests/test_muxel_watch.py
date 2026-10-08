@@ -20,8 +20,9 @@ class FakeMuxel:
     """Answers `muxel ctl` the way muxel prints it: one JSON object per command."""
 
     def __init__(self, status='idle', outcome='finished', reply='Respuesta desde la TUI', asked=None,
-                 awaiting_reply=False, cwd=None):
+                 awaiting_reply=False, cwd=None, screen=''):
         self.status = status
+        self.screen = screen
         self.cwd = cwd
         self.awaiting_reply = awaiting_reply
         self.outcome = outcome
@@ -34,6 +35,10 @@ class FakeMuxel:
         self.calls.append((verb, input_text))
         if verb == 'status':
             out = {'host': 'pc', 'status': self.status, 'awaiting_reply': self.awaiting_reply, 'cwd': self.cwd, 'remote': False}
+        elif verb == 'screen':
+            if self.screen is None:
+                return subprocess.CompletedProcess(cmd, 1, json.dumps({'ok': False, 'error': 'no pane'}), '')
+            out = {'host': 'pc', 'text': self.screen}
         elif verb == 'send':
             self.asked = self.asked or input_text
             out = {'host': 'pc', 'sent': True}
@@ -51,8 +56,8 @@ async def test_idle_pane_gets_the_prompt_and_its_reply_is_delivered(hub, monkeyp
     monkeypatch.setattr(watch, '_run_cli', muxel)
     await watch.run_turn('bob', hub.message, {}, cli='muxel', muxel_agent='Claude',
                          sessions_file=tmp_path / 'sessions.json')
-    assert [verb for verb, _ in muxel.calls] == ['status', 'send', 'wait']
-    assert 'agent-bus' in muxel.calls[1][1]
+    assert [verb for verb, _ in muxel.calls] == ['status', 'screen', 'send', 'wait']
+    assert 'agent-bus' in muxel.calls[2][1]
     assert hub.message['acknowledged']
     assert hub.replies[0]['body']['text'] == 'Respuesta desde la TUI'
     assert not list(tmp_path.glob('outbox/*.sent'))
@@ -145,3 +150,38 @@ async def test_reply_to_someone_elses_prompt_is_not_delivered(hub, monkeypatch, 
     await watch.run_turn('bob', hub.message, {}, cli='muxel', muxel_agent='Claude',
                          sessions_file=tmp_path / 'sessions.json')
     assert hub.failures and not hub.message['acknowledged'] and not hub.replies
+
+
+@pytest.mark.parametrize('footer', [
+    '• Working (1m 07s • esc to interrupt)',  # Codex
+    '✻ Cogitating… (12s · ↑ 1.2k tokens · esc to interrupt)',  # Claude Code
+    '⠋ Thinking…',  # Grok
+    'grok-4.6 · [stop]',  # Grok
+])
+async def test_pane_screen_showing_work_counts_as_busy(hub, monkeypatch, tmp_path, footer):
+    # muxel 0.2.8 reported idle/done while Codex and Claude were visibly working.
+    muxel = FakeMuxel(status='idle', screen=f'respuesta anterior\n\n{footer}\n\n› \n  ? for shortcuts')
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await watch.run_turn('bob', hub.message, {}, cli='muxel', muxel_agent='Codex',
+                         sessions_file=tmp_path / 'sessions.json')
+    assert [verb for verb, _ in muxel.calls] == ['status', 'screen']
+    assert not hub.failures and not hub.message['acknowledged']
+
+
+async def test_work_marker_scrolled_far_above_the_footer_is_ignored(hub, monkeypatch, tmp_path):
+    old = 'el usuario preguntó por "esc to interrupt"\n' + 'línea\n' * 30 + '› '
+    muxel = FakeMuxel(status='idle', screen=old)
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await watch.run_turn('bob', hub.message, {}, cli='muxel', muxel_agent='Codex',
+                         sessions_file=tmp_path / 'sessions.json')
+    assert 'send' in [verb for verb, _ in muxel.calls]
+    assert hub.message['acknowledged']
+
+
+async def test_unreadable_screen_does_not_block_the_turn(hub, monkeypatch, tmp_path):
+    muxel = FakeMuxel(status='idle', screen=None)
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await watch.run_turn('bob', hub.message, {}, cli='muxel', muxel_agent='Codex',
+                         sessions_file=tmp_path / 'sessions.json')
+    assert [verb for verb, _ in muxel.calls] == ['status', 'screen', 'send', 'wait']
+    assert hub.message['acknowledged']

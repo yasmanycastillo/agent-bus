@@ -206,6 +206,11 @@ también consulta el estado que Claude publica en `~/.claude/sessions/` para la
 carpeta del panel; cualquier Claude ocupado en esa carpeta aplaza la solicitud.
 Por esa misma razón, `muxel ctl wait` puede tardar unos 30 s más en devolver la
 respuesta.
+Como respaldo para cualquier CLI (muxel 0.2.8 también marcó `idle` a Codex
+trabajando), el watcher lee las últimas 12 líneas de `muxel ctl screen` y aplaza
+la solicitud si muestran un indicador de turno en curso: `esc to interrupt`
+(Codex, Claude Code), `Thinking…` o `[stop]` (Grok). Si `screen` falla, lo
+registra y sigue con las demás comprobaciones.
 
 Abre muxel desde el escritorio o desde una terminal normal, no desde una sesión de
 Claude Code: si hereda sus variables `CLAUDE_CODE_*`, el Claude de cada panel
