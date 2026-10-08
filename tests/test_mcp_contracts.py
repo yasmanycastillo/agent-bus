@@ -10,6 +10,7 @@ import pytest
 from mcp import Client
 from mcp.shared.exceptions import MCPError
 
+import agent_bus
 from agent_bus.mcp.server import McpServer
 
 
@@ -397,3 +398,26 @@ async def test_project_status_summarizes_long_task_descriptions(bound_server, mo
     assert detail == {"task": task}
     assert "task_id" in tools["get_project_status"].input_schema["properties"]
     assert "task_id" in tools["get_project_status"].description
+    assert status["mcp_version"] == agent_bus.__version__
+
+
+@pytest.mark.parametrize("hub_status, warned", [
+    ({"bus_version": "9.9.9"}, True),
+    ({"bus_version": agent_bus.__version__}, False),
+    (500, False),  # an unreadable /status must not break bootstrap
+])
+async def test_bootstrap_warns_when_this_mcp_process_is_older_than_the_hub(
+        bound_server, monkeypatch, hub_status, warned):
+    monkeypatch.setattr(bound_server, "_client", _hub_backend({
+        "/coordination/bootstrap": {"agent_id": "alice"}, "/status": hub_status,
+    }))
+    async with Client(bound_server.sdk_server()) as client:
+        result = await client.call_tool("bootstrap_agent", {})
+    value = payload(result)
+    assert not result.is_error and value["agent_id"] == "alice"
+    if warned:
+        warning = value["version_warning"]
+        assert agent_bus.__version__ in warning and "9.9.9" in warning
+        assert "reconecta" in warning.lower()
+    else:
+        assert "version_warning" not in value

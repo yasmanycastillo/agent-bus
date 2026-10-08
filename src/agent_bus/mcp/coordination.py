@@ -1,11 +1,16 @@
 """Compact MCP facade over the authenticated hub coordination workflows."""
+import logging
+
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from agent_bus.core.coordination import (
     BootstrapRequest, HandoffRequest, INSTRUCTIONS, PrepareEditRequest,
 )
 from agent_bus.core.lock_paths import client_lock_path
+from agent_bus import __version__
 from agent_bus.security import AuthenticationError
+
+logger = logging.getLogger("agent_bus.mcp")
 
 
 class PendingArguments(BaseModel):
@@ -148,4 +153,22 @@ async def execute(server, name, args):
             # The connected package is the protocol. A hub started earlier must not
             # replace it with the instructions it had when it booted.
             body["instructions"] = INSTRUCTIONS
+            warning = await version_warning(client)
+            if warning:
+                body["version_warning"] = warning
         return body
+
+
+async def version_warning(client) -> str | None:
+    """Warn when this long-lived MCP process runs other code than the hub (e.g. after an upgrade)."""
+    try:
+        response = await client.get("/status")
+        response.raise_for_status()
+        hub = response.json().get("bus_version")
+    except Exception as exc:  # bootstrap must not depend on this hint
+        logger.warning("Could not read the hub version: %s", type(exc).__name__)
+        return None
+    if not isinstance(hub, str) or hub == __version__:
+        return None
+    return (f"El MCP de este cliente es {__version__} y el hub {hub}; reconecta el MCP del "
+            "cliente para usar la versión actual (si el anticuado es el hub, reinicia el hub).")

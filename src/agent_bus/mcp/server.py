@@ -23,6 +23,7 @@ from mcp.types import (
 )
 from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr
 
+from agent_bus import __version__
 from agent_bus.security import AuthenticationError, async_bus_client, load_session
 from agent_bus.core.sse import iter_sse_frames
 from agent_bus.mcp.transport import cancellable_stdio
@@ -31,7 +32,7 @@ from agent_bus.mcp import coordination
 logger = logging.getLogger("agent_bus.mcp")
 
 SERVER_NAME = "agent-bus"
-SERVER_VERSION = "0.2.1"
+SERVER_VERSION = __version__
 IDENTITY_FIELDS = ("agent_id", "from_agent", "decided_by")
 # assign_work copies the whole instruction into each task; keep the overview small.
 TASK_SUMMARY_CHARS = 200
@@ -638,6 +639,7 @@ class McpServer:
                     providers = {"providers": []}
                 return {
                     "server": status,
+                    "mcp_version": SERVER_VERSION,
                     "tasks": tasks,
                     "locks": locks,
                     "agents": agents,

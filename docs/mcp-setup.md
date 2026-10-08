@@ -66,6 +66,9 @@ Para una configuración manual, la forma del cliente JSON es:
 Usa los valores reales que generó onboarding. La instancia MCP fija la identidad
 al arrancar; cambiar un argumento de una herramienta no permite suplantar a otro
 agente. Al renovar la credencial, reconecta MCP para cargar la sesión nueva.
+Tras actualizar agent-bus, cada proceso `mcp-server` ya lanzado sigue con el código
+anterior: `bootstrap_agent` lo indica en `version_warning` si su versión difiere de
+`bus_version` del hub, y `get_project_status` muestra `mcp_version`.
 [Autenticación y permisos](authentication.md), [proyectos y sesiones](projects.md).
 
 ## Herramientas

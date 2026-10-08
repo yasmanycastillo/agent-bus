@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 from sse_starlette.sse import EventSourceResponse
 
+from agent_bus import __version__
 from agent_bus.core.events import CursorExpired, CursorInvalid, EventLog
 from agent_bus.core.decisions import DecisionLog
 from agent_bus.core.inbox import (
@@ -172,7 +173,7 @@ class MessageBus:
         self.locks = LockManager(db)
         self.skills = SkillRegistry(db)
         self.kickoff = KickoffManager(db)
-        self.app = FastAPI(title="agent-bus", version="0.2.1")
+        self.app = FastAPI(title="agent-bus", version=__version__)
         self._sse_subscribers: dict[str, set[asyncio.Event]] = defaultdict(set)
         self._global_sse_subscribers: set[asyncio.Event] = set()
         self._ws_connections: dict[str, WebSocket] = {}
@@ -314,7 +315,7 @@ class MessageBus:
         async def status():
             agents = await self.registry.list_all()
             return {
-                "bus_version": "0.2.1",
+                "bus_version": __version__,
                 "project_id": self.project_id,
                 "agents_online": sum(1 for a in agents if a.status.value == "online"),
                 "agents_total": len(agents),
