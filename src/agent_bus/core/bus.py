@@ -809,10 +809,15 @@ class MessageBus:
         async def assign_instruction(instruction_id: str, request: Request):
             from agent_bus.core.instructions import InstructionError, assign_work
             body = await self._json_object(request)
+            reviews = body.get("reviews")
+            if reviews is not None and (
+                not isinstance(reviews, list) or not all(isinstance(item, str) and item for item in reviews)
+            ):
+                return JSONResponse({"error": "reviews must be a list of implementation task_ids"}, status_code=422)
             try:
                 return await assign_work(
                     self, instruction_id, str(body.get("assignee") or body.get("agent_id") or ""),
-                    str(body.get("role") or ""), str(body.get("title") or ""),
+                    str(body.get("role") or ""), str(body.get("title") or ""), reviews,
                 )
             except InstructionError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=exc.status_code)

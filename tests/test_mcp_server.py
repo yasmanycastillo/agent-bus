@@ -133,3 +133,20 @@ async def test_mcp_record_decision_invalid_arguments(live_bus_url, invalid):
     assert response["code"] == "invalid_arguments"
     async with httpx.AsyncClient(base_url=live_bus_url) as client:
         assert (await client.get("/decisions")).json() == []
+
+
+async def test_mcp_assign_work_forwards_the_review_scope(live_bus_url):
+    server = McpServer(bus_url=live_bus_url)
+    instruction = await call_tool(server, "submit_instruction", {
+        "agent_id": "lead", "instruction": "Backend y frontend", "confirmed": True,
+        "agents": [{"agent_id": "codex", "provider": "codex"}, {"agent_id": "grok", "provider": "grok"}],
+    })
+    base = {"instruction_id": instruction["instruction_id"]}
+    await call_tool(server, "assign_work", {**base, "assignee": "codex", "role": "implement", "title": "Backend"})
+    frontend = await call_tool(server, "assign_work", {**base, "assignee": "grok", "role": "implement", "title": "Frontend"})
+    review = await call_tool(server, "assign_work", {
+        **base, "assignee": "codex", "role": "review", "title": "Revisar frontend", "reviews": [frontend["task_id"]],
+    })
+    async with httpx.AsyncClient(base_url=live_bus_url) as client:
+        task = (await client.get(f"/tasks/{review['task_id']}")).json()
+    assert task["independent_from"] == [frontend["task_id"]]

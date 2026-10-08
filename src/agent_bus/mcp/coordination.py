@@ -67,7 +67,7 @@ TOOL_GUIDANCE = {
     "record_decision": "Antes: bootstrap_agent y revisión de decisiones recientes. Registra sólo un acuerdo alcanzado; después comunica el resultado si corresponde.",
     "record_verdict": "Sólo el dueño de la tarea de review. Juzga el último candidate_sha de una implementación; si la review cubre varias, indica implementation_task_id o sha (sin ellos el error lista las candidatas). approve autoriza la integración de ese SHA. changes_requested reabre sólo esa implementación y la review espera su nueva entrega.",
     "submit_instruction": "Sólo tras la confirmación del humano. confirmed=true. Agentes reales: hermes, grok, claude, codex o agy. No uses un subagente ni empieces el trabajo aquí.",
-    "assign_work": "Entrega una parte del encargo confirmado a uno de esos agentes. Quien revisa no puede ser quien implementa. No la reclames tú ni se la des a un subagente.",
+    "assign_work": "Entrega una parte del encargo confirmado a uno de esos agentes. Quien revisa no puede ser quien implementa lo revisado; para una revisión cruzada pasa reviews con los task_id que cubre. No la reclames tú ni se la des a un subagente.",
 }
 
 

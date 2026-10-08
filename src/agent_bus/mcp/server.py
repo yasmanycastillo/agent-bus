@@ -251,6 +251,10 @@ TOOLS_DEFINITIONS = [
                 "assignee": {"type": "string"},
                 "role": {"type": "string", "enum": ["plan", "implement", "review"]},
                 "title": {"type": "string"},
+                "reviews": {
+                    "type": "array", "items": {"type": "string"}, "minItems": 1,
+                    "description": "Sólo role=review: task_id de las implementaciones que cubre; si se omite, todas",
+                },
             },
             "required": ["instruction_id", "assignee", "role", "title"],
         },
@@ -575,6 +579,7 @@ class McpServer:
                     "assignee": args["assignee"],
                     "role": args["role"],
                     "title": args["title"],
+                    **({"reviews": args["reviews"]} if args.get("reviews") is not None else {}),
                 })
                 resp.raise_for_status()
                 return resp.json()

@@ -151,3 +151,72 @@ async def test_review_waits_for_every_implementation_assigned_before_or_after(tm
         late = await assign(other, "codex-01", "review")
         assert await _status(client, late) == "in_progress"
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_cross_review_covers_only_the_named_implementations(tmp_path):
+    db = Database(str(tmp_path / "bus.db"))
+    await db.initialize()
+    bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+    async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        saved = await client.post("/instructions", json={
+            "agent_id": "coordinator", "instruction": "Backend y frontend", "confirmed": True, "agents": AGENTS,
+        })
+        instruction_id = saved.json()["instruction_id"]
+
+        async def assign(agent_id, role, **extra):
+            return await client.post(f"/instructions/{instruction_id}/assignments", json={
+                "agent_id": agent_id, "role": role, "title": f"{role} {agent_id}", **extra,
+            })
+
+        backend = (await assign("codex-01", "implement")).json()["task_id"]
+        frontend = (await assign("grok-01", "implement")).json()["task_id"]
+        # Without a scope the review still covers every implementation.
+        assert (await assign("codex-01", "review")).status_code == 409
+        foreign = await assign("codex-01", "review", reviews=["ins-x-implement-y"])
+        assert foreign.status_code == 422
+        assert "ins-x-implement-y" in foreign.json()["error"]
+        own = await assign("codex-01", "review", reviews=[backend])
+        assert own.status_code == 409
+        assert backend in own.json()["error"]
+        assert (await assign("codex-01", "review", reviews=[])).status_code == 422
+
+        crossed = await assign("codex-01", "review", reviews=[frontend])
+        assert crossed.status_code == 200, crossed.text
+        review = crossed.json()["task_id"]
+        task = (await client.get(f"/tasks/{review}")).json()
+        assert task["status"] == "blocked"
+        assert task["independent_from"] == [frontend]
+        assert task["depends_on"] == [frontend]
+        assert (await assign("grok-01", "review", reviews=[backend])).status_code == 200
+
+        # A scoped reviewer may implement elsewhere; a later implementation joins
+        # only reviews without an explicit scope.
+        scoped = (await assign("agy-01", "review", reviews=[frontend])).json()["task_id"]
+        later = await assign("agy-01", "implement")
+        assert later.status_code == 200, later.text
+        assert later.json()["task_id"] not in (await client.get(f"/tasks/{review}")).json()["independent_from"]
+        assert (await client.get(f"/tasks/{scoped}")).json()["independent_from"] == [frontend]
+
+        # The review waits only for grok's handoff and judges only grok's candidate.
+        assert (await client.post(f"/tasks/{frontend}/review", json={"agent_id": "grok-01"})).status_code == 200
+        assert await _status(client, review) == "in_progress"
+        await db.conn.execute(
+            """INSERT INTO runtime_attempts
+               (attempt_id, task_id, idempotency_key, state, external_ref, workspace_ref, updated_at,
+                outcome, candidate_sha, log_refs)
+               VALUES ('att-front', ?, 'dispatch:front', 'completed', 'external:1', '.', ?, 'completed', 'abc123', '[]')""",
+            (frontend, "2026-01-01T00:00:00+00:00"),
+        )
+        await db.conn.commit()
+        judged = await client.post(f"/tasks/{review}/verdict", json={
+            "agent_id": "codex-01", "verdict": "approve", "reason": "ok",
+        })
+        assert judged.status_code == 200, judged.text
+        assert judged.json()["evidence"]["implementation_task_id"] == frontend
+        outside = await client.post(f"/tasks/{review}/verdict", json={
+            "agent_id": "codex-01", "verdict": "approve", "implementation_task_id": backend,
+        })
+        assert outside.status_code == 409
+    await db.close()
+
