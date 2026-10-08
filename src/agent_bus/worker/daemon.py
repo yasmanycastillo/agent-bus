@@ -260,6 +260,7 @@ class WorkerDaemon:
 
     async def _record_message_failure(self, message_id: str, error: str) -> None:
         self._message_retry_after[message_id] = time.monotonic() + max(3.0, self.poll_interval_seconds)
+        logger.warning("Turn for message %s failed: %s", message_id, error.strip()[:500])
         if not self._client:
             return
         try:
@@ -365,6 +366,8 @@ class WorkerDaemon:
 
         result = await self.runner.execute_turn(prompt, timeout_seconds=self.turn_timeout_seconds)
         await self._finish_attempt(task_id, "completed" if result.success else "failed")
+        if not result.success:
+            logger.warning("Turn for task %s failed: %s", task_id, (result.error or "no error details").strip()[:500])
 
         if result.success and await self._closes_workflow_step(task):
             await self._client.post(f"/tasks/{task_id}/done", json={"agent_id": self.agent_id})

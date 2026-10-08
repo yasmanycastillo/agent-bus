@@ -137,3 +137,46 @@ async def test_worker_daemon_claims_and_runs_task(test_bus, tmp_path):
         assert task is not None
         assert task.owner == "worker_bob"
         assert task.status.value == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_worker_logs_why_a_message_turn_failed(test_bus, caplog):
+    await test_bus.registry.register(AgentInfo(agent_id="worker_bob", display_name="Bob"))
+    env = Envelope(from_agent="alice", to_agent="worker_bob", message_type=MessageType.INBOX,
+                   body={"text": "review?"}, reply_needed=True)
+    await test_bus.inbox.deliver(env)
+
+    async def failing_exec(prompt: str, session_id: str | None) -> RunnerResult:
+        return RunnerResult(success=False, output="", error="denied actions: command (RunCommand)" + "x" * 2000)
+
+    runner = AgentRunner(agent_id="worker_bob", custom_executor=failing_exec)
+    async with AsyncClient(transport=ASGITransport(app=test_bus.app), base_url="http://test") as client:
+        daemon = WorkerDaemon(agent_id="worker_bob", runner=runner, bus_url="http://test")
+        daemon._client = client
+        with caplog.at_level("WARNING", logger="agent_bus.worker.daemon"):
+            await daemon._handle_urgent_message(env.model_dump(mode="json"))
+    record = next(r for r in caplog.records if env.message_id in r.getMessage())
+    assert "denied actions: command (RunCommand)" in record.getMessage()
+    assert len(record.getMessage()) < 800
+
+
+@pytest.mark.asyncio
+async def test_worker_logs_why_a_task_turn_failed(test_bus, tmp_path, caplog):
+    await test_bus.registry.register(AgentInfo(agent_id="worker_bob", display_name="Bob"))
+    await test_bus.tasks.create("T-fail", "Implement")
+    await test_bus.tasks.claim("T-fail", "worker_bob")
+
+    async def failing_exec(prompt: str, session_id: str | None) -> RunnerResult:
+        return RunnerResult(success=False, output="", error="provider exploded")
+
+    async def allow(task_id: str) -> bool:
+        return True
+
+    runner = AgentRunner(agent_id="worker_bob", custom_executor=failing_exec, worktree_dir=tmp_path)
+    async with AsyncClient(transport=ASGITransport(app=test_bus.app), base_url="http://test") as client:
+        daemon = WorkerDaemon(agent_id="worker_bob", runner=runner, bus_url="http://test")
+        daemon._client = client
+        daemon._runtime_allows_execution = allow
+        with caplog.at_level("WARNING", logger="agent_bus.worker.daemon"):
+            await daemon._handle_active_task({"task_id": "T-fail", "title": "Implement"})
+    assert any("T-fail" in r.getMessage() and "provider exploded" in r.getMessage() for r in caplog.records)
