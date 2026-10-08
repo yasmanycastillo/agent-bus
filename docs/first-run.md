@@ -277,6 +277,22 @@ de permiso, evítalos con los argumentos de permisos del CLI tras `--` y confía
 la carpeta del proyecto; un panel `blocked` lo resuelve el usuario con `tmux -L agent-bus
 attach` (sin `-r`).
 
+Para que el bus despierte al agente de un panel, arranca su watcher con
+`--cli tmux`:
+
+```sh
+agent-bus watch --agent claude --cli tmux --tmux-agent impl-1
+```
+
+Escribe en el panel los mismos avisos de tareas que `--cli muxel` (tarea asignada,
+revisión liberada, implementación reabierta y los mensajes del hub que entregan
+trabajo, que confirma tras escribirlos). Como tmux no da el texto de la respuesta,
+las preguntas con respuesta pendiente no se convierten en turnos del watcher: las
+escribe una sola vez (los ids quedan en `task_nudges.json` como `asked`) y el agente
+las contesta con `reply_message`; el watcher no responde ni confirma por él. Un panel
+`working` o `blocked` aplaza el aviso sin contar un fallo; uno `dead` o inexistente
+lo reintenta a los 30 s.
+
 El coordinador también los maneja por MCP con la herramienta `agent_panes`
 (`action` = `list`, `spawn`, `send`, `screen` o `close`). Solo aparece si el MCP del
 coordinador arranca con `AGENT_BUS_PANES=1` en su entorno (el bloque `env` de la

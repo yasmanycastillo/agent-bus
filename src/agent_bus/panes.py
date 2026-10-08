@@ -44,6 +44,10 @@ class PaneError(RuntimeError):
     pass
 
 
+class PaneBusy(PaneError):
+    """The agent is working or waiting on a question; try again later."""
+
+
 def _tmux(*args: str, input_text: str | None = None) -> str:
     result = subprocess.run([*TMUX, *args], input=input_text, capture_output=True, text=True)
     if result.returncode != 0:
@@ -151,6 +155,8 @@ def send(name: str, text: str, *, force: bool = False) -> None:
     pane = next((p for p in list_panes() if p["name"] == name), None)
     if pane is None:
         raise PaneError(f"no pane '{name}'")
+    if pane["state"] in ("working", "blocked") and not force:
+        raise PaneBusy(f"pane '{name}' is {pane['state']}")
     if pane["state"] != "idle" and not force:
         raise PaneError(f"pane '{name}' is {pane['state']}")
     buffer = f"agent-bus-{uuid.uuid4().hex}"  # concurrent sends must not share a buffer

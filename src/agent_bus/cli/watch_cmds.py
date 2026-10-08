@@ -18,6 +18,7 @@ import subprocess
 import httpx
 from pathlib import Path
 from contextlib import nullcontext
+from typing import Any
 
 import click
 
@@ -447,20 +448,43 @@ def build_nudge(due: dict[str, str]) -> str:
             "según el protocolo (reclama, implementa o revisa, y entrega con complete_handoff/record_verdict).")
 
 
+def build_question(message: dict[str, Any]) -> str:
+    """A reply_needed message typed into a tmux pane; the agent answers it itself over MCP."""
+    message_id = message["message_id"]
+    sender = message.get("from_agent", "?")
+    body = message.get("body") or {}
+    text = body.get("text", json.dumps(body, ensure_ascii=False)) if isinstance(body, dict) else str(body)
+    related = message.get("related_task")
+    task_note = f", tarea {related}" if related else ""
+    return (f"agent-bus: '{sender}' te escribió (mensaje {message_id}{task_note}): \"{text}\" "
+            f"Responde con reply_message(message_id=\"{message_id}\", acknowledge=true); "
+            "el watcher no responde por ti.")
+
+
+# Question ids already typed into a tmux pane, kept across restarts.
+# ponytail: capped list, not pruned against the inbox; fine for hundreds of open questions.
+ASKED_LIMIT = 500
+
+
 class PendingMessageWatcher:
     """SSE wakes bounded polling; persisted delivery state decides what to execute."""
     def __init__(self, agent_id: str, *, cli: str = "claude", bus_url: str | None = None,
                  dry_run: bool = False, sessions_file: Path | None = None, model: str | None = None,
                  tools: str | None = None, allow_mutating_tools: bool = False,
-                 muxel_agent: str | None = None, task_nudges: bool = True):
+                 muxel_agent: str | None = None, task_nudges: bool = True,
+                 tmux_agent: str | None = None):
         self.agent_id = agent_id
         self.cli = cli
         self.muxel_agent = muxel_agent
-        # Only a live muxel pane can be woken; headless CLIs start their own turns.
-        self.task_nudges = task_nudges and cli == "muxel" and not dry_run
+        self.tmux_agent = tmux_agent
+        # Only a live pane (muxel or tmux) can be woken; headless CLIs start their own turns.
+        live_pane = cli in ("muxel", "tmux") and not dry_run
+        self.task_nudges = task_nudges and live_pane
         # Hub task notices become nudges in a pane, not read-only reply turns.
-        self.task_notices = cli == "muxel" and not dry_run
+        self.task_notices = live_pane
         self.notices: dict[str, tuple[str, str]] = {}  # message_id -> (task_id, reason)
+        # tmux shows no reply text to collect, so questions are typed and the agent replies itself.
+        self.questions: dict[str, dict[str, Any]] = {}  # message_id -> message
         self.model = model
         validate_watch_tools(tools, allow_mutating_tools=allow_mutating_tools)
         self.tools = tools
@@ -483,7 +507,7 @@ class PendingMessageWatcher:
 
     async def tick(self, *, limit: int = 10) -> None:
         """Reply turns first; nudge about tasks only when no reply_needed message is pending."""
-        if await self.poll_once(limit=limit) == 0 and (self.task_nudges or self.notices):
+        if await self.poll_once(limit=limit) == 0 and (self.task_nudges or self.notices or self.questions):
             await self.nudge_tasks()
 
     async def nudge_tasks(self) -> None:
@@ -505,7 +529,10 @@ class PendingMessageWatcher:
             state = {}
         seen, due = dict(state.get("seen") or {}), dict(state.get("due") or {})
         typed = set(state.get("typed") or [])
+        asked = list(state.get("asked") or [])
         notices = dict(self.notices)
+        questions = {message_id: message for message_id, message in self.questions.items()
+                     if message_id not in asked}
         async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10) as client:
             if self.task_nudges:
                 seen, due = await self._task_changes(client, seen, due)
@@ -515,15 +542,17 @@ class PendingMessageWatcher:
                           if seen.get(task_id) in ACTIVE_TASK_STATES and task_id not in due}
             text = {**due, **{task_id: reason for message_id, (task_id, reason) in notices.items()
                               if message_id not in typed}}
-            current = {"seen": seen, "due": due, "typed": sorted(typed)}
+            current = {"seen": seen, "due": due, "typed": sorted(typed), "asked": asked}
             if current != state:
                 write_private_json(path, current)
-            if text:
-                if not await self._type_nudge(text):
+            if text or questions:
+                parts = ([build_nudge(text)] if text else []) + [build_question(m) for m in questions.values()]
+                if not await self._type_nudge("\n".join(parts)):
                     return
                 typed |= notices.keys()
-                write_private_json(path, {"seen": seen, "due": {}, "typed": sorted(typed)})
-                click.echo(f"Task nudge sent: {', '.join(sorted(text))}")
+                asked = (asked + sorted(questions))[-ASKED_LIMIT:]
+                write_private_json(path, {"seen": seen, "due": {}, "typed": sorted(typed), "asked": asked})
+                click.echo(f"Pane nudge sent: {', '.join(sorted(text) + sorted(questions))}")
             acknowledge = sorted(typed & notices.keys())
             if acknowledge:
                 try:
@@ -535,7 +564,8 @@ class PendingMessageWatcher:
                     return
                 for message_id in acknowledge:
                     self.notices.pop(message_id, None)
-                write_private_json(path, {"seen": seen, "due": {}, "typed": sorted(typed - set(acknowledge))})
+                write_private_json(path, {"seen": seen, "due": {}, "typed": sorted(typed - set(acknowledge)),
+                                          "asked": asked})
 
     async def _task_changes(self, client, seen: dict[str, str],
                             due: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
@@ -558,16 +588,23 @@ class PendingMessageWatcher:
         return seen, {task_id: reason for task_id, reason in due.items()
                       if owned.get(task_id, "pending") in ACTIVE_TASK_STATES}
 
-    async def _type_nudge(self, due: dict[str, str]) -> bool:
+    async def _type_nudge(self, text: str) -> bool:
         """Send the nudge with the same busy checks as a reply turn; never wait for the turn."""
-        binary = shutil.which("muxel")
         try:
+            if self.cli == "tmux":
+                from agent_bus import panes
+                try:
+                    await asyncio.to_thread(panes.send, self.tmux_agent or "", text)
+                except panes.PaneBusy as exc:
+                    raise AgentBusy(str(exc)) from exc
+                return True
+            binary = shutil.which("muxel")
             if not binary:
                 raise RuntimeError("muxel CLI missing")
             info = await _muxel_ctl(binary, ["status", self.muxel_agent], self.agent_id, self.bus_url)
             await _ensure_muxel_idle(binary, self.muxel_agent, info, self.agent_id, self.bus_url)
             await _muxel_ctl(binary, ["send", self.muxel_agent, "-"], self.agent_id, self.bus_url,
-                             input_text=build_nudge(due))
+                             input_text=text)
         except AgentBusy as exc:
             logger.info("Deferred task nudge: %s", exc)
             return False
@@ -589,11 +626,15 @@ class PendingMessageWatcher:
         if not page["messages"]:
             self.status("waiting")
         replies = 0
+        self.questions = {}  # this page's; answered ones leave the inbox
         for message in page["messages"]:
             message_id = message["message_id"]
             notice = task_notice(message) if self.task_notices else None
             if notice:
                 self.notices[message_id] = notice
+                continue
+            if self.cli == "tmux" and not self.dry_run:
+                self.questions[message_id] = message
                 continue
             replies += 1
             if time.monotonic() < self.retry_after.get(message_id, 0):
@@ -652,18 +693,21 @@ class PendingMessageWatcher:
 @click.option("--allow-mutating-tools", is_flag=True, help="Permitir herramientas de modificación/escritura en Grok/CLI.")
 @click.option("--muxel-agent", default=None,
               help="Con --cli muxel: agente de muxel (id, nombre o proyecto/nombre) al que escribir.")
+@click.option("--tmux-agent", default=None,
+              help="Con --cli tmux: panel de `agent-bus panes` al que escribir.")
 @click.option("--task-nudges/--no-task-nudges", default=True,
-              help="Con --cli muxel: avisar en el panel de tareas asignadas, liberadas o reabiertas.")
+              help="Con --cli muxel o tmux: avisar en el panel de tareas asignadas, liberadas o reabiertas.")
 @click.option("--status", "show_status", is_flag=True, help="Consultar estado local del ejecutor sin iniciar turnos.")
 @click.option("--bus-url", default=None, help="URL del bus")
 @click.option("--dry-run", is_flag=True, help="Solo mostrar qué se ejecutaría")
 @click.option("--once", is_flag=True, help="Procesar un solo mensaje pendiente y salir")
 def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: bool, once: bool,
           model: str | None, tools: str | None, allow_mutating_tools: bool, show_status: bool,
-          muxel_agent: str | None, task_nudges: bool):
+          muxel_agent: str | None, task_nudges: bool, tmux_agent: str | None):
     """Escuchar solicitudes y responder con turnos headless.
 
-    Con --cli muxel escribe en un panel vivo de muxel mediante `muxel ctl`.
+    Con --cli muxel escribe en un panel vivo de muxel mediante `muxel ctl`. Con
+    --cli tmux escribe en un panel de `agent-bus panes`; el agente responde solo.
     """
     from agent_bus.cli.display import get_current_agent
 
@@ -682,6 +726,8 @@ def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: b
             raise click.ClickException("Proveedor sin CLI conocido; indica --cli explícitamente")
     if (cli == "muxel") != bool(muxel_agent):
         raise click.UsageError("--muxel-agent se usa con --cli muxel, y --cli muxel lo requiere")
+    if (cli == "tmux") != bool(tmux_agent):
+        raise click.UsageError("--tmux-agent se usa con --cli tmux, y --cli tmux lo requiere")
     if model and cli not in ("grok", "claude", "codex", "agy", "aider"):
         raise click.UsageError(f"--model no está disponible para --cli {cli}")
     try:
@@ -695,6 +741,7 @@ def watch(agent_id: str | None, cli: str | None, bus_url: str | None, dry_run: b
     watcher = PendingMessageWatcher(
         agent_id, cli=cli, bus_url=bus_url, dry_run=dry_run, model=model, tools=tools,
         allow_mutating_tools=allow_mutating_tools, muxel_agent=muxel_agent, task_nudges=task_nudges,
+        tmux_agent=tmux_agent,
     )
     click.echo(f"👀 Watcheando el bus como '{agent_id}' (CLI: {cli})")
     click.echo("   Consulta persistida y SSE activos. Ctrl+C para salir.")
