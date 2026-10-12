@@ -349,3 +349,16 @@ def test_console_listing_captures_each_screen_once(monkeypatch):
     [pane] = panes.list_panes(50)
     assert pane["state"] == "working" and "Meandering" in pane["screen"]
     assert len(captures) == 1
+
+
+@pytest.mark.parametrize("preset, footer, expected", [
+    # Captured from codex-cli 0.162 and grok 1.0.50 in tmux, 2026-10.
+    ("codex", "› Run it\n• I’ll run the command.\n◦ Working (4s • esc to interrupt)\n› Ask Codex to do anything", "working"),
+    ("codex", "• done\n  Worked for 34s • 11:32 AM\n› Ask Codex to do anything\n  ← for agents", "idle"),
+    ("codex", "Press enter to confirm or esc to cancel", "blocked"),
+    ("grok", "   ⠴ Sleep 25s… 0.1s\n╰──╯\n  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+b:send to bg", "working"),
+    ("grok", "     done\n     Worked for 33s\n╰──╯\n  Shift+Tab:mode  │  Ctrl+x:shortcuts", "idle"),
+])
+def test_codex_and_grok_states_from_their_footer(monkeypatch, preset, footer, expected):
+    monkeypatch.setattr(panes, "screen", lambda name, lines=panes.SCREEN_LINES: footer)
+    assert panes.state("x", preset) == expected
