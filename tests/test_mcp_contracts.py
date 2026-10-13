@@ -382,7 +382,7 @@ async def test_project_status_summarizes_long_task_descriptions(bound_server, mo
     long_text = "Encargo completo. " * 200
     task = {"task_id": "T1", "title": "Implementar", "description": long_text}
     monkeypatch.setattr(bound_server, "_client", _hub_backend({
-        "/status": {"bus_version": "0.2.1"}, "/locks": [], "/agents": [],
+        "/status": {"bus_version": "0.3.0"}, "/locks": [], "/agents": [],
         "/project/provider-sessions": {"providers": []},
         "/tasks": [task, {"task_id": "T2", "title": "Corto", "description": "breve"}],
         "/tasks/T1": task,
