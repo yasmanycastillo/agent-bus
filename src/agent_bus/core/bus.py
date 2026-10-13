@@ -1061,9 +1061,15 @@ class MessageBus:
         @self.app.post("/tasks/{task_id}/integrated")
         async def finish_integrated_task(task_id: str, request: Request):
             body = await self._json_object(request)
-            _actor, error = self._transition_actor(request, body)
+            actor, error = self._transition_actor(request, body)
             if error is not None:
                 return error
+            principal = request.state.principal
+            if principal and not principal.is_admin and not await self._coordinates(task_id, actor):
+                return JSONResponse(
+                    {"error": "only an administrator or the instruction's coordinator marks integration"},
+                    status_code=403,
+                )
             task = await self.tasks.finish_integration(task_id)
             if not task:
                 return JSONResponse({"error": "Task not found"}, status_code=404)
@@ -1863,12 +1869,16 @@ class MessageBus:
         implementation = await self.tasks.get(implementation_id)
         if implementation is not None:
             previous = implementation.owner
-            if implementation.status != TaskStatus.PENDING or previous != "free":
+            # Assigned work goes straight back to its holder; claiming it again would route it
+            # through capability checks that assign_work never required.
+            holder = await InstructionLog(self.db).holder(implementation_id)
+            owner, status = (holder["agent_id"], "in_progress") if holder else ("free", "pending")
+            if implementation.status.value != status or previous != owner:
                 await self.db.conn.execute(
-                    """UPDATE tasks SET status = 'pending', owner = 'free', updated_at = ?
-                       WHERE task_id = ?""",
-                    (now, implementation_id),
+                    "UPDATE tasks SET status = ?, owner = ?, updated_at = ? WHERE task_id = ?",
+                    (status, owner, now, implementation_id),
                 )
+            previous = owner if holder else previous
             if previous not in (None, "free"):
                 await self.inbox.send(Envelope(
                     from_agent=reviewer,
@@ -1877,8 +1887,10 @@ class MessageBus:
                     reply_needed=True,
                     related_task=implementation_id,
                     body={
-                        "text": (f"Changes requested on {sha}: {reason[:300]}. "
-                                 "Claim the task again and hand off the new commit with candidate_sha."),
+                        "text": (f"Changes requested on {sha}: {reason[:300]}. " + (
+                            "The task is yours again; hand off the new commit with candidate_sha."
+                            if holder else
+                            "Claim the task again and hand off the new commit with candidate_sha.")),
                         "verdict": "changes_requested",
                         "sha": sha,
                     },
