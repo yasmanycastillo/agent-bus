@@ -368,3 +368,27 @@ async def test_task_notice_is_a_nudge_even_without_task_polling(task_hub, monkey
     await _watcher(tmp_path, task_nudges=False).tick()
     assert [verb for verb, _ in muxel.calls] == ['status', 'screen', 'send']
     assert not task_hub.task_queries and task_hub.message['acknowledged']
+
+
+# --- Plain messages (no reply_needed) also wake an idle pane, once each ---
+
+async def test_plain_message_wakes_the_idle_pane_once(task_hub, monkeypatch, tmp_path):
+    import httpx
+    task_hub.tasks = []
+    plain = {'message_id': 'plain-1', 'from_agent': 'alice', 'to_agent': 'bob', 'reply_needed': False,
+             'body': {'text': 'FYI'}, 'message_type': 'inbox'}
+    original = task_hub.handle
+
+    def handle(request):
+        if request.url.path == '/inbox/bob/messages' and request.url.params.get('reply_needed') == 'false':
+            return httpx.Response(200, json={'messages': [plain], 'next_cursor': None})
+        return original(request)
+    task_hub.handle = handle
+    muxel = FakeMuxel()
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await _watcher(tmp_path).tick()
+    sent = [text for verb, text in muxel.calls if verb == 'send']
+    assert len(sent) == 1 and 'read_messages' in sent[0] and 'alice' in sent[0]
+    await _watcher(tmp_path).tick()  # restarted watcher: already told
+    assert [verb for verb, _ in muxel.calls].count('send') == 1
+    assert not task_hub.acks  # the agent reads it itself
