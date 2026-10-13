@@ -222,7 +222,7 @@ async def test_retry_limit_never_claims_blocked_when_durable_transition_fails(tm
 
 @pytest.mark.asyncio
 async def test_integrator_test_failure_triggers_author_feedback(tmp_path):
-    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", max_retries_per_task=2)
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", max_retries_per_task=2, require_approval=False)
 
     async def mock_fail_tests(worktree_dir, test_cmd=None):
         return (False, "Failing test: assertion error in test_foo")
@@ -259,7 +259,7 @@ async def test_integrator_test_failure_triggers_author_feedback(tmp_path):
 
 @pytest.mark.asyncio
 async def test_integrator_exceeding_max_retries_blocks_task(tmp_path):
-    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", max_retries_per_task=2)
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", max_retries_per_task=2, require_approval=False)
 
     async def mock_fail_tests(worktree_dir, test_cmd=None):
         return (False, "Fatal syntax error")
@@ -273,7 +273,7 @@ async def test_integrator_exceeding_max_retries_blocks_task(tmp_path):
     async def mock_notify(task_id, author_agent, details, retry):
         pass
 
-    async def mock_block(task_id, author_agent, details):
+    async def mock_block(task_id, author_agent, reason, details=""):
         pass
 
     async def mock_mark(_task_id, _reason=""):
@@ -303,7 +303,7 @@ async def test_integrator_exceeding_max_retries_blocks_task(tmp_path):
 
 @pytest.mark.asyncio
 async def test_integrator_success_flow(tmp_path):
-    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", require_approval=False)
 
     async def mock_pass_tests(worktree_dir, test_cmd=None):
         return (True, "All tests passed (10/10)")
@@ -536,8 +536,8 @@ async def test_integrator_fails_closed_when_review_persistence_fails(tmp_path):
 
 @pytest.mark.asyncio
 async def test_integrator_no_success_when_task_completion_fails(tmp_path):
-    """Integrated but success=False when POST /tasks/<id>/done fails."""
-    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+    """Integrated but success=False when completing the task on the bus fails."""
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", require_approval=False)
 
     async def mock_candidate(sha, target_branch, worktree_dir, test_cmd, ref_box=None):
         return sha, True, "All tests passed", "diff --git a/x"
@@ -682,7 +682,7 @@ async def test_done_real_404_leaves_published_requires_reconciliation(tmp_path, 
     res = await integrator.integrate_task(
         "T911-unknown", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
-    assert http_responses == [("POST", "/tasks/T911-unknown/done", 404)]
+    assert http_responses == [("POST", "/tasks/T911-unknown/integrated", 404)]
     assert res.success is False
     assert res.merged is True
     assert res.status == "error"
@@ -743,7 +743,7 @@ async def test_done_failure_concurrent_advance_survives_reports_reconciliation(t
         "T912", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
     )
     assert res.success is False
-    assert http_responses == [("POST", "/tasks/T912/done", 404)]
+    assert http_responses == [("POST", "/tasks/T912/integrated", 404)]
     assert res.merged is True  # publication happened
     assert res.status == "error"
     assert res.metadata.get("reconciliation_required") is True
@@ -1327,3 +1327,11 @@ async def test_persisted_review_id_visible_via_http(tmp_path, secure_bus):
     ids = {r["review_id"] for r in task_reviews}
     ids |= {r["review_id"] for r in task_route_reviews}
     assert review_meta["review_id"] in ids
+
+
+@pytest.fixture(autouse=True)
+def no_strict_evidence_policy(monkeypatch):
+    # These tests isolate review/retry policy; the evidence policy has its own tests.
+    async def no_strict_policy(*args, **kwargs):
+        return None
+    monkeypatch.setattr(BranchIntegrator, "_evidence_gap", no_strict_policy)

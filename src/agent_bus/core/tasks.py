@@ -11,6 +11,117 @@ from agent_bus.reputation.database import Database
 from agent_bus.types import Task, TaskStatus
 
 
+REVIEW_WAIT = "waiting for the implementations under review"
+
+
+def _assigned_reviews(connection, status: str) -> list[tuple[str, list[str]]]:
+    """Reviews created by assign_work in this status, with the implementations they cover."""
+    if not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'work_assignments'",
+    ).fetchone():
+        return []
+    rows = connection.execute(
+        "SELECT t.task_id, t.independent_from FROM tasks t WHERE t.status = ? AND EXISTS"
+        " (SELECT 1 FROM work_assignments w WHERE w.task_id = t.task_id AND w.role = 'review')", (status,),
+    ).fetchall()
+    return [(task_id, json.loads(raw or "[]")) for task_id, raw in rows]
+
+
+def _approvals(connection, review_id: str, covered: list[str]) -> dict[str, bool]:
+    """For each covered implementation this review judged: does its latest verdict approve the latest candidate?"""
+    latest = {}
+    for sha, verdict, evidence in connection.execute(
+        "SELECT sha, verdict, evidence FROM reviews WHERE task_id = ? ORDER BY created_at, rowid", (review_id,),
+    ).fetchall():
+        latest[json.loads(evidence or "{}").get("implementation_task_id")] = (sha, verdict)
+    judged = {}
+    for implementation in covered:
+        if implementation not in latest:
+            continue
+        candidate = connection.execute(
+            "SELECT candidate_sha FROM runtime_attempts WHERE task_id = ? AND state = 'completed'"
+            " AND candidate_sha IS NOT NULL ORDER BY updated_at DESC LIMIT 1", (implementation,),
+        ).fetchone()
+        judged[implementation] = latest[implementation] == (candidate[0] if candidate else None, "approve")
+    return judged
+
+
+def close_approved_review(connection, review_id: str | None, now: str) -> None:
+    """Finish an assigned review once it approves the latest candidate of every implementation it covers.
+
+    review_id None checks every in_progress review: the hub start closes reviews approved
+    before verdicts closed them, so watchers do not announce already judged work.
+    """
+    for task_id, covered in _assigned_reviews(connection, "in_progress"):
+        if (review_id is not None and task_id != review_id) or not covered:
+            continue
+        approvals = _approvals(connection, task_id, covered)
+        if len(approvals) == len(covered) and all(approvals.values()):
+            connection.execute(
+                "UPDATE tasks SET status = 'done', blocked_reason = NULL, updated_at = ?"
+                " WHERE task_id = ? AND status = 'in_progress'", (now, task_id),
+            )
+
+
+def coordinated_by(connection, task_id: str, agent_id: str) -> bool:
+    """Is this task an implementation that agent_id assigned as coordinator of its instruction?"""
+    if not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'work_assignments'",
+    ).fetchone():
+        return False
+    return connection.execute(
+        "SELECT 1 FROM work_assignments w JOIN instructions i ON i.instruction_id = w.instruction_id"
+        " WHERE w.task_id = ? AND w.role = 'implement' AND i.coordinator_agent_id = ?", (task_id, agent_id),
+    ).fetchone() is not None
+
+
+def approved_candidate(connection, implementation_id: str) -> str | None:
+    """The implementation's latest candidate SHA when the latest verdict on that SHA approves it."""
+    candidate = connection.execute(
+        "SELECT candidate_sha FROM runtime_attempts WHERE task_id = ? AND state = 'completed'"
+        " AND candidate_sha IS NOT NULL ORDER BY updated_at DESC LIMIT 1", (implementation_id,),
+    ).fetchone()
+    if candidate is None:
+        return None
+    verdict = connection.execute(
+        "SELECT verdict FROM reviews WHERE sha = ? AND json_extract(evidence, '$.implementation_task_id') = ?"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1", (candidate[0], implementation_id),
+    ).fetchone()
+    return candidate[0] if verdict is not None and verdict[0] == "approve" else None
+
+
+def release_reviews(connection, now: str) -> None:
+    """Start held reviews once every implementation they depend on is in_review or done.
+
+    A review needs submitted work, not merged work: implementations reach done only
+    after approval, so the usual done-only depends_on release would deadlock here.
+    A closed assigned review whose verdict no longer approves the latest candidate
+    (new SHA, or changes requested) is held again first, so it restarts on the handoff.
+    """
+    for task_id, covered in _assigned_reviews(connection, "done"):
+        if not all(_approvals(connection, task_id, covered).values()):
+            connection.execute(
+                "UPDATE tasks SET status = 'blocked', blocked_reason = ?, updated_at = ?"
+                " WHERE task_id = ? AND status = 'done'", (REVIEW_WAIT, now, task_id),
+            )
+    held = connection.execute(
+        "SELECT task_id, depends_on FROM tasks WHERE status = 'blocked' AND blocked_reason = ?", (REVIEW_WAIT,),
+    ).fetchall()
+    for task_id, raw in held:
+        deps = json.loads(raw or "[]")
+        if not deps:
+            continue
+        ready = connection.execute(
+            f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({','.join('?' * len(deps))})"
+            " AND status IN ('in_review', 'done')", tuple(deps),
+        ).fetchone()[0]
+        if ready == len(deps):
+            connection.execute(
+                "UPDATE tasks SET status = 'in_progress', blocked_reason = NULL, updated_at = ?"
+                " WHERE task_id = ? AND status = 'blocked'", (now, task_id),
+            )
+
+
 class TaskDependencyError(ValueError):
     """Base exception for task dependency errors."""
 
@@ -95,6 +206,8 @@ class TaskManager:
         acceptance_criteria: list[str] | None = None,
         test_cmd: list[str] | None = None,
         depends_on: list[str] | None = None,
+        requirements: list[str] | None = None,
+        independent_from: list[str] | None = None,
         operation_key: str | None = None,
     ) -> Task:
         task_dict = {
@@ -105,6 +218,8 @@ class TaskManager:
             "acceptance_criteria": acceptance_criteria or [],
             "test_cmd": test_cmd,
             "depends_on": depends_on or [],
+            "requirements": requirements or [],
+            "independent_from": independent_from or [],
             "operation_key": operation_key,
         }
         res = await self.create_batch([task_dict], operation_key=operation_key, _return_existing=True)
@@ -169,6 +284,8 @@ class TaskManager:
                 acceptance_criteria = t.get("acceptance_criteria") or []
                 test_cmd = t.get("test_cmd")
                 depends_on = t.get("depends_on") or []
+                requirements = t.get("requirements") or []
+                independent_from = t.get("independent_from") or []
                 op_key = operation_key or t.get("operation_key")
 
                 deps_satisfied = all(dep in done_task_ids for dep in depends_on)
@@ -182,8 +299,8 @@ class TaskManager:
                 connection.execute(
                     """INSERT OR IGNORE INTO tasks
                        (task_id, title, description, owner, status, locked_files, created_at, updated_at,
-                        acceptance_criteria, test_cmd, depends_on, operation_key)
-                       VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?)""",
+                        acceptance_criteria, test_cmd, depends_on, operation_key, requirements, independent_from)
+                       VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         task_id,
                         title,
@@ -196,6 +313,8 @@ class TaskManager:
                         test_cmd_json,
                         json.dumps(depends_on),
                         op_key,
+                        json.dumps(requirements),
+                        json.dumps(independent_from),
                     ),
                 )
             return [
@@ -312,44 +431,132 @@ class TaskManager:
         row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
         return self._row_to_task(row) if row is not None else None
 
-    async def complete(self, task_id: str, actor: str | None = None) -> Task | None:
+    async def complete(
+        self,
+        task_id: str,
+        actor: str | None = None,
+        evidence: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        as_coordinator: bool = False,
+    ) -> Task | None:
+        """as_coordinator: actor coordinates the instruction of this in_review implementation and
+        closes it after integrating it outside the integrator; its latest candidate needs a current approve."""
         now = datetime.now(timezone.utc).isoformat()
-        condition = " AND owner = ? AND status IN ('in_progress', 'in_review')" if actor else " AND status != 'done'"
-        params = (now, task_id, actor) if actor else (now, task_id)
-
         def transaction(connection: sqlite3.Connection) -> Any:
+            current = connection.execute("SELECT owner FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if current is None:
+                return None
+            evidence_json = json.dumps(evidence) if evidence is not None else None
+            condition = " AND owner = ? AND status IN ('in_progress', 'in_review')" if actor else " AND status != 'done'"
+            params: tuple[Any, ...] = (now, task_id, actor) if actor else (now, task_id)
+            if as_coordinator:
+                approved = approved_candidate(connection, task_id) if coordinated_by(connection, task_id, actor) else None
+                if approved is None:
+                    return None
+                condition, params = " AND status = 'in_review'", (now, task_id)
+                evidence_json = json.dumps({**(evidence or {}), "approved_sha": approved})
             row = connection.execute(
-                "UPDATE tasks SET status = 'done', updated_at = ? WHERE task_id = ?"
+                "UPDATE tasks SET status = 'done', blocked_reason = NULL, updated_at = ? WHERE task_id = ?"
                 + condition + " RETURNING *",
                 params,
             ).fetchone()
             if row is None:
                 return None
-
+            if evidence_json is not None:
+                connection.execute(
+                    """INSERT INTO audit_log
+                    (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, evidence, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ("complete_with_evidence", task_id, actor or "unknown", session_id or "",
+                     current["owner"], "done", evidence_json, now),
+                )
+            release_reviews(connection, now)
+            # Unblock tasks whose dependencies are now all done; reviews wait for release_reviews.
             for blocked in connection.execute(
-                "SELECT task_id, depends_on FROM tasks WHERE status = 'blocked'"
+                "SELECT task_id, depends_on FROM tasks WHERE status = 'blocked' AND blocked_reason IS NOT ?",
+                (REVIEW_WAIT,),
             ).fetchall():
                 dependencies = json.loads(blocked["depends_on"] or "[]")
-                if not dependencies:
-                    ready = True
-                else:
+                if dependencies:
                     placeholders = ",".join("?" * len(dependencies))
                     done_count = connection.execute(
-                        f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) "
-                        "AND status = 'done'",
+                        f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) AND status = 'done'",
                         tuple(dependencies),
                     ).fetchone()[0]
-                    ready = done_count == len(dependencies)
-                if ready:
-                    connection.execute(
-                        "UPDATE tasks SET status = 'pending', updated_at = ? "
-                        "WHERE task_id = ? AND status = 'blocked'",
-                        (now, blocked["task_id"]),
-                    )
+                    if done_count != len(dependencies):
+                        continue
+                connection.execute(
+                    "UPDATE tasks SET status = 'pending', blocked_reason = NULL, updated_at = ? "
+                    "WHERE task_id = ? AND status = 'blocked'",
+                    (now, blocked["task_id"]),
+                )
             return row
 
         row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
         return self._row_to_task(row) if row is not None else None
+
+    async def release_if_idle(self, task_id: str) -> bool:
+        """Free the task when its latest attempt is not still running."""
+        rows = await self._db.conn.execute_fetchall(
+            "SELECT state FROM runtime_attempts WHERE task_id = ? ORDER BY updated_at DESC LIMIT 1",
+            (task_id,),
+        )
+        if rows and rows[0]["state"] == "started":
+            return False
+        await self.release(task_id)
+        return True
+
+    async def release(self, task_id: str) -> None:
+        """Return an in-progress task to the free pool after a launch that did not finish."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        def transaction(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """UPDATE tasks SET status = 'pending', owner = 'free', updated_at = ?
+                   WHERE task_id = ? AND status = 'in_progress'""",
+                (now, task_id),
+            )
+
+        await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+
+    async def finish_integration(self, task_id: str) -> Task | None:
+        """Mark a merged integration done from any status other than done."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        def transaction(connection: sqlite3.Connection) -> Any:
+            return connection.execute(
+                """UPDATE tasks SET status = 'done', blocked_reason = NULL, updated_at = ?
+                   WHERE task_id = ? AND status != 'done' RETURNING *""",
+                (now, task_id),
+            ).fetchone()
+
+        row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+        if row is not None:
+            return self._row_to_task(row)
+        return await self.get(task_id)
+
+    async def get_evidence(self, task_id: str) -> list[dict[str, Any]]:
+        rows = await self._db.conn.execute_fetchall(
+            """SELECT action, actor_agent_id, actor_session_id, previous_owner, new_owner, evidence, created_at
+               FROM audit_log
+               WHERE task_id = ? AND evidence IS NOT NULL
+               ORDER BY audit_id DESC""",
+            (task_id,),
+        )
+        results = []
+        for r in rows:
+            raw_ev = r["evidence"] if hasattr(r, "keys") else r[5]
+            parsed = json.loads(raw_ev) if isinstance(raw_ev, str) else raw_ev
+            results.append({
+                "action": r["action"] if hasattr(r, "keys") else r[0],
+                "actor_agent_id": r["actor_agent_id"] if hasattr(r, "keys") else r[1],
+                "actor_session_id": r["actor_session_id"] if hasattr(r, "keys") else r[2],
+                "previous_owner": r["previous_owner"] if hasattr(r, "keys") else r[3],
+                "new_owner": r["new_owner"] if hasattr(r, "keys") else r[4],
+                "evidence": parsed,
+                "created_at": r["created_at"] if hasattr(r, "keys") else r[6],
+            })
+        return results
 
     async def submit_review(self, task_id: str, actor: str | None = None) -> Task | None:
         """Move owned work to the serialized integration queue."""
@@ -357,24 +564,54 @@ class TaskManager:
         condition = " AND owner = ?" if actor else ""
         params = (now, task_id, actor) if actor else (now, task_id)
         def transaction(connection: sqlite3.Connection) -> Any:
-            return connection.execute(
+            row = connection.execute(
                 "UPDATE tasks SET status = 'in_review', updated_at = ? "
                 "WHERE task_id = ? AND status = 'in_progress'"
                 + condition + " RETURNING *",
                 params,
             ).fetchone()
+            if row is not None:
+                release_reviews(connection, now)
+            return row
 
         row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
         return self._row_to_task(row) if row is not None else None
 
+    async def hold_for_review(self, task_id: str, implementation_ids: list[str]) -> None:
+        """Make a review depend on these implementations and wait until all are submitted."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        def transaction(connection: sqlite3.Connection) -> None:
+            row = connection.execute(
+                "SELECT depends_on, independent_from FROM tasks WHERE task_id = ?", (task_id,),
+            ).fetchone()
+            if row is None:
+                return
+            depends = json.loads(row[0] or "[]")
+            independent = json.loads(row[1] or "[]")
+            depends += [i for i in implementation_ids if i not in depends]
+            independent += [i for i in implementation_ids if i not in independent]
+            # Reviews already submitted or done, or blocked for another reason, keep their state.
+            connection.execute(
+                "UPDATE tasks SET depends_on = ?, independent_from = ?, updated_at = ?,"
+                " status = CASE WHEN status IN ('in_progress', 'pending') THEN 'blocked' ELSE status END,"
+                " blocked_reason = CASE WHEN status IN ('in_progress', 'pending') THEN ? ELSE blocked_reason END"
+                " WHERE task_id = ?",
+                (json.dumps(depends), json.dumps(independent), now, REVIEW_WAIT, task_id),
+            )
+            release_reviews(connection, now)
+
+        await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+
     async def block(self, task_id: str, reason: str | None = None, actor: str | None = None) -> Task | None:
-        """Mark a task as blocked."""
+        """Mark a task as blocked. A named actor must own it; admins pass no actor."""
         now = datetime.now(timezone.utc).isoformat()
         condition = " AND owner = ?" if actor else ""
-        params = (now, task_id, actor) if actor else (now, task_id)
+        params = (reason, now, task_id, actor) if actor else (reason, now, task_id)
+
         def transaction(connection: sqlite3.Connection) -> Any:
             return connection.execute(
-                "UPDATE tasks SET status = 'blocked', updated_at = ? "
+                "UPDATE tasks SET status = 'blocked', blocked_reason = ?, updated_at = ? "
                 "WHERE task_id = ? AND status != 'done'"
                 + condition + " RETURNING *",
                 params,
@@ -481,6 +718,9 @@ class TaskManager:
             test_cmd_raw = row["test_cmd"] if "test_cmd" in keys else None
             depends_on_raw = row["depends_on"] if "depends_on" in keys else "[]"
             operation_key = row["operation_key"] if "operation_key" in keys else None
+            requirements_raw = row["requirements"] if "requirements" in keys else "[]"
+            independent_raw = row["independent_from"] if "independent_from" in keys else "[]"
+            blocked_reason = row["blocked_reason"] if "blocked_reason" in keys else None
         else:
             task_id = row[0]
             title = row[1]
@@ -494,6 +734,9 @@ class TaskManager:
             test_cmd_raw = row[9] if len(row) > 9 else None
             depends_on_raw = row[10] if len(row) > 10 else "[]"
             operation_key = row[11] if len(row) > 11 else None
+            requirements_raw = row[12] if len(row) > 12 else "[]"
+            independent_raw = row[13] if len(row) > 13 else "[]"
+            blocked_reason = None
 
         if isinstance(created_at, str):
             created_at = datetime.fromisoformat(created_at)
@@ -511,6 +754,8 @@ class TaskManager:
             test_cmd = test_cmd_raw
 
         depends_on = json.loads(depends_on_raw) if isinstance(depends_on_raw, str) else (depends_on_raw or [])
+        requirements = json.loads(requirements_raw) if isinstance(requirements_raw, str) else (requirements_raw or [])
+        independent_from = json.loads(independent_raw) if isinstance(independent_raw, str) else (independent_raw or [])
         locked = json.loads(locked_files) if isinstance(locked_files, str) else (locked_files or [])
 
         return Task(
@@ -523,6 +768,9 @@ class TaskManager:
             acceptance_criteria=acceptance_criteria,
             test_cmd=test_cmd,
             depends_on=depends_on,
+            requirements=requirements,
+            independent_from=independent_from,
+            blocked_reason=blocked_reason,
             operation_key=operation_key,
             created_at=created_at,
             updated_at=updated_at,

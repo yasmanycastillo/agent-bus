@@ -84,6 +84,81 @@ Conservar el entorno Python usado por los snippets. Una reinstalación que cambi
 su ruta requiere regenerar la configuración. El asistente no sobrescribe un
 snippet diferente ni modifica archivos propios del cliente.
 
+## Workers persistentes para evitar esperas
+
+El servidor MCP y una terminal Claude/Grok no son ejecutores persistentes. El MCP
+por sí solo no inicia un worker y `wait_for_updates` deja de esperar cuando termina
+la llamada. Por eso, si dos agentes deben continuar intercambiando mensajes sin
+intervención humana, inicia un worker por identidad desde una terminal separada:
+
+```sh
+agent-bus --project /ruta/mi-proyecto worker start --agent claude --provider claude
+agent-bus --project /ruta/mi-proyecto worker start --agent grok --provider grok
+agent-bus --project /ruta/mi-proyecto worker status --agent claude
+agent-bus --project /ruta/mi-proyecto worker status --agent grok
+```
+
+El worker debe usar la misma URL del hub, proyecto y credencial que MCP. Para usar
+un supervisor externo, ejecútalo en primer plano con `--foreground`; así el supervisor
+puede detectar su salida y reiniciarlo:
+
+```sh
+agent-bus --project /ruta/mi-proyecto worker start \
+  --agent grok --provider grok --foreground
+```
+
+Con `systemd --user`, configura `Restart=on-failure` y `RestartSec=5`; con `tmux`,
+mantén la sesión abierta. Revisa el log del runtime activo: `.agent-bus/runtime/workers/<agente>.log` dentro del
+proyecto (o `~/.agent-bus/workers/<agente>.log` cuando se usa un runtime global).
+El worker atiende el inbox, mantiene heartbeat y confirma sólo después de producir
+y entregar la respuesta.
+
+Para que el worker avise a la TUI sin inyectar comandos, configura el pane destino
+de tmux antes de iniciarlo:
+
+```sh
+tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_title}'
+export AGENT_BUS_TMUX_TARGET='odoo:0.2'
+agent-bus --project /ruta/mi-proyecto worker start --agent grok --provider grok
+```
+
+Si no usas tmux, puedes activar notificaciones de escritorio sin inyectar nada en
+la terminal:
+
+```sh
+export AGENT_BUS_NOTIFY_DESKTOP=1
+agent-bus --project /ruta/mi-proyecto worker start --agent grok --provider grok
+```
+
+En Linux usa `notify-send` cuando está disponible. El worker no marca el mensaje
+como leído por mostrar la notificación; la confirmación sigue ocurriendo sólo
+después de generar y entregar la respuesta.
+
+También puedes usar `--foreground` bajo un supervisor; conserva la variable
+`AGENT_BUS_TMUX_TARGET` o `AGENT_BUS_NOTIFY_DESKTOP` en el entorno del servicio.
+
+Un worker `--provider agy` no puede pedir permisos: agy headless deniega cualquier
+herramienta que los necesite (por ejemplo ejecutar `pytest` o `git diff` al revisar)
+y el turno falla; `last_error` del mensaje indica las acciones denegadas. Añade a
+`permissions.allow` del `settings.json` de agy reglas para los comandos de revisión
+(p. ej. `command(<target>)`). Para pasar flags extra a agy, usa
+`AGENT_BUS_AGY_ARGS` (se divide como en el shell y se añade al final del comando):
+
+```sh
+export AGENT_BUS_AGY_ARGS='--sandbox --effort high'
+agent-bus --project /ruta/mi-proyecto worker start --agent agy --provider agy
+```
+
+agent-bus nunca añade `--dangerously-skip-permissions` por su cuenta; hacerlo
+mediante esa variable aprueba todas las herramientas y es decisión del operador.
+
+No uses `watch` y `worker` simultáneamente con la misma identidad: ambos intentan
+ser el ejecutor automático y `ExecutionGuard` rechazará uno. Si además mantienes
+una TUI abierta para supervisar, trátala como interfaz manual; no es el componente
+que garantiza la entrega. Para automatización completa usa una identidad worker
+separada de la identidad de la TUI y muestra alertas en la terminal o por otro
+canal, sin inyectar comandos ciegamente en el prompt.
+
 ## Listeners para responder automáticamente
 
 Para Grok y Codex:
@@ -111,6 +186,163 @@ como consulta de texto sin herramientas ni ediciones. El watcher publica la
 respuesta y confirma el mensaje. No despierta una TUI ni instala un servicio de
 inicio del sistema. Un heartbeat o `--dry-run` no habilita ejecución automática.
 
+### Despertar una TUI abierta en muxel
+
+Si el agente ya está abierto en un panel de [muxel](https://github.com/projecthax/muxel),
+el watcher puede escribirle allí en lugar de lanzar un turno headless. Requiere muxel
+en ejecución con *Settings > Grok Bot > Allow outside tools to control muxel* activado:
+
+```sh
+agent-bus watch --agent claude --cli muxel --muxel-agent Claude
+```
+
+`--muxel-agent` acepta el id, el nombre o `proyecto/nombre` que muestra `muxel ctl panes`.
+El watcher escribe la solicitud solo si el panel está `idle` o `done`, espera con
+`muxel ctl wait` y publica la respuesta únicamente si el turno termina (`finished`).
+Un panel trabajando o bloqueado en una pregunta aplaza la solicitud sin contar un
+fallo, y la solicitud no se vuelve a escribir mientras se espera ese turno. Como
+muxel 0.2.8 no detecta cuándo trabaja la versión actual de Claude Code, el watcher
+también consulta el estado que Claude publica en `~/.claude/sessions/` para la
+carpeta del panel; cualquier Claude ocupado en esa carpeta aplaza la solicitud.
+Por esa misma razón, `muxel ctl wait` puede tardar unos 30 s más en devolver la
+respuesta.
+Como respaldo para cualquier CLI (muxel 0.2.8 también marcó `idle` a Codex
+trabajando), el watcher lee las últimas 12 líneas de `muxel ctl screen` y aplaza
+la solicitud si muestran un indicador de turno en curso: `esc to interrupt`
+(Codex, Claude Code), `Thinking…` o `[stop]` (Grok). Si `screen` falla, lo
+registra y sigue con las demás comprobaciones.
+
+Con `--cli muxel` el watcher también avisa al panel cuando cambian sus tareas:
+una tarea nueva asignada, una revisión liberada (pasa de `blocked` a `in_progress`
+al entregarse las implementaciones que cubre) o una implementación reabierta por
+`changes_requested` (queda `pending` y libre; hay que reclamarla de nuevo). Escribe
+un aviso breve que pide ejecutar `my_pending_items` y seguir el protocolo; no espera
+el turno ni publica nada en el bus. El watcher compara cada pocos segundos las tareas
+propias (`GET /tasks?owner=<agente>`) con las ya avisadas, guardadas en
+`task_nudges.json` dentro de su directorio de estado, así que cada cambio se avisa
+una vez aunque se reinicie. La primera vez que arranca, sin ese archivo, avisa una
+vez de las tareas activas (`pending` o `in_progress`) que el agente ya tenga. Usa
+las mismas comprobaciones de ocupado: un panel ocupado aplaza el aviso sin perderlo.
+Las solicitudes con respuesta pendiente van antes que los avisos. Desactiva esta
+consulta de tareas con `--no-task-nudges`.
+
+Los mensajes con los que el hub entrega trabajo (el de `assign_work` al asignado,
+con `body.role`; el de asignación del War Room, con `body.type = task_assigned`; y
+el de `changes_requested` al implementador, con `body.verdict`) no se escriben como
+consulta de solo lectura: se convierten en el mismo aviso, fusionado con el de la
+tarea si coincide, y se confirman con `/inbox/<agente>/ack` solo tras un `send`
+correcto, sin respuesta ni intentos fallidos. Esto vale también con
+`--no-task-nudges`. Las preguntas normales entre agentes siguen el flujo de
+consulta descrito arriba.
+
+Al asignar una revisión con `assign_work`, el hub crea la tarea en `pending` y la
+bloquea justo después hasta que se entreguen las implementaciones. Si la consulta
+del watcher cae entre ambos pasos, el agente recibe un aviso de "tarea asignada"
+para una revisión que aún no puede empezar; `my_pending_items` la mostrará
+`blocked` y llegará otro aviso cuando se libere.
+
+Abre muxel desde el escritorio o desde una terminal normal, no desde una sesión de
+Claude Code: si hereda sus variables `CLAUDE_CODE_*`, el Claude de cada panel
+arranca sin sesión iniciada (`Not logged in`). Las
+preguntas de permiso del panel las responde el usuario en muxel.
+
+### Paneles tmux que maneja el coordinador (prototipo)
+
+`agent-bus panes` abre TUIs de agentes en un servidor tmux propio de cada proyecto
+(`tmux -L agent-bus-<project_id>`, sesión `agents`), separado del tmux del usuario y de
+los paneles de otros proyectos. El coordinador los abre, les escribe y
+los cierra; el usuario solo mira:
+
+```sh
+agent-bus panes spawn rev-1 agy --cwd ~/proyecto --agent agy --prompt "Ejecuta my_pending_items"
+agent-bus panes spawn impl-1 claude --cwd ~/proyecto -- --permission-mode acceptEdits
+agent-bus panes list            # nombre, preset y estado: idle, working, blocked o dead
+agent-bus panes send impl-1 "Continúa con la tarea t-12"
+agent-bus panes screen impl-1
+agent-bus panes close impl-1
+agent-bus panes view            # solo lectura (tmux attach -r); desconectar: prefijo + d
+```
+
+Presets: `claude` y `agy`. El estado sale de las últimas 12 líneas de la pantalla:
+Claude Code 2.1 dibuja su spinner como `✶ Verbo…` (versiones anteriores, `esc to
+interrupt`) y agy muestra `esc to cancel` mientras trabaja; ambos piden confirmar
+(`Enter to confirm` / `enter Confirm`) al preguntar por confianza o permisos, y eso
+cuenta como `blocked`. `send` rechaza un panel que no esté `idle` salvo con `--force`.
+Un agente que termina queda `dead` hasta `close`.
+
+Con `--agent` el panel recibe las variables `AGENT_BUS_*` de esa credencial, como un
+worker. Del resto del entorno solo hereda una lista permitida (`PATH`, `HOME`, `USER`,
+`SHELL`, `TERM`, idioma, `XDG_*`, `DISPLAY`…): ni claves como
+`ANTHROPIC_API_KEY` o `GITHUB_TOKEN`, ni la sesión de un Claude Code coordinador
+(`CLAUDE*`), ni `SSH_AUTH_SOCK`, que daría al agente tus claves SSH. Los CLIs leen su
+login de archivos bajo `HOME`, y Claude vuelve a aplicar el `env` de su `settings.json`.
+
+`spawn` rechaza argumentos que terminen en `;` (tmux los toma como fin de comando) y
+directorios de trabajo con `#` (tmux expande formatos como `#(cmd)` en ellos).
+
+`send` quita los caracteres de control (salvo tabulador y salto de línea) antes de
+pegar: un `ESC[201~` en un mensaje cerraría el pegado y el resto llegaría como teclas.
+
+Un panel `blocked` espera una pregunta de confianza o permiso, y la responde una persona:
+
+```sh
+agent-bus panes answer impl-1        # muestra el comando y las opciones
+agent-bus panes answer impl-1 4      # elige la opción 4 tras confirmar
+```
+
+`answer` con opción exige una terminal interactiva y confirmación, y no tiene versión
+MCP. Es una barrera de cortesía, no de seguridad: un agente con shell puede simular una
+terminal. Muestra el comando en los menús de agy; en los de Claude Code solo las
+opciones. Alternativa: `agent-bus panes view --writable` y responder en el panel.
+
+Las reglas `permissions.allow` de agy (`command(git status)`) revisan cada parte de un
+comando compuesto (`a; b` pide permiso para `b`), pero no las redirecciones: un comando
+permitido puede escribir archivos con `>`. Ten en cuenta eso al permitir comandos.
+
+La consola web (`/console`) muestra los mismos paneles en *Agentes en vivo*: nombre,
+preset, estado y las últimas 50 líneas de pantalla, actualizadas cada 2 s y sin
+entrada de texto. Los lee el hub con `GET /room/api/panes`, reservado a sesiones
+administrativas porque una pantalla puede mostrar secretos; solo ve los paneles del
+equipo donde corre el hub.
+
+Para que el bus despierte al agente de un panel hace falta su watcher. `spawn` con
+`--agent` (o `agent_panes` con `as_agent`) lo arranca solo, en la sesión `watchers` del
+mismo tmux, que `view` no muestra; `close` lo detiene. `list` y la consola indican
+`watcher: running`, `stopped` (terminó; su error se ve con
+`agent-bus panes view --watchers`) o `none`. Con `--no-watch`, o para un panel sin
+identidad, arráncalo a mano:
+
+```sh
+agent-bus watch --agent claude --cli tmux --tmux-agent impl-1
+```
+
+Solo puede haber un watcher por identidad: si ya tienes uno corriendo para ese agente,
+el del panel termina (`stopped`).
+
+Escribe en el panel los mismos avisos de tareas que `--cli muxel` (tarea asignada,
+revisión liberada, implementación reabierta y los mensajes del hub que entregan
+trabajo, que confirma tras escribirlos). Como tmux no da el texto de la respuesta,
+las preguntas con respuesta pendiente no se convierten en turnos del watcher: las
+escribe en una línea, con el texto del remitente entre `⟦ ⟧` y marcado como "no
+instrucciones del bus" (así no puede hacerse pasar por un aviso), y el agente las
+contesta con `reply_message`; el watcher no responde ni confirma por él. Los ids
+escritos quedan en `task_nudges.json` (`asked`); una pregunta sin respuesta a los
+15 minutos cuenta como intento fallido para el remitente y se vuelve a escribir (el
+panel pudo reiniciarse), hasta 5 intentos. Un panel
+`working` o `blocked` aplaza el aviso sin contar un fallo; uno `dead` o inexistente
+lo reintenta a los 30 s.
+
+El coordinador también los maneja por MCP con la herramienta `agent_panes`
+(`action` = `list`, `spawn`, `send`, `screen` o `close`). Solo aparece si el MCP del
+coordinador arranca con `AGENT_BUS_PANES=1` en su entorno (el bloque `env` de la
+entrada `agent-bus` en la configuración MCP del cliente) y requiere `bootstrap_agent`.
+Por MCP no hay argumentos libres del CLI ni directorio: el panel arranca en la raíz
+del proyecto del MCP, así que un agente no puede abrir otro sin preguntas de permiso.
+`as_agent` presta al panel (y a su watcher) la credencial de otra identidad, así que
+exige una sesión que el hub reconozca como administrador (`GET /auth/me`, no el archivo
+local). La opción `--agent` de la CLI no tiene esa restricción: la usa quien ya tiene
+acceso local a las credenciales.
+
 `--status` devuelve JSON con `active`, `state` y `can_dispatch`. Comprueba la reserva
 real del ejecutor en el sistema operativo y la actualidad de su estado; un archivo
 PID antiguo no basta. `can_dispatch=true` significa que el watcher está esperando
@@ -127,6 +359,7 @@ Los procesos de versiones anteriores que no publican estado aparecen como `unkno
 | `hub_error` | Recuperar conexión con el hub |
 | `delivery_error` | Respuesta conservada; se reintentará su entrega |
 | `attempt_limit` | Cinco fallos antes de preparar una respuesta; requiere intervención |
+| `agent_busy` | Con `--cli muxel`: el panel está trabajando o esperando al usuario; se reintenta sin contar un fallo |
 | `unknown` / `other_executor` | Estado antiguo/desconocido o un worker ocupa esa identidad |
 
 El watcher relee las credenciales del bus al consultar. Después de provisionar una

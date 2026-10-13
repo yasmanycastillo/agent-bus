@@ -156,6 +156,20 @@ def init(bus_url):
     # Also ensure global config exists
     _ensure_global_config()
 
+    import subprocess
+    git_check = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+    )
+    if git_check.returncode != 0:
+        click.secho(
+            "⚠️  Aviso: Este directorio no es un repositorio Git inicializado.\n"
+            "   Para coordinar agentes con worktrees, locks y ramas de integración,\n"
+            "   te recomendamos ejecutar 'git init' y crear un commit inicial antes de operar.",
+            fg="yellow",
+        )
+
     # Generate protocol files for any already-configured agents
     from agent_bus.project import generate_all_agent_protocols
 
@@ -317,6 +331,66 @@ def _check_daemon() -> None:
 
 
 @app.command()
+@click.option("--task", default=None, help="Filtrar por tarea")
+@click.option("--agent", default=None, help="Filtrar por agente")
+@click.option("--workflow", default=None, help="Filtrar por workflow")
+def usage(task: str | None, agent: str | None, workflow: str | None):
+    """Costo y consumo por tarea, agente o workflow."""
+    params = {key: value for key, value in {"task": task, "agent": agent, "workflow": workflow}.items() if value}
+    with _client() as client:
+        resp = client.get("/usage/summary", params=params)
+        if resp.status_code != 200:
+            click.echo(f"Error: {_explain_error(resp)}")
+            return
+        body = resp.json()
+        cost = body.get("estimated_cost_usd")
+        cached = body.get("cached_input_tokens")
+        click.echo(f"Registros: {body.get('records', 0)}")
+        click.echo("Costo USD: desconocido" if cost is None else f"Costo USD: {cost}")
+        click.echo("Cache de entrada: desconocido" if cached is None else f"Cache de entrada: {cached}")
+        top_agent = body.get("top_agent")
+        if top_agent:
+            click.echo(f"Mayor consumo: {top_agent['agent_id']} ({top_agent['estimated_cost_usd']} USD)")
+        top_workflow = body.get("top_workflow_retries")
+        if top_workflow:
+            click.echo(f"Mas reintentos: {top_workflow['workflow_id']} ({top_workflow['retries']})")
+
+
+workflow = click.Group(name="workflow", help="Compilar workflows declarativos al DAG")
+app.add_command(workflow)
+
+
+@workflow.command("compile")
+@click.option("--file", "yaml_file", default=None, type=click.Path(exists=True, dir_okay=False))
+@click.option("--name", default=None, help="Workflow incluido, por ejemplo feature-development")
+@click.option("--instance", required=True, help="Identificador de esta ejecucion")
+@click.option("--advisory", is_flag=True, help="Rechazado si el workflow exige review: approved")
+def workflow_compile(yaml_file: str | None, name: str | None, instance: str, advisory: bool):
+    """Cargar, validar y crear las tareas de un workflow."""
+    yaml_text = ""
+    if yaml_file:
+        with open(yaml_file, encoding="utf-8") as handle:
+            yaml_text = handle.read()
+    with _client() as client:
+        resp = client.post("/workflows/compile", json={
+            "yaml": yaml_text, "name": name, "instance_id": instance, "advisory": advisory,
+        })
+        if resp.status_code != 200:
+            click.echo(f"Error: {_explain_error(resp)}")
+            return
+        body = resp.json()
+        click.echo(f"Workflow: {body.get('workflow')}")
+        for task in body.get("tasks") or []:
+            click.echo(task["task_id"])
+
+
+from agent_bus.cli.guided_run import run_command, workflow_advance  # noqa: E402
+
+app.add_command(run_command)
+workflow.add_command(workflow_advance)
+
+
+@app.command()
 def status():
     """Health check del servidor."""
     with _client() as client:
@@ -400,6 +474,68 @@ def work_task(
             click.echo(f"Error: {_explain_error(resp)}")
 
 
+@work.command("route")
+@click.argument("task_id")
+def work_route(task_id: str):
+    """Elegir un agente elegible para una tarea libre."""
+    with _client() as client:
+        resp = client.post(f"/tasks/{task_id}/route")
+        if resp.status_code != 200:
+            click.echo(f"Error: {_explain_error(resp)}")
+            return
+        body = resp.json()
+        click.echo(f"Seleccionado: {body.get('selected_agent')}")
+        click.echo(f"Elegibles: {', '.join(body.get('eligible') or []) or '-'}")
+
+
+agent = click.Group(name="agent", help="Capacidades de un agente")
+app.add_command(agent)
+
+
+@agent.command("capabilities")
+@click.argument("agent_id")
+def agent_capabilities(agent_id: str):
+    """Mostrar capacidades declaradas y aprobadas."""
+    with _client() as client:
+        resp = client.get(f"/agents/{agent_id}/route-profile")
+        if resp.status_code != 200:
+            click.echo(f"Error: {_explain_error(resp)}")
+            return
+        body = resp.json()
+        click.echo(f"Declaradas: {', '.join(body.get('declared') or []) or '-'}")
+        click.echo(f"Aprobadas: {', '.join(body.get('approved') or []) or '-'}")
+
+
+@agent.command("register-capability")
+@click.argument("agent_id")
+@click.argument("capability")
+@click.option("--approve", is_flag=True, help="También aprueba la capacidad para el proyecto")
+def agent_register_capability(agent_id: str, capability: str, approve: bool):
+    """Añadir una capacidad declarada."""
+    with _client() as client:
+        current = client.get(f"/agents/{agent_id}/route-profile")
+        if current.status_code != 200:
+            click.echo(f"Error: {_explain_error(current)}")
+            return
+        body = current.json()
+        declared = list(dict.fromkeys([*(body.get("declared") or []), capability]))
+        approved = list(body.get("approved") or [])
+        if approve and capability not in approved:
+            approved.append(capability)
+        saved = client.post(f"/agents/{agent_id}/route-profile", json={
+            "declared": declared,
+            "approved": approved,
+            "priority": body.get("priority", 0),
+            "cost_class": body.get("cost_class", "medium"),
+            "max_in_progress": body.get("max_in_progress", 1),
+            "can_edit": body.get("can_edit", True),
+        })
+        if saved.status_code != 200:
+            click.echo(f"Error: {_explain_error(saved)}")
+            return
+        click.echo(f"{agent_id}: {capability}")
+
+
 @work.command("claim")
 @click.argument("task_id")
 def work_claim(task_id: str):
@@ -426,12 +562,55 @@ def work_reassign(task_id: str, new_owner: str):
             click.echo(f"Error: {_explain_error(resp)}")
 
 
+@work.command("verdict")
+@click.argument("task_id")
+@click.option("--verdict", type=click.Choice(["approve", "changes_requested"]), required=True)
+@click.option("--sha", default=None)
+@click.option("--reason", default="")
+@click.option("--implementation", "implementation_task_id", default=None,
+              help="Tarea de implementación juzgada, si la review cubre varias.")
+def work_verdict(task_id: str, verdict: str, sha: str | None, reason: str, implementation_task_id: str | None):
+    """Registrar el veredicto del dueño de la tarea de review."""
+    payload = {"agent_id": _require_agent(), "verdict": verdict, "reason": reason}
+    if sha:
+        payload["sha"] = sha
+    if implementation_task_id:
+        payload["implementation_task_id"] = implementation_task_id
+    with _client() as client:
+        resp = client.post(f"/tasks/{task_id}/verdict", json=payload)
+        if resp.status_code == 200:
+            recorded = resp.json().get("sha") or sha
+            click.echo(f"Veredicto {verdict} registrado para {task_id} en {recorded}")
+        else:
+            click.echo(f"Error: {_explain_error(resp)}")
+
+
+@work.command("review")
+@click.argument("task_id")
+def work_review(task_id: str):
+    """Enviar tarea propia a revisión para integración."""
+    with _client() as client:
+        resp = client.post(f"/tasks/{task_id}/review", json={"agent_id": _require_agent()})
+        if resp.status_code == 200:
+            click.echo(f"Tarea {task_id} enviada a revisión")
+        else:
+            click.echo(f"Error: {_explain_error(resp)}")
+
+
 @work.command("done")
 @click.argument("task_id")
-def work_done(task_id: str):
+@click.option("--evidence", default=None, help="Evidencia o resumen del trabajo completado")
+@click.option("--merged-sha", default=None,
+              help="SHA fusionado al cerrar como coordinador una implementación aprobada")
+def work_done(task_id: str, evidence: str | None = None, merged_sha: str | None = None):
     """Marcar tarea como completada."""
+    payload: dict = {"agent_id": _require_agent()}
+    if evidence:
+        payload["evidence"] = {"summary": evidence}
+    if merged_sha:
+        payload["merged_sha"] = merged_sha
     with _client() as client:
-        resp = client.post(f"/tasks/{task_id}/done")
+        resp = client.post(f"/tasks/{task_id}/done", json=payload)
         if resp.status_code == 200:
             click.echo(f"Tarea {task_id} completada")
         else:
@@ -707,10 +886,18 @@ from agent_bus.cli.watch_cmds import watch  # noqa: E402
 
 app.add_command(watch)
 
+from agent_bus.cli.panes_cmds import panes  # noqa: E402
+
+app.add_command(panes)
+
 from agent_bus.cli.orchestrator_cmds import breakdown, orchestrate  # noqa: E402
 
 app.add_command(breakdown)
 app.add_command(orchestrate)
+
+from agent_bus.cli.mcp_cmds import mcp  # noqa: E402
+
+app.add_command(mcp)
 
 
 
@@ -879,6 +1066,32 @@ def show_tasks(task_status: str | None, owner: str | None):
             print_tasks_table(tasks)
 
 
+@show.command("task")
+@click.argument("task_id")
+def show_task(task_id: str):
+    """Ver detalle y evidencia de una tarea."""
+    import json
+    with _client() as client:
+        resp = client.get(f"/tasks/{task_id}")
+        if resp.status_code == 404:
+            click.echo(f"Tarea {task_id} no encontrada")
+            return
+        task = resp.json()
+        click.echo(f"ID: {task['task_id']}")
+        click.echo(f"Título: {task['title']}")
+        click.echo(f"Owner: {task['owner']}")
+        click.echo(f"Status: {task['status']}")
+        if task.get("description"):
+            click.echo(f"Descripción: {task['description']}")
+        ev_resp = client.get(f"/tasks/{task_id}/evidence")
+        if ev_resp.status_code == 200:
+            evidence_list = ev_resp.json().get("evidence", [])
+            if evidence_list:
+                click.echo("\n--- Evidencia Registrada ---")
+                for ev in evidence_list:
+                    click.echo(f"[{ev.get('created_at')}] {ev.get('actor_agent_id')}: {json.dumps(ev.get('evidence'), ensure_ascii=False)}")
+
+
 @show.command("inbox")
 @click.argument("agent_id", required=False)
 @click.option("--cursor", default=None)
@@ -1027,6 +1240,9 @@ def mcp_server_cmd(bus_url: str, agent_id: str | None):
         asyncio.run(run_mcp_server(bus_url=bus_url, agent_id=agent_id))
     except AuthenticationError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+mcp.add_command(mcp_server_cmd, name="run")
 
 
 @app.command("hook-inbox", hidden=True)

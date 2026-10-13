@@ -33,6 +33,11 @@ def parse_agents(value: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def is_uv_tool_env(prefix: Path) -> bool:
+    """True when the interpreter lives in an environment created by `uv tool install`."""
+    return (prefix / 'uv-receipt.toml').is_file()
+
+
 def probe_hub(url: str, project_id: str) -> bool:
     """Never send credentials before identifying the local hub."""
     try:
@@ -170,4 +175,5 @@ def onboard_mcp(agents: str | None, admin: str, port: int | None, yes: bool, run
     click.echo(f'Hub y {len(sessions)} sesiones verificados. Consola: {url}/console')
     click.echo('Copia la configuración del agente a tu cliente MCP y reconecta. Primera llamada: bootstrap_agent({}).')
     click.echo('Cada aplicación necesita su propia identidad. No compartas los archivos credentials/.')
-    click.echo('La configuración usa este Python instalado: conserva su entorno; para uso permanente instala con uv tool install.')
+    if not is_uv_tool_env(Path(sys.prefix)):
+        click.echo('La configuración usa este Python instalado: conserva su entorno; para uso permanente instala con uv tool install.')

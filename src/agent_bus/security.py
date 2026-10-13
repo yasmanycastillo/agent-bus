@@ -87,6 +87,16 @@ class SessionStore:
         return bool(rows)
 
 
+def credentials_dir() -> Path:
+    """The 0700 credential directory, ignored by git: its files hold plaintext tokens."""
+    path = get_config_dir() / "credentials"
+    path.mkdir(parents=True, mode=0o700, exist_ok=True)
+    ignore = path / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text("*\n")
+    return path
+
+
 def resolve_agent_id(agent_id: str | None = None) -> str | None:
     selected = agent_id or os.environ.get("AGENT_BUS_AGENT_ID") or os.environ.get("AGENT_ID")
     if not selected:

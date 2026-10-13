@@ -1,5 +1,7 @@
 # Conectar un cliente MCP
 
+Para dejar el servidor instalado en un cliente, usa [Instalar como MCP](../README.md#instalar-como-mcp). Esta página explica la conexión cuando hace falta prepararla a mano.
+
 El servidor MCP permite que un agente consulte pendientes, coordine archivos y
 entregue trabajo al hub. Funciona por stdio: el cliente inicia un proceso
 `agent-bus mcp-server` y se comunica con él mediante JSON-RPC.
@@ -18,6 +20,27 @@ entregue trabajo al hub. Funciona por stdio: el cliente inicia un proceso
 El JSON generado fija intérprete, proyecto, base, URL y ruta de la credencial;
 no contiene el token. Conserva el entorno Python al que apunta. El comando
 `mcp-server` no arranca el hub ni provisiona credenciales.
+
+## Instalación automática en clientes
+
+Puedes configurar directamente tus clientes sin copiar ni editar JSON manualmente:
+
+```sh
+# Instalar en Cursor, Claude, Gemini, Codex, Grok, Hermes y AGY:
+agent-bus mcp install --client all
+
+# Instalar para un cliente o agente concreto:
+agent-bus mcp install --client cursor,claude --agent backend
+
+# Instalar en el ámbito global del usuario (~/.cursor, ~/.config/Claude, ~/.hermes, etc.):
+agent-bus mcp install --scope global --client agy --agent agy
+agent-bus mcp install --scope global --client hermes --agent hermes
+
+# Simular cambios sin escribir en disco:
+agent-bus mcp install --client all --dry-run
+```
+
+La instalación conserva los demás servidores. Codex escribe solo la tabla `[mcp_servers.agent-bus]` de `~/.codex/config.toml`. AGY escribe en `~/.gemini/config/mcp_config.json`. Hermes escribe solo el bloque `agent-bus` de `~/.hermes/config.yaml`. El ámbito global no fija un proyecto ni un puerto.
 
 Para una configuración manual, la forma del cliente JSON es:
 
@@ -43,6 +66,9 @@ Para una configuración manual, la forma del cliente JSON es:
 Usa los valores reales que generó onboarding. La instancia MCP fija la identidad
 al arrancar; cambiar un argumento de una herramienta no permite suplantar a otro
 agente. Al renovar la credencial, reconecta MCP para cargar la sesión nueva.
+Tras actualizar agent-bus, cada proceso `mcp-server` ya lanzado sigue con el código
+anterior: `bootstrap_agent` lo indica en `version_warning` si su versión difiere de
+`bus_version` del hub, y `get_project_status` muestra `mcp_version`.
 [Autenticación y permisos](authentication.md), [proyectos y sesiones](projects.md).
 
 ## Herramientas
@@ -65,16 +91,28 @@ Leer no confirma mensajes. Usa `ack_messages` después de procesarlos, o
 `reply_message` con `acknowledge=true`. Conserva la misma clave de idempotencia
 al repetir un envío cuyo resultado se perdió. [Contrato de mensajería](messaging.md).
 
-## Espera y ejecución automática
+## Espera, listeners y workers
 
-`wait_for_updates` consulta pendientes o espera eventos, con un plazo total de
-1 a 120 segundos. Puede devolver una llegada mientras la llamada está activa;
-no inicia un cliente que ya terminó. Al vencer el plazo, el cliente decide si
-vuelve a esperar. [Eventos y recuperación](events.md).
+`wait_for_updates` sólo espera mientras la llamada MCP permanece activa. MCP no
+inicia procesos en segundo plano, no mantiene una TUI despierta y `mcp-server` no
+es un worker. Si el agente debe responder aunque Claude/Grok esté en reposo,
+arranca un worker persistente desde una terminal con la misma identidad, proyecto,
+URL y credencial:
 
-Para responder sin intervención del usuario, inicia un listener `watch` con su
-propia identidad. Es un proceso headless separado de cualquier TUI abierta.
-Consulta [listeners y estados](first-run.md#listeners-para-responder-automáticamente).
+```sh
+agent-bus --project /ruta/mi-proyecto worker start --agent grok --provider grok
+agent-bus --project /ruta/mi-proyecto worker status --agent grok
+```
+
+Mantén ese proceso bajo un supervisor (por ejemplo `systemd --user`, `tmux` o un
+servicio equivalente). `worker status` comprueba el proceso local y su PID; para
+confirmar presencia en el hub consulta `agent-bus show agents` o la consola y
+verifica el heartbeat. No ejecutes `watch` y `worker` para
+la misma identidad: ambos son ejecutores y la exclusión local rechazará el segundo.
+Una TUI abierta puede servir para supervisión manual, pero no sustituye al worker.
+Para una respuesta automática sin worker usa `watch`; es headless y tampoco inyecta
+texto en la TUI. La configuración completa está en
+[workers y recuperación](first-run.md#workers-persistentes-para-evitar-esperas).
 
 El repositorio no activa hooks de Claude por defecto. Si deseas habilitarlos,
 usa [el ejemplo de configuración](../examples/claude/settings.json): incorpora su

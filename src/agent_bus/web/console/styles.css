@@ -134,3 +134,12 @@ dialog::backdrop { background: rgba(0, 0, 0, .72); }
 .detail-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .detail-header h3 { margin: 0; }
 .approval > details > summary { padding: 10px 4px; }
+
+.badge.warn { background: #3a3020; color: var(--warn); }
+.panes { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 10px; }
+.pane { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; min-width: 0; }
+.pane .row { margin-bottom: 6px; }
+.pane .screen {
+  margin: 0; padding: 8px; height: 360px; overflow: auto; background: #070a0d; border-radius: 4px;
+  font: 12px/1.25 ui-monospace, "Cascadia Mono", Menlo, monospace; white-space: pre; color: var(--text);
+}

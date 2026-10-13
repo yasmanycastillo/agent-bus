@@ -88,3 +88,17 @@ def test_explicit_agent_rotation_and_project_mismatch_cleanup(tmp_path, monkeypa
     assert result.exit_code != 0 and "another project" in result.output
     assert not rejected.exists()
     assert all(session["token"] not in result.output for session in sessions)
+
+
+def test_credentials_stay_out_of_git(tmp_path, monkeypatch):
+    """`git add -A` in the project must never pick up a credential file."""
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    monkeypatch.setenv("AGENT_BUS_CONFIG_DIR", str(tmp_path / ".agent-bus/runtime"))
+    monkeypatch.setenv("AGENT_BUS_DATABASE_PATH", str(tmp_path / "bus.db"))
+    monkeypatch.setenv("AGENT_BUS_PROJECT_ID", "test-project")
+    result = CliRunner().invoke(auth, ["create", "--agent", "alice", "--quiet"])
+    assert result.exit_code == 0, result.output
+    untracked = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                               cwd=tmp_path, capture_output=True, text=True, check=True).stdout
+    assert "alice.json" not in untracked

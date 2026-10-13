@@ -29,7 +29,9 @@ El bootstrap reutiliza la sesión autenticada, registra/actualiza presencia y
 entrega instrucciones, vencimiento, agentes, decisiones recientes, tareas libres
 y pendientes propios. No rota tokens ni cierra otras sesiones. Los listados del
 bootstrap están limitados; `available_task_count` y `agent_count` indican el total.
-`get_project_status` conserva la consulta global de tareas, agentes y locks.
+`get_project_status` conserva la consulta global de tareas, agentes y locks; recorta
+cada descripción a 200 caracteres (`description_truncated`) y con `task_id` devuelve
+esa tarea completa.
 `get_agent_instructions` devuelve las instrucciones sin escribir en el hub.
 
 `my_pending_items` devuelve:
@@ -117,7 +119,9 @@ nuevas reservas; la renovación de credenciales no hereda locks anteriores.
 `complete_handoff` valida propietario y estado, cambia la tarea, guarda evidencia
 y mensaje al destinatario, registra auditoría, confirma los IDs explícitos y
 libera sólo las adquisiciones indicadas en **una transacción**. Un ACK ajeno,
-un token obsoleto o una tarea ajena impide todos los efectos.
+un token obsoleto o una tarea ajena impide todos los efectos. Con `candidate_sha`
+(SHA completo del commit, sólo para `in_review` o `done`) registra además el
+intento completado que la revisión juzga con `record_verdict`.
 
 El destino recibe un mensaje persistente aunque no esté conectado. Se conserva
 el propietario de la tarea; el destinatario del mensaje no se convierte en su
@@ -143,6 +147,15 @@ y revisa el diff entre esos commits. Fusiona el SHA revisado, no el nombre mutab
 de la rama. Rechaza un destino que cambió después de revisar. Las carpetas de
 runtime y artefactos de tests deben estar ignoradas en Git. Los procesos externos
 que modifiquen simultáneamente el checkout siguen requiriendo coordinación.
+
+Si el coordinador integra una implementación aprobada sin el integrador, la cierra
+con `complete_task` (o `agent-bus work done <task_id> --merged-sha <sha>`;
+`POST /tasks/{task_id}/done` con `merged_sha` opcional). Sólo el coordinador de la
+instrucción que la asignó con `assign_work` puede cerrar así una implementación
+ajena, y sólo si está `in_review` y el último veredicto sobre su último
+`candidate_sha` es `approve`; si no, responde 409. La evidencia registra
+`approved_sha` y, si se indica, `merged_sha`. El hub no comprueba que ese SHA
+contenga el candidato aprobado. Un administrador sigue pudiendo cerrar cualquier tarea.
 
 `auth create` guarda el secreto sin imprimirlo por defecto. Usa `--show-token`
 explícitamente si necesitas copiarlo a la consola; `--quiet` prevalece.

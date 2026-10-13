@@ -20,7 +20,8 @@ from agent_bus.worker.gatekeeper import (
     ReviewRequest,
     Verdict,
 )
-from agent_bus.worker.worktrees import WorktreeManager
+from agent_bus.workspaces.base import Workspace
+from agent_bus.workspaces.worktree import WorktreeWorkspaceBackend
 
 logger = logging.getLogger("agent_bus.worker.integrator")
 
@@ -81,16 +82,23 @@ class BranchIntegrator:
         bus_url: str | None = None,
         agent_id: str = "integrator",
         max_retries_per_task: int = 2,
-        require_approval: bool = False,
+        require_approval: bool = True,
         gatekeeper: Gatekeeper | None = None,
+        client_factory=None,
     ) -> None:
         self.repo_dir = repo_dir or Path.cwd()
         from agent_bus.config import get_bus_url
         self.bus_url = get_bus_url(bus_url)
+        self._client_factory = client_factory
         self.agent_id = agent_id
         self.max_retries_per_task = max_retries_per_task
         self.require_approval = require_approval
         self.gatekeeper = gatekeeper or CodeReviewGatekeeper()
+
+    def _open_bus(self, timeout: float):
+        if self._client_factory is not None:
+            return self._client_factory(timeout)
+        return async_bus_client(self.agent_id, base_url=self.bus_url, timeout=timeout)
 
     async def process_pending(
         self,
@@ -103,29 +111,52 @@ class BranchIntegrator:
         The resolver owns the project policy for mapping a task to its dedicated
         checkout; the integrator never guesses a worktree from an agent name.
         """
-        async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=30.0) as client:
+        async with self._open_bus(30.0) as client:
             response = await client.get("/tasks", params={"status": "in_review"})
             response.raise_for_status()
             tasks = response.json()
         results: list[IntegratorResult] = []
         for task in tasks:
-            worktree = worktree_for(task)
-            if asyncio.iscoroutine(worktree):
-                worktree = await worktree
-            branch = str(task.get("candidate_branch") or f"agent/{task.get('owner', '')}")
+            located = worktree_for(task)
+            if asyncio.iscoroutine(located):
+                located = await located
+            worktree, branch = self._checkout_from(located, task)
             acceptance_criteria = task.get("acceptance_criteria", [])
             results.append(await self.integrate_task(
-                task["task_id"], task.get("owner", "unknown"), Path(worktree), branch,
+                task["task_id"], task.get("owner", "unknown"), worktree, branch,
                 target_branch=target_branch, test_cmd=test_cmd,
                 acceptance_criteria=acceptance_criteria,
             ))
         return results
 
-    async def run_once(self, test_cmd: list[str] | None = None, target_branch: str = "main") -> list[IntegratorResult]:
-        """Process the conventional ``.worktrees/<owner>`` queue once."""
-        manager = WorktreeManager(self.repo_dir)
+    @staticmethod
+    def _checkout_from(located: Workspace | Path, task: dict[str, Any]) -> tuple[Path, str]:
+        if isinstance(located, Workspace):
+            return located.path, located.branch
+        branch = str(task.get("candidate_branch") or "")
+        if not branch:
+            raise ValueError("candidate_branch is required when the checkout is only a path")
+        return Path(located), branch
+
+    async def run_once(
+        self,
+        test_cmd: list[str] | None = None,
+        target_branch: str = "main",
+        workspace_backend=None,
+    ) -> list[IntegratorResult]:
+        """Process the review queue using a workspace backend."""
+        backend = workspace_backend or WorktreeWorkspaceBackend(self.repo_dir)
+
+        async def resolve(task: dict[str, Any]) -> Workspace:
+            from agent_bus.workspaces.base import WorkspaceRequest
+            return await backend.open(WorkspaceRequest(
+                task_id=str(task.get("task_id") or ""),
+                agent_id=str(task.get("owner") or ""),
+                base_ref=target_branch,
+            ))
+
         return await self.process_pending(
-            lambda task: manager.path_for(str(task.get("owner", ""))),
+            resolve,
             test_cmd=test_cmd,
             target_branch=target_branch,
         )
@@ -209,16 +240,13 @@ class BranchIntegrator:
         target_sha = ""
         integration_sha = ""
         if await self._is_git_repo():
-            candidate_sha = await self._git_output(
-                "rev-parse", f"refs/heads/{candidate_branch}", cwd=worktree_dir
-            )
-            if not candidate_sha:
-                return IntegratorResult(
-                    False, False, "rejected",
-                    error=f"Candidate branch '{candidate_branch}' has no resolvable commit SHA.",
-                    output="Could not resolve candidate branch HEAD.",
-                )
-            target_sha = await self._git_output("rev-parse", f"refs/heads/{target_branch}")
+            try:
+                snapshot = await self._snapshot(worktree_dir, candidate_branch, target_branch)
+            except ValueError as exc:
+                return IntegratorResult(False, False, "rejected", error=str(exc), output=str(exc))
+            candidate_sha, target_sha = snapshot["sha"], snapshot["target_sha"]
+            if await self._candidate_is_merged(candidate_sha, target_branch):
+                return await self._finish_recorded_merge(task_id, "candidate already on target")
 
             # Build and test a temporary candidate worktree that combines the
             # pinned candidate SHA with the captured target SHA (never the
@@ -301,11 +329,22 @@ class BranchIntegrator:
             self.require_approval if require_approval is None else require_approval
         )
 
+        evidence_gap = await self._evidence_gap(task_id, candidate_sha, target_sha, decision.verdict.value)
+        if evidence_gap:
+            reason = f"Evidence policy rejected integration: {evidence_gap}"
+            blocked = await self._mark_task_blocked(task_id, reason)
+            notified = await self._notify_bus_blocked(task_id, author_agent, reason, test_output) if blocked else False
+            return IntegratorResult(
+                success=False, merged=False, status="blocked" if blocked else "error", output=test_output,
+                error=reason if blocked else f"{reason}; failed to mark the task blocked durably.",
+                metadata={"review": decision.model_dump(mode="json"), "task_blocked": blocked,
+                          "author_notified": notified},
+            )
+
         # If verdict is BLOCKED, DO NOT MERGE under any policy
         if decision.verdict == Verdict.BLOCKED:
-            blocked = await self._mark_task_blocked(
-                task_id, f"Gatekeeper review blocked: {decision.reason}"
-            )
+            reason = f"Gatekeeper review blocked: {decision.reason}"
+            blocked = await self._mark_task_blocked(task_id, reason)
             if not blocked:
                 return IntegratorResult(
                     success=False,
@@ -321,9 +360,7 @@ class BranchIntegrator:
                         "task_blocked": False,
                     },
                 )
-            notified = await self._notify_bus_blocked(
-                task_id, author_agent, f"Task {task_id} blocked by gatekeeper: {decision.reason}"
-            )
+            notified = await self._notify_bus_blocked(task_id, author_agent, reason)
             return IntegratorResult(
                 success=False,
                 merged=False,
@@ -357,6 +394,10 @@ class BranchIntegrator:
                         f"Exceeded max retries ({self.max_retries_per_task}). "
                         f"Gatekeeper: {decision.reason}",
                     )
+                    inbox_reason = (
+                        f"Exceeded max retries ({self.max_retries_per_task}) "
+                        "after Gatekeeper requested changes."
+                    )
                     if not blocked:
                         return IntegratorResult(
                             False,
@@ -374,7 +415,7 @@ class BranchIntegrator:
                             },
                         )
                     notified = await self._notify_bus_blocked(
-                        task_id, author_agent, test_output
+                        task_id, author_agent, inbox_reason, test_output
                     )
                     return IntegratorResult(
                         success=False,
@@ -496,10 +537,8 @@ class BranchIntegrator:
                     )
 
                 if retries > self.max_retries_per_task:
-                    blocked = await self._mark_task_blocked(
-                        task_id,
-                        f"Exceeded max integration retries ({self.max_retries_per_task}).",
-                    )
+                    inbox_reason = f"Exceeded max integration retries ({self.max_retries_per_task})."
+                    blocked = await self._mark_task_blocked(task_id, inbox_reason)
                     if not blocked:
                         return IntegratorResult(
                             False,
@@ -517,7 +556,7 @@ class BranchIntegrator:
                             },
                         )
                     notified = await self._notify_bus_blocked(
-                        task_id, author_agent, test_output
+                        task_id, author_agent, inbox_reason, test_output
                     )
                     return IntegratorResult(
                         success=False,
@@ -855,7 +894,7 @@ class BranchIntegrator:
             status="error",
             output=merge_output,
             error=(
-                f"Published {integration_sha} onto '{target_branch}' and POST /tasks/{task_id}/done failed "
+                f"Published {integration_sha} onto '{target_branch}' and POST /tasks/{task_id}/integrated failed "
                 f"({completion_error}). Target left at the verified tested commit; manual reconciliation "
                 "of the bus task state is required."
             ),
@@ -937,13 +976,75 @@ class BranchIntegrator:
     async def _finalize_merge(self, task_id: str) -> tuple[bool, str | None]:
         """Mark the task completed, surfacing persistence failures to the caller."""
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
-                resp = await client.post(f"/tasks/{task_id}/done")
+            async with self._open_bus(10.0) as client:
+                resp = await client.post(f"/tasks/{task_id}/integrated", json={"agent_id": self.agent_id})
                 resp.raise_for_status()
+                if resp.json().get("status") != "done":
+                    raise ValueError("integration response did not confirm the task is done")
             return (True, None)
         except Exception as exc:
             logger.error(f"Failed to mark task {task_id} done: {exc}")
             return (False, str(exc))
+
+    async def _finish_recorded_merge(self, task_id: str, output: str) -> IntegratorResult:
+        recorded = await self._mark_task_completed(task_id)
+        if not recorded:
+            return IntegratorResult(
+                success=False, merged=True, status="merged_unrecorded", output=output,
+                error="integration merged but the task was not marked done",
+            )
+        return IntegratorResult(success=True, merged=True, status="integrated", output=output)
+
+    async def _candidate_is_merged(self, sha: str, target_branch: str) -> bool:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "merge-base", "--is-ancestor", sha, target_branch,
+            cwd=str(self.repo_dir),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        return await proc.wait() == 0
+
+    async def _snapshot(self, worktree_dir: Path, candidate_branch: str, target_branch: str) -> dict[str, str]:
+        """Fail closed on ambiguous checkouts, dirty files, or a different repository."""
+        common = await self._git_output("rev-parse", "--path-format=absolute", "--git-common-dir")
+        candidate_common = await self._git_output("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=worktree_dir)
+        if not common or common != candidate_common:
+            raise ValueError("Candidate and target must belong to the same Git repository.")
+        sha = await self._git_output("rev-parse", "--verify", "HEAD", cwd=worktree_dir)
+        candidate_sha = await self._git_output("rev-parse", "--verify", f"refs/heads/{candidate_branch}")
+        target_sha = await self._git_output("rev-parse", "--verify", f"refs/heads/{target_branch}")
+        if not sha or not target_sha or sha != candidate_sha:
+            raise ValueError("Candidate worktree HEAD must match the candidate branch.")
+        if await self._git_output("symbolic-ref", "--short", "HEAD") != target_branch:
+            raise ValueError("Integrator checkout must be on the target branch.")
+        for directory in (self.repo_dir, worktree_dir):
+            if await self._git_output("status", "--porcelain", cwd=directory):
+                raise ValueError("Git checkout changed or contains uncommitted files; validation rejected.")
+        return {"sha": sha, "target_sha": target_sha}
+
+    async def _evidence_gap(self, task_id: str, candidate_sha: str, target_sha: str, verdict: str) -> str | None:
+        try:
+            async with self._open_bus(1.0) as client:
+                policy = await client.get(f"/tasks/{task_id}/evidence-policy")
+                if policy.status_code == 404:
+                    return None
+                if policy.status_code != 200:
+                    return f"evidence policy unavailable ({policy.status_code})"
+                if not policy.json().get("strict"):
+                    return None
+                checked = await client.post(f"/tasks/{task_id}/evidence-check", json={
+                    "candidate_sha": candidate_sha,
+                    "target_sha": target_sha,
+                    "verdict": verdict,
+                })
+                if checked.status_code != 200:
+                    return "evidence check failed"
+                body = checked.json()
+                if not body.get("ok"):
+                    return body.get("error") or "required evidence is missing"
+                return None
+        except Exception as exc:
+            return f"evidence policy unavailable: {type(exc).__name__}"
 
     async def _git_output(self, *args: str, cwd: Path | None = None) -> str:
         proc = await asyncio.create_subprocess_exec(
@@ -978,7 +1079,7 @@ class BranchIntegrator:
     async def _notify_author_failure(self, task_id: str, author_agent: str, details: str, retry: int) -> bool:
         """Send a high-priority feedback message to the author; False if it failed."""
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+            async with self._open_bus(10.0) as client:
                 # Ensure task stays in_progress for author
                 reassigned = await client.post(f"/tasks/{task_id}/reassign", json={"new_owner": author_agent})
                 reassigned.raise_for_status()
@@ -1005,10 +1106,12 @@ class BranchIntegrator:
             logger.error(f"Failed to notify author {author_agent}: {exc}")
             return False
 
-    async def _notify_bus_blocked(self, task_id: str, author_agent: str, details: str) -> bool:
-        """Alert that a task was blocked; False if the bus rejected the post."""
+    async def _notify_bus_blocked(
+        self, task_id: str, author_agent: str, reason: str, details: str = ""
+    ) -> bool:
+        """Alert the author to a blocked integration with its reason; False if the bus rejected it."""
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+            async with self._open_bus(10.0) as client:
                 resp = await client.post(
                     "/messages",
                     json={
@@ -1016,7 +1119,7 @@ class BranchIntegrator:
                         "to_agent": author_agent,
                         "message_type": "blocker",
                         "body": {
-                            "text": f"Task {task_id} blocked: exceeded max integration retries ({self.max_retries_per_task}).",
+                            "text": f"Task {task_id} blocked: {reason[:300]}",
                             "details": details[:300],
                         },
                         "reply_needed": True,
@@ -1029,9 +1132,10 @@ class BranchIntegrator:
             logger.error(f"Failed to post blocker for {task_id}: {exc}")
             return False
 
-    async def _mark_task_completed(self, task_id: str) -> None:
+    async def _mark_task_completed(self, task_id: str) -> bool:
         """Deprecated: superseded by _finalize_merge, kept for callers/tests."""
-        await self._finalize_merge(task_id)
+        completed, _error = await self._finalize_merge(task_id)
+        return completed
 
     async def _fetch_acceptance_criteria(self, task_id: str) -> list[str] | None:
         """Fetch acceptance criteria; None signals fetch failure (4xx/5xx/network).
@@ -1041,7 +1145,7 @@ class BranchIntegrator:
         decide instead of silently treating an error as "no criteria".
         """
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+            async with self._open_bus(10.0) as client:
                 resp = await client.get(f"/tasks/{task_id}")
                 resp.raise_for_status()
                 return list(resp.json().get("acceptance_criteria", []) or [])
@@ -1054,9 +1158,7 @@ class BranchIntegrator:
     ) -> int | None:
         """Count persisted integration reviews so restarts cannot reset retry limits."""
         try:
-            async with async_bus_client(
-                self.agent_id, base_url=self.bus_url, timeout=10.0
-            ) as client:
+            async with self._open_bus(10.0) as client:
                 response = await client.get(f"/tasks/{task_id}/reviews")
                 response.raise_for_status()
                 reviews = response.json()
@@ -1083,7 +1185,7 @@ class BranchIntegrator:
         failure or an unvalidatable response) and the caller must fail closed.
         """
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+            async with self._open_bus(10.0) as client:
                 resp = await client.post("/reviews", json=decision.model_dump(mode="json"))
                 resp.raise_for_status()
                 persisted = ReviewDecision.model_validate(resp.json())
@@ -1098,9 +1200,7 @@ class BranchIntegrator:
     async def _mark_task_blocked(self, task_id: str, reason: str = "") -> bool:
         """Mark the task blocked and verify the durable state before reporting success."""
         try:
-            async with async_bus_client(
-                self.agent_id, base_url=self.bus_url, timeout=10.0
-            ) as client:
+            async with self._open_bus(10.0) as client:
                 response = await client.post(
                     f"/tasks/{task_id}/block", json={"reason": reason}
                 )
@@ -1131,7 +1231,7 @@ class BranchIntegrator:
     ) -> bool:
         """Send review feedback to the author; False if any post was rejected."""
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
+            async with self._open_bus(10.0) as client:
                 # Ensure task stays in_progress and assigned to author
                 reassigned = await client.post(f"/tasks/{task_id}/reassign", json={"new_owner": author_agent})
                 reassigned.raise_for_status()

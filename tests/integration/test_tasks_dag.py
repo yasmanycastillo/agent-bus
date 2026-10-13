@@ -76,7 +76,7 @@ async def test_http_dag_lifecycle(client: AsyncClient):
     assert claim_a.status_code == 200
     assert claim_a.json()["owner"] == "worker-1"
 
-    done_a = await client.post("/tasks/dag-a/done")
+    done_a = await client.post("/tasks/dag-a/done", json={"agent_id": "worker-1"})
     assert done_a.status_code == 200
     assert done_a.json()["status"] == "done"
 

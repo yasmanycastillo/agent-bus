@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import re
+import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -15,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 from sse_starlette.sse import EventSourceResponse
 
+from agent_bus import __version__
 from agent_bus.core.events import CursorExpired, CursorInvalid, EventLog
 from agent_bus.core.decisions import DecisionLog
 from agent_bus.core.inbox import (
@@ -164,14 +167,17 @@ class MessageBus:
         self.sessions = SessionStore(db, self.project_id)
         self.events = EventLog(db)
         self.registry = registry
+        if registry.db is None:
+            registry.db = db
         self.inbox = inbox
+        self.sandbox_opener = None
         self.tasks = TaskManager(db)
         self.decisions = DecisionLog(db)
         self.reviews = ReviewLog(db)
         self.locks = LockManager(db)
         self.skills = SkillRegistry(db)
         self.kickoff = KickoffManager(db)
-        self.app = FastAPI(title="agent-bus", version="0.1.0")
+        self.app = FastAPI(title="agent-bus", version=__version__)
         self._sse_subscribers: dict[str, set[asyncio.Event]] = defaultdict(set)
         self._global_sse_subscribers: set[asyncio.Event] = set()
         self._ws_connections: dict[str, WebSocket] = {}
@@ -226,7 +232,11 @@ class MessageBus:
                 if admin_only and not principal.is_admin:
                     return JSONResponse({"error": "Administrator role required"}, status_code=403)
                 if len(parts) >= 2 and parts[0] in ("inbox", "events", "agents"):
-                    if path not in ("/events/all", "/events/all/cursor") and parts[1] != principal.agent_id:
+                    if (
+                        not principal.is_admin
+                        and path not in ("/events/all", "/events/all/cursor")
+                        and parts[1] != principal.agent_id
+                    ):
                         return JSONResponse({"error": "Identity does not own this resource"}, status_code=403)
                 # Legacy actor arguments are accepted only when consistent with
                 # the verified session. They never confer authority.
@@ -241,10 +251,12 @@ class MessageBus:
                             actors.append("from_agent")
                         if path == "/decisions":
                             actors.append("decided_by")
-                        if path == "/register" or path.startswith("/locks/") or (
+                        if path.startswith("/locks/") or (
                             len(parts) == 3 and parts[0] == "tasks"
                             and parts[2] in ("claim", "done", "review", "lock-files", "block")
                         ):
+                            actors.append("agent_id")
+                        if path == "/register" and not principal.is_admin:
                             actors.append("agent_id")
                         if path.startswith("/kickoff/step/"):
                             actors.append("completed_by")
@@ -290,11 +302,24 @@ class MessageBus:
             agents = await self.registry.list_all()
             return [a.model_dump(mode="json") for a in agents]
 
+        @self.app.get("/project/provider-sessions")
+        async def provider_sessions():
+            from agent_bus.config import load_config
+            from agent_bus.observe.sessions import remember_on_latest_attempt, scan_providers
+
+            root = load_config().project_root
+            if not root:
+                return {"providers": []}
+            # Reads local files; keep it off the event loop.
+            providers = await asyncio.to_thread(scan_providers, Path(root))
+            await remember_on_latest_attempt(self.db.conn, providers)
+            return {"providers": providers}
+
         @self.app.get("/status")
         async def status():
             agents = await self.registry.list_all()
             return {
-                "bus_version": "0.1.0",
+                "bus_version": __version__,
                 "project_id": self.project_id,
                 "agents_online": sum(1 for a in agents if a.status.value == "online"),
                 "agents_total": len(agents),
@@ -515,9 +540,23 @@ class MessageBus:
                 return JSONResponse({"error": "Task not found"}, status_code=404)
             return task.model_dump(mode="json")
 
+        @self.app.post("/tasks/{task_id}/release")
+        async def release_task(task_id: str, request: Request):
+            principal = request.state.principal
+            if principal and not principal.is_admin:
+                return JSONResponse({"error": "Administrator role required"}, status_code=403)
+            released = await self.tasks.release_if_idle(task_id)
+            task = await self.tasks.get(task_id)
+            if task is None:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            return {"released": released, "status": task.status.value}
+
         @self.app.post("/tasks/{task_id}/claim")
         async def claim_task(task_id: str, req: ClaimRequest, request: Request):
             req.agent_id = self._actor(request, req.agent_id)
+            refusal = await self._claim_refusal(task_id, req.agent_id)
+            if refusal is not None:
+                return refusal
             task = await self.tasks.claim(task_id, req.agent_id)
             if not task:
                 existing = await self.tasks.get(task_id)
@@ -528,6 +567,454 @@ class MessageBus:
                     )
                 return JSONResponse({"error": "Task not found or already owned"}, status_code=409)
             return task.model_dump(mode="json")
+
+        @self.app.post("/agents/{agent_id}/route-profile")
+        async def put_route_profile(agent_id: str, request: Request):
+            body = await self._json_object(request)
+            principal = request.state.principal
+            if principal and not principal.is_admin and principal.agent_id != agent_id:
+                return JSONResponse({"error": "agent_id does not match the session"}, status_code=403)
+            current = await self._load_profile(agent_id)
+            declared = body.get("declared", current["declared"])
+            if principal and not principal.is_admin:
+                approved = current["approved"]
+            else:
+                approved = body.get("approved", current["approved"])
+            await self.db.conn.execute(
+                """INSERT INTO agent_route_profiles
+                   (agent_id, declared, approved, priority, cost_class, max_in_progress, can_edit)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(agent_id) DO UPDATE SET
+                     declared=excluded.declared, approved=excluded.approved, priority=excluded.priority,
+                     cost_class=excluded.cost_class, max_in_progress=excluded.max_in_progress,
+                     can_edit=excluded.can_edit""",
+                (
+                    agent_id,
+                    json.dumps(declared),
+                    json.dumps(approved),
+                    int(body.get("priority", current["priority"])),
+                    body.get("cost_class", current["cost_class"]),
+                    int(body.get("max_in_progress", current["max_in_progress"])),
+                    1 if body.get("can_edit", current["can_edit"]) else 0,
+                ),
+            )
+            await self.db.conn.commit()
+            return await self._load_profile(agent_id)
+
+        @self.app.post("/agents/{agent_id}/runtime")
+        async def register_agent_runtime(agent_id: str, request: Request):
+            from agent_bus.runtimes.registry import RegistryError, RuntimeRegistry
+            body = await self._json_object(request)
+            principal = request.state.principal
+            if principal and not principal.is_admin and principal.agent_id != agent_id:
+                return JSONResponse({"error": "agent_id does not match the session"}, status_code=403)
+            try:
+                return await RuntimeRegistry(self.db, self.project_id, sandbox_opener=self.sandbox_opener).register(
+                    agent_id, body.get("runtime") or "", body.get("command"),
+                )
+            except RegistryError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+        @self.app.post("/tasks/{task_id}/dispatch")
+        async def dispatch_task(task_id: str, request: Request):
+            from agent_bus.runtimes.registry import RegistryError, RuntimeRegistry
+            task = await self.tasks.get(task_id)
+            if task is None:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            if task.owner != "free" or task.status != TaskStatus.PENDING:
+                return JSONResponse({"error": "Only a free pending task can be dispatched"}, status_code=409)
+            decision = await self._decide(task.requirements)
+            if decision.selected_agent is None:
+                return JSONResponse({"error": "no eligible agent", "reasons": decision.reasons}, status_code=409)
+            registry = RuntimeRegistry(self.db, self.project_id, sandbox_opener=self.sandbox_opener)
+            spec = await registry.get(decision.selected_agent)
+            if spec is None:
+                return JSONResponse({"error": f"{decision.selected_agent} has no runtime"}, status_code=422)
+            body = await self._json_object(request)
+            try:
+                launched = await registry.launch(
+                    task_id, spec["agent_id"], spec["runtime"], spec["command"],
+                    body.get("workspace_ref"), float(body.get("timeout") or 30),
+                )
+            except RegistryError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+            stored = await self.tasks.get(task_id)
+            return {**launched, "selected_agent": decision.selected_agent, "task_status": stored.status.value if stored else None}
+
+        @self.app.get("/agents/{agent_id}/route-profile")
+        async def get_route_profile(agent_id: str):
+            return await self._load_profile(agent_id)
+
+        @self.app.get("/agents/{agent_id}/assignments")
+        async def agent_assignments(agent_id: str):
+            from agent_bus.core.instructions import InstructionLog
+            return {"assignments": await InstructionLog(self.db).for_agent(agent_id)}
+
+        @self.app.post("/tasks/{task_id}/requirements")
+        async def set_requirements(task_id: str, request: Request):
+            body = await self._json_object(request)
+            requires = body.get("requires") or []
+            if not isinstance(requires, list) or not all(isinstance(item, str) and item for item in requires):
+                return JSONResponse({"error": "requires must be a list of capability names"}, status_code=422)
+            task = await self.tasks.get(task_id)
+            if task is None:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            await self.db.conn.execute(
+                "UPDATE tasks SET requirements = ?, updated_at = ? WHERE task_id = ?",
+                (json.dumps(requires), datetime.now(timezone.utc).isoformat(), task_id),
+            )
+            await self.db.conn.commit()
+            updated = await self.tasks.get(task_id)
+            return updated.model_dump(mode="json")
+
+        @self.app.post("/tasks/{task_id}/route")
+        async def route_task(task_id: str):
+            task = await self.tasks.get(task_id)
+            if task is None:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            if task.owner != "free" or task.status != TaskStatus.PENDING:
+                return JSONResponse({"error": "Only a free pending task can be routed"}, status_code=409)
+            decision = await self._decide(task.requirements)
+            decision_id = f"route-{uuid.uuid4().hex[:12]}"
+            await self.db.conn.execute(
+                """INSERT INTO route_decisions
+                   (decision_id, task_id, selected_agent, eligible, reasons, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    decision_id, task_id, decision.selected_agent, json.dumps(list(decision.eligible)),
+                    json.dumps(decision.reasons), datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            await self.db.conn.commit()
+            return {
+                "decision_id": decision_id,
+                "task_id": task_id,
+                "selected_agent": decision.selected_agent,
+                "eligible": list(decision.eligible),
+                "reasons": decision.reasons,
+            }
+
+        @self.app.post("/tasks/{task_id}/artifacts")
+        async def publish_artifact(task_id: str, request: Request):
+            from agent_bus.core.artifacts import ArtifactError, ArtifactStore
+            body = await self._json_object(request)
+            content = body.get("content")
+            if isinstance(content, str):
+                payload = content.encode()
+            elif isinstance(content, dict):
+                payload = json.dumps(content, separators=(",", ":"), sort_keys=True).encode()
+            else:
+                return JSONResponse({"error": "content must be text or a JSON object"}, status_code=422)
+            principal = request.state.principal
+            producer = body.get("producer")
+            if principal and not principal.is_admin:
+                producer = principal.agent_id
+            if not isinstance(producer, str) or not producer:
+                return JSONResponse({"error": "producer is required"}, status_code=422)
+            store = ArtifactStore(self.db, self.project_id)
+            try:
+                artifact = await store.publish(
+                    task_id=task_id,
+                    producer=producer,
+                    kind=body.get("kind") or "",
+                    media_type=body.get("media_type") or "application/json",
+                    content=payload,
+                    summary=body.get("summary") or "",
+                    attempt_id=body.get("attempt_id"),
+                    retention=body.get("retention") or "until-task-deleted",
+                )
+            except ArtifactError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+            return artifact.metadata()
+
+        @self.app.get("/tasks/{task_id}/artifacts")
+        async def list_task_artifacts(task_id: str):
+            from agent_bus.core.artifacts import ArtifactStore
+            artifacts = await ArtifactStore(self.db, self.project_id).list_for_task(task_id)
+            return [item.metadata() for item in artifacts]
+
+        @self.app.get("/artifacts/{artifact_id}")
+        async def get_artifact(artifact_id: str):
+            from agent_bus.core.artifacts import ArtifactError, ArtifactStore
+            try:
+                return (await ArtifactStore(self.db, self.project_id).get(artifact_id)).metadata()
+            except ArtifactError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+        @self.app.get("/artifacts/{artifact_id}/content")
+        async def get_artifact_content(artifact_id: str):
+            from fastapi.responses import Response
+            from agent_bus.core.artifacts import ArtifactError, ArtifactStore
+            try:
+                artifact, content = await ArtifactStore(self.db, self.project_id).read(artifact_id)
+            except ArtifactError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+            return Response(content, media_type=artifact.media_type, headers={"X-Artifact-SHA256": artifact.sha256})
+
+        @self.app.post("/workflows/advance")
+        async def advance_workflow_route(request: Request):
+            from agent_bus.workflows.runner import advance_workflow
+            body = await self._json_object(request)
+            workflow = body.get("workflow") or body.get("name")
+            instance_id = body.get("instance_id")
+            if not workflow or not instance_id:
+                return JSONResponse({"error": "workflow and instance_id are required"}, status_code=422)
+            try:
+                return await advance_workflow(
+                    self, workflow, instance_id,
+                    workspace_ref=body.get("workspace_ref"),
+                    repo_dir=body.get("repo_dir"),
+                    candidate_branch=body.get("candidate_branch"),
+                    timeout=float(body.get("timeout") or 30),
+                )
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
+
+        @self.app.post("/workflows/compile")
+        async def compile_workflow(request: Request):
+            from agent_bus.core.evidence import EvidenceLog
+            from agent_bus.workflows import WorkflowError, compile_tasks, load_workflow
+            body = await self._json_object(request)
+            try:
+                document = load_workflow(
+                    body.get("yaml") or "", name=body.get("name"), advisory=bool(body.get("advisory")),
+                )
+                tasks = compile_tasks(document, body.get("instance_id") or "")
+            except WorkflowError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=422)
+            created = []
+            for task in tasks:
+                strict = task.pop("strict_review")
+                stored = await self.tasks.create(**task)
+                if strict:
+                    await EvidenceLog(self.db, self.project_id).set_policy(
+                        stored.task_id, strict=True, require_review=True, require_sha_match=True,
+                    )
+                created.append(stored.model_dump(mode="json"))
+            return {"workflow": document["workflow"], "tasks": created}
+
+        @self.app.post("/instructions")
+        async def submit_instruction(request: Request):
+            from agent_bus.core.instructions import InstructionError, InstructionLog
+            body = await self._json_object(request)
+            principal = request.state.principal
+            coordinator = principal.agent_id if principal else body.get("agent_id")
+            if not isinstance(coordinator, str) or not coordinator.strip():
+                return JSONResponse({"error": "agent_id is required"}, status_code=422)
+            try:
+                return await InstructionLog(self.db).submit(
+                    coordinator.strip(), str(body.get("instruction") or ""),
+                    bool(body.get("confirmed")), body.get("agents") or [],
+                )
+            except InstructionError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+        @self.app.post("/instructions/{instruction_id}/assignments")
+        async def assign_instruction(instruction_id: str, request: Request):
+            from agent_bus.core.instructions import InstructionError, assign_work
+            body = await self._json_object(request)
+            reviews = body.get("reviews")
+            if reviews is not None and (
+                not isinstance(reviews, list) or not all(isinstance(item, str) and item for item in reviews)
+            ):
+                return JSONResponse({"error": "reviews must be a list of implementation task_ids"}, status_code=422)
+            principal = request.state.principal
+            try:
+                return await assign_work(
+                    self, instruction_id, str(body.get("assignee") or body.get("agent_id") or ""),
+                    str(body.get("role") or ""), str(body.get("title") or ""), reviews,
+                    actor=None if principal is None or principal.is_admin else principal.agent_id,
+                )
+            except InstructionError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+        @self.app.post("/usage")
+        async def record_usage(request: Request):
+            from agent_bus.core.usage import UsageError, UsageLedger
+            body = await self._json_object(request)
+            principal = request.state.principal
+            if principal and not principal.is_admin:
+                body = {**body, "agent_id": principal.agent_id}
+            try:
+                return await UsageLedger(self.db, self.project_id).record(body)
+            except UsageError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+            except (TypeError, ValueError) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=422)
+
+        @self.app.get("/usage/summary")
+        async def usage_summary(task: str | None = None, agent: str | None = None, workflow: str | None = None):
+            from agent_bus.core.usage import UsageLedger
+            return await UsageLedger(self.db, self.project_id).summary(task_id=task, agent_id=agent, workflow_id=workflow)
+
+        @self.app.post("/tasks/{task_id}/evidence-policy")
+        async def set_evidence_policy(task_id: str, request: Request):
+            from agent_bus.core.evidence import EvidenceError, EvidenceLog
+            body = await self._json_object(request)
+            try:
+                return await EvidenceLog(self.db, self.project_id).set_policy(
+                    task_id,
+                    strict=bool(body.get("strict", True)),
+                    require_review=bool(body.get("require_review", True)),
+                    require_sha_match=bool(body.get("require_sha_match", True)),
+                )
+            except EvidenceError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+        @self.app.get("/tasks/{task_id}/evidence-policy")
+        async def get_evidence_policy(task_id: str):
+            from agent_bus.core.evidence import EvidenceLog
+            policy = await EvidenceLog(self.db, self.project_id).policy(task_id)
+            if policy is None:
+                return JSONResponse({"error": "No evidence policy"}, status_code=404)
+            return policy
+
+        @self.app.post("/tasks/{task_id}/evidence")
+        async def add_task_evidence(task_id: str, request: Request):
+            from agent_bus.core.evidence import EvidenceError, EvidenceLog
+            body = await self._json_object(request)
+            try:
+                return await EvidenceLog(self.db, self.project_id).add(
+                    task_id,
+                    criterion=body["criterion"],
+                    artifact_id=body["artifact_id"],
+                    status=body.get("status") or "passed",
+                    attempt_id=body["attempt_id"],
+                    target_sha=body["target_sha"],
+                )
+            except KeyError as exc:
+                return JSONResponse({"error": f"{exc.args[0]} is required"}, status_code=422)
+            except EvidenceError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+        @self.app.post("/tasks/{task_id}/evidence-check")
+        async def check_task_evidence(task_id: str, request: Request):
+            from agent_bus.core.evidence import EvidenceLog
+            body = await self._json_object(request)
+            gap = await EvidenceLog(self.db, self.project_id).gap(
+                task_id,
+                candidate_sha=body.get("candidate_sha") or "",
+                target_sha=body.get("target_sha") or "",
+                verdict=body.get("verdict") or "",
+            )
+            if gap:
+                return {"ok": False, "error": gap}
+            return {"ok": True}
+
+        @self.app.post("/runtime/native/start")
+        async def native_start(request: Request):
+            from agent_bus.runtimes.native import NativeRuntime
+            from agent_bus.runtimes.protocol import AttemptConflict, RuntimeStartRequest
+            body = await self._json_object(request)
+            try:
+                start = RuntimeStartRequest(
+                    attempt_id=body.get("attempt_id") or f"att-{uuid.uuid4().hex[:12]}",
+                    task_id=body["task_id"],
+                    idempotency_key=body["idempotency_key"],
+                    agent_id=body["agent_id"],
+                    workspace_ref=body.get("workspace_ref"),
+                )
+            except KeyError as exc:
+                return JSONResponse({"error": f"{exc.args[0]} is required"}, status_code=422)
+            runtime = NativeRuntime(self.db)
+            try:
+                prior = await runtime._by_key(start.idempotency_key)
+                session = await runtime.start(start)
+            except AttemptConflict as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
+            return {
+                "attempt_id": session.attempt_id,
+                "task_id": session.task_id,
+                "external_ref": session.external_ref,
+                "workspace_ref": session.workspace_ref,
+                "state": session.state,
+                "created": prior is None,
+            }
+
+        @self.app.get("/runtime/native/{attempt_id}")
+        async def native_status(attempt_id: str):
+            from agent_bus.runtimes.native import NativeRuntime
+            runtime = NativeRuntime(self.db)
+            try:
+                report = await runtime._status_by_id(attempt_id)
+            except KeyError:
+                return JSONResponse({"error": "Attempt not found"}, status_code=404)
+            return {
+                "attempt_id": report.attempt_id,
+                "state": report.state,
+                "outcome": report.outcome,
+                "candidate_sha": report.candidate_sha,
+                "log_refs": list(report.log_refs),
+            }
+
+        @self.app.post("/runtime/native/{attempt_id}/execution")
+        async def native_execution(attempt_id: str, request: Request):
+            from agent_bus.runtimes.native import NativeRuntime
+            body = await self._json_object(request)
+            epoch = body.get("epoch")
+            if not isinstance(epoch, str) or not epoch:
+                return JSONResponse({"error": "epoch is required"}, status_code=422)
+            runtime = NativeRuntime(self.db)
+            try:
+                execute = await runtime.claim_execution(attempt_id, epoch)
+                report = await runtime._status_by_id(attempt_id)
+            except KeyError:
+                return JSONResponse({"error": "Attempt not found"}, status_code=404)
+            return {"execute": execute, "attempt_id": report.attempt_id, "state": report.state}
+
+        @self.app.post("/runtime/native/{attempt_id}/complete")
+        async def native_complete(attempt_id: str, request: Request):
+            from agent_bus.runtimes.native import NativeRuntime
+            from agent_bus.runtimes.protocol import RuntimeResult, RuntimeSession
+            body = await self._json_object(request)
+            outcome = body.get("outcome")
+            if outcome not in {"completed", "failed", "cancelled"}:
+                return JSONResponse({"error": "outcome must be completed, failed or cancelled"}, status_code=422)
+            refs = body.get("log_refs") or []
+            runtime = NativeRuntime(self.db)
+            try:
+                current = await runtime._status_by_id(attempt_id)
+            except KeyError:
+                return JSONResponse({"error": "Attempt not found"}, status_code=404)
+            report = await runtime.complete(
+                RuntimeSession(attempt_id, body.get("task_id") or "", "", None, current.state),
+                RuntimeResult(outcome, body.get("candidate_sha"), tuple(refs)),
+            )
+            if outcome == "completed" and report.candidate_sha:
+                rows = await self.db.conn.execute_fetchall(
+                    "SELECT task_id FROM runtime_attempts WHERE attempt_id = ?", (attempt_id,),
+                )
+                if rows:
+                    await self._notify_reviewers_of_candidate(rows[0]["task_id"], report.candidate_sha)
+            return {
+                "attempt_id": report.attempt_id,
+                "state": report.state,
+                "outcome": report.outcome,
+                "candidate_sha": report.candidate_sha,
+                "log_refs": list(report.log_refs),
+            }
+
+        @self.app.post("/runtime/native/{attempt_id}/send")
+        async def native_send(attempt_id: str, request: Request):
+            from agent_bus.runtimes.native import NativeRuntime
+            body = await self._json_object(request)
+            text = body.get("text")
+            if not isinstance(text, str) or not text:
+                return JSONResponse({"error": "text is required"}, status_code=422)
+            from agent_bus.runtimes.protocol import RuntimeSession
+            runtime = NativeRuntime(self.db)
+            try:
+                report = await runtime._status_by_id(attempt_id)
+            except KeyError:
+                return JSONResponse({"error": "Attempt not found"}, status_code=404)
+            message = await runtime.send(RuntimeSession(attempt_id, "", "", None, report.state), text)
+            return {"attempt_id": message.attempt_id, "text": message.text}
+
+        @self.app.get("/runtime/native/by-task/{task_id}/messages")
+        async def native_messages(task_id: str):
+            from agent_bus.runtimes.native import NativeRuntime
+            messages = await NativeRuntime(self.db).consume_messages(task_id)
+            return {"task_id": task_id, "messages": messages}
 
         @self.app.post("/tasks/{task_id}/reassign")
         async def reassign_task(task_id: str, req: ReassignRequest, request: Request):
@@ -543,18 +1030,69 @@ class MessageBus:
 
         @self.app.post("/tasks/{task_id}/done")
         async def complete_task(task_id: str, request: Request):
+            body = await self._json_object(request)
+            actor, error = self._transition_actor(request, body)
+            if error is not None:
+                return error
             principal = request.state.principal
-            actor = None if (principal and principal.is_admin) else (principal.agent_id if principal else None)
-            task = await self.tasks.complete(task_id, actor=actor)
+            session_id = principal.session_id if principal else None
+            evidence = body.get("evidence")
+            merged_sha = body.get("merged_sha")
+            if merged_sha is not None:
+                if not isinstance(merged_sha, str) or not re.fullmatch(r"[0-9a-f]{7,64}", merged_sha):
+                    return JSONResponse({"error": "merged_sha must be a hexadecimal commit SHA"}, status_code=422)
+                evidence = {**(evidence if isinstance(evidence, dict) else {}), "merged_sha": merged_sha}
+            if evidence is not None:
+                task = await self.tasks.complete(task_id, actor=actor, evidence=evidence, session_id=session_id)
+            else:
+                task = await self.tasks.complete(task_id, actor=actor)
+            if not task and actor and await self._coordinates(task_id, actor):
+                # The instruction's coordinator closes an approved implementation it integrated itself.
+                task = await self.tasks.complete(task_id, actor=actor, evidence=evidence,
+                                                 session_id=session_id, as_coordinator=True)
+                if not task:
+                    return JSONResponse({"error": (
+                        "the coordinator closes only an in_review implementation whose latest "
+                        "candidate_sha has a current approve from record_verdict"
+                    )}, status_code=409)
             if not task:
                 return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
 
+        @self.app.post("/tasks/{task_id}/integrated")
+        async def finish_integrated_task(task_id: str, request: Request):
+            body = await self._json_object(request)
+            actor, error = self._transition_actor(request, body)
+            if error is not None:
+                return error
+            principal = request.state.principal
+            if principal and not principal.is_admin and not await self._coordinates(task_id, actor):
+                return JSONResponse(
+                    {"error": "only an administrator or the instruction's coordinator marks integration"},
+                    status_code=403,
+                )
+            task = await self.tasks.finish_integration(task_id)
+            if not task:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            return task.model_dump(mode="json")
+
+        @self.app.get("/tasks/{task_id}/evidence")
+        async def get_task_evidence(task_id: str):
+            task = await self.tasks.get(task_id)
+            if not task:
+                return JSONResponse({"error": "Task not found"}, status_code=404)
+            evidence_list = await self.tasks.get_evidence(task_id)
+            return {"task_id": task_id, "evidence": evidence_list}
+
 
         @self.app.post("/tasks/{task_id}/review")
         async def review_task(task_id: str, request: Request):
+            body = await self._json_object(request)
+            actor, error = self._transition_actor(request, body)
+            if error is not None:
+                return error
             principal = request.state.principal
-            task = await self.tasks.submit_review(task_id, actor=principal.agent_id if principal else None)
+            task = await self.tasks.submit_review(task_id, actor=actor)
             if not task:
                 return await self._task_failure(task_id, principal)
             return task.model_dump(mode="json")
@@ -569,15 +1107,17 @@ class MessageBus:
             return task.model_dump(mode="json")
 
         @self.app.post("/tasks/{task_id}/block")
-        async def block_task(task_id: str, request: Request, req: dict | None = None):
-            reason = req.get("reason") if req else None
+        async def block_task(task_id: str, request: Request):
             principal = request.state.principal
             if principal is None:
+                # Blocking is never attributed to a self-declared agent_id, even unsigned.
                 raise HTTPException(401, "Valid bearer session required", headers={"WWW-Authenticate": "Bearer"})
-            actor = principal.agent_id if not principal.is_admin else None
+            body = await self._json_object(request)
+            actor = None if principal.is_admin else principal.agent_id
+            reason = body.get("reason") if isinstance(body.get("reason"), str) else None
             task = await self.tasks.block(task_id, reason=reason, actor=actor)
             if not task:
-                return await self._task_failure(task_id, principal)
+                return await self._task_failure(task_id, request.state.principal)
             return task.model_dump(mode="json")
 
         # --- Review endpoints ---
@@ -623,6 +1163,42 @@ class MessageBus:
                 ):
                     raise HTTPException(409, "Review uniqueness conflict; retry the request") from exc
                 raise
+            return saved.model_dump(mode="json")
+
+        @self.app.post("/tasks/{task_id}/verdict")
+        async def record_task_verdict(task_id: str, request: Request):
+            from agent_bus.core.reviews import VerdictError
+            body = await self._json_object(request)
+            principal = request.state.principal
+            if principal:
+                actor = principal.agent_id
+            else:
+                actor = body.get("agent_id")
+                if not isinstance(actor, str) or not actor.strip():
+                    return JSONResponse({"error": "agent_id is required"}, status_code=422)
+                actor = actor.strip()
+            verdict = body.get("verdict")
+            raw_sha = body.get("sha")
+            if verdict not in ("approve", "changes_requested"):
+                return JSONResponse({"error": "verdict must be approve or changes_requested"}, status_code=422)
+            if raw_sha is not None and not isinstance(raw_sha, str):
+                return JSONResponse({"error": "sha is required"}, status_code=422)
+            sha = raw_sha.strip() if isinstance(raw_sha, str) and raw_sha.strip() else None
+            reason = body.get("reason") if isinstance(body.get("reason"), str) else ""
+            implementation = body.get("implementation_task_id")
+            if implementation is not None and (not isinstance(implementation, str) or not implementation.strip()):
+                return JSONResponse({"error": "implementation_task_id must be a task id"}, status_code=422)
+            try:
+                saved = await self.reviews.record_task_verdict(
+                    task_id, actor, sha, verdict, reason,
+                    implementation_task_id=implementation.strip() if implementation else None,
+                )
+            except VerdictError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+            if verdict == "changes_requested":
+                await self._reopen_rejected_implementation(
+                    task_id, actor, saved.sha, reason or verdict, saved.evidence["implementation_task_id"],
+                )
             return saved.model_dump(mode="json")
 
         @self.app.get("/reviews")
@@ -881,11 +1457,22 @@ class MessageBus:
             return {
                 "tasks": [t.model_dump(mode="json") for t in tasks],
                 "agents": [a.model_dump(mode="json") for a in agents],
-                "locks": [lock.model_dump(mode="json", exclude={"acquisition_id"}) for lock in locks],
+                "locks": [lk.model_dump(mode="json", exclude={"acquisition_id"}) for lk in locks],
                 "decisions": [d.model_dump(mode="json") for d in decisions],
                 "paused_workers": sorted(paused),
                 "pending_approvals": len([m for m in human_inbox if m.reply_needed]),
+                "provider_sessions": (await provider_sessions())["providers"],
             }
+
+        @self.app.get("/room/api/panes")
+        async def room_panes():
+            """Agent TUIs of `agent-bus panes` on this host, read-only; screens can hold secrets (admin only)."""
+            from agent_bus import panes
+
+            panes.use_project(self.project_id)
+
+            # One capture per pane gives both its screen and its state.
+            return {"panes": await asyncio.to_thread(panes.list_panes, 50)}
 
         @self.app.get("/room/api/usage")
         async def room_usage():
@@ -1137,6 +1724,10 @@ class MessageBus:
             response["message_ids"] = [result.envelope.message_id for _ in result.recipients]
         return response
 
+    async def _coordinates(self, task_id: str, agent_id: str) -> bool:
+        from agent_bus.core.tasks import coordinated_by
+        return await self.db.conn._execute(coordinated_by, self.db.conn._conn, task_id, agent_id)
+
     async def _task_failure(self, task_id: str, principal: Principal | None = None) -> JSONResponse:
         # This read only explains a failed conditional write; it never authorizes
         # a later mutation, so a concurrent owner change cannot bypass the SQL.
@@ -1155,6 +1746,199 @@ class MessageBus:
         if scheme.lower() != "bearer" or not token or " " in token:
             raise AuthenticationError("Valid bearer session required")
         return await self.sessions.authenticate(token), token
+
+    async def _claim_refusal(self, task_id: str, agent_id: str) -> JSONResponse | None:
+        task = await self.tasks.get(task_id)
+        if task is None:
+            return None
+        assigned = await self._assigned_elsewhere(task, agent_id)
+        if assigned:
+            return JSONResponse({"error": assigned}, status_code=409)
+        conflict = await self._independence_conflict(task, agent_id)
+        if conflict:
+            return JSONResponse({"error": conflict}, status_code=409)
+        if not task.requirements:
+            return None
+        decision = await self._decide(task.requirements)
+        if agent_id in decision.eligible:
+            return None
+        reason = decision.reasons.get(agent_id, "agent is not eligible")
+        return JSONResponse(
+            {"error": reason, "eligible": list(decision.eligible), "reasons": decision.reasons},
+            status_code=409,
+        )
+
+    async def _assigned_elsewhere(self, task, agent_id: str) -> str | None:
+        from agent_bus.core.instructions import InstructionLog
+        holder = await InstructionLog(self.db).holder(task.task_id)
+        if holder is not None and holder["agent_id"] != agent_id:
+            return f"task is assigned to {holder['agent_id']}"
+        if holder is not None:
+            return None
+        profile = await self._load_profile(agent_id)
+        if profile["can_edit"]:
+            return None
+        if "code-review" in set(task.requirements or []):
+            return None
+        return "a reviewer does not claim implementation work"
+
+    async def _independence_conflict(self, task, agent_id: str) -> str | None:
+        for dependency_id in task.independent_from:
+            dependency = await self.tasks.get(dependency_id)
+            if dependency is not None and dependency.owner == agent_id:
+                return f"{agent_id} completed {dependency_id}, which this task must be independent from"
+        return None
+
+    async def _decide(self, requires: list[str]):
+        from agent_bus.routing import AgentCandidate, route
+        profiles = await self.db.conn.execute_fetchall("SELECT * FROM agent_route_profiles")
+        agents = []
+        now = datetime.now(timezone.utc)
+        for row in profiles:
+            info = await self.registry.get(row["agent_id"])
+            age = None if info is None else (now - info.last_heartbeat).total_seconds()
+            load_rows = await self.db.conn.execute_fetchall(
+                "SELECT COUNT(*) AS n FROM tasks WHERE owner = ? AND status = 'in_progress'",
+                (row["agent_id"],),
+            )
+            load = load_rows[0]["n"]
+            agents.append(AgentCandidate(
+                agent_id=row["agent_id"],
+                declared=frozenset(json.loads(row["declared"])),
+                approved=frozenset(json.loads(row["approved"])),
+                heartbeat_age_seconds=age,
+                in_progress=load,
+                max_in_progress=row["max_in_progress"],
+                priority=row["priority"],
+                cost_class=row["cost_class"],
+                can_edit=bool(row["can_edit"]),
+            ))
+        return route(requires, agents, heartbeat_limit_seconds=30)
+
+    async def _load_profile(self, agent_id: str) -> dict:
+        rows = await self.db.conn.execute_fetchall(
+            "SELECT * FROM agent_route_profiles WHERE agent_id = ?", (agent_id,),
+        )
+        if not rows:
+            return {
+                "agent_id": agent_id, "declared": [], "approved": [], "priority": 0,
+                "cost_class": "medium", "max_in_progress": 1, "can_edit": True,
+            }
+        row = rows[0]
+        return {
+            "agent_id": agent_id,
+            "declared": json.loads(row["declared"]),
+            "approved": json.loads(row["approved"]),
+            "priority": row["priority"],
+            "cost_class": row["cost_class"],
+            "max_in_progress": row["max_in_progress"],
+            "can_edit": bool(row["can_edit"]),
+        }
+
+    @staticmethod
+    async def _json_object(request: Request) -> dict:
+        if not request.headers.get("content-type", "").startswith("application/json"):
+            return {}
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    async def _notify_reviewers_of_candidate(self, implementation_id: str, candidate_sha: str) -> None:
+        if not candidate_sha:
+            return
+        implementation = await self.tasks.get(implementation_id)
+        implementer = implementation.owner if implementation is not None else None
+        for task in await self.tasks.list_all():
+            if implementation_id not in task.independent_from:
+                continue
+            if task.owner in (None, "free") or task.owner == implementer:
+                continue
+            await self.inbox.send(Envelope(
+                from_agent="workflow",
+                to_agent=task.owner,
+                message_type=MessageType.INBOX,
+                reply_needed=True,
+                related_task=task.task_id,
+                body={
+                    "text": f"Implementation candidate {candidate_sha} is ready for review",
+                    "sha": candidate_sha,
+                    "implementation_task": implementation_id,
+                },
+            ), [task.owner])
+
+    async def _reopen_rejected_implementation(
+        self, review_task_id: str, reviewer: str, sha: str, reason: str, implementation_id: str,
+    ) -> None:
+        """Reopen only the rejected implementation; an assigned review waits for its new handoff."""
+        from agent_bus.core.instructions import InstructionLog
+
+        review = await self.tasks.get(review_task_id)
+        if review is None:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        implementation = await self.tasks.get(implementation_id)
+        if implementation is not None:
+            previous = implementation.owner
+            # Assigned work goes straight back to its holder; claiming it again would route it
+            # through capability checks that assign_work never required.
+            holder = await InstructionLog(self.db).holder(implementation_id)
+            owner, status = (holder["agent_id"], "in_progress") if holder else ("free", "pending")
+            if implementation.status.value != status or previous != owner:
+                await self.db.transaction(lambda connection: connection.execute(
+                    "UPDATE tasks SET status = ?, owner = ?, updated_at = ? WHERE task_id = ?",
+                    (status, owner, now, implementation_id),
+                ))
+            previous = owner if holder else previous
+            if previous not in (None, "free"):
+                await self.inbox.send(Envelope(
+                    from_agent=reviewer,
+                    to_agent=previous,
+                    message_type=MessageType.INBOX,
+                    reply_needed=True,
+                    related_task=implementation_id,
+                    body={
+                        "text": (f"Changes requested on {sha}: {reason[:300]}. " + (
+                            "The task is yours again; hand off the new commit with candidate_sha."
+                            if holder else
+                            "Claim the task again and hand off the new commit with candidate_sha.")),
+                        "verdict": "changes_requested",
+                        "sha": sha,
+                    },
+                ), [previous])
+        unblocked = [task.task_id for task in await self.tasks.list_all()
+                     if review_task_id in task.depends_on and task.status == TaskStatus.BLOCKED]
+        if unblocked:
+            await self.db.transaction(lambda connection: connection.executemany(
+                "UPDATE tasks SET status = 'pending', blocked_reason = NULL, updated_at = ? WHERE task_id = ?",
+                [(now, task_id) for task_id in unblocked],
+            ))
+        # Reviews from assign_work are released by handoffs (release_reviews); hold this one
+        # again so it restarts when the reopened implementation is handed off anew.
+        # Workflow reviews keep their own dispatch and are left alone.
+        await InstructionLog(self.db).ensure_schema()
+        assigned = await self.db.conn.execute_fetchall(
+            "SELECT 1 FROM work_assignments WHERE task_id = ? AND role = 'review'", (review_task_id,),
+        )
+        if assigned:
+            await self.tasks.hold_for_review(review_task_id, [implementation_id])
+
+    @staticmethod
+    def _transition_actor(request: Request, body: dict) -> tuple[str | None, JSONResponse | None]:
+        """Name the agent for done, review and block.
+
+        Admins stay unrestricted. Unsigned callers must name the owner.
+        """
+        principal = request.state.principal
+        if principal and principal.is_admin:
+            return None, None
+        if principal:
+            return principal.agent_id, None
+        agent_id = body.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id.strip():
+            return None, JSONResponse({"error": "agent_id is required"}, status_code=422)
+        return agent_id, None
 
     @staticmethod
     def _actor(request: Request, legacy_actor: str | None) -> str:

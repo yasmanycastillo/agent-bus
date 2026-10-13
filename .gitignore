@@ -25,3 +25,8 @@ htmlcov/
 .env.*
 *secret*
 *.secret
+
+# Tool caches
+.grok/
+.tgrep/
+.muxel/

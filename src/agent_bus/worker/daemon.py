@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import hashlib
+import os
+import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +18,45 @@ from agent_bus.worker.execution import ExecutionGuard
 
 from agent_bus.types import AgentStatus
 from agent_bus.worker.client import BusEventClient
+from agent_bus.worker.notifier import ExternalNotifier
 from agent_bus.worker.runner import AgentRunner, RunnerResult
 
 logger = logging.getLogger("agent_bus.worker.daemon")
+
+# A review task (independent_from set by assign_work) ends with one line per
+# implementation; the daemon records each through POST /tasks/{id}/verdict.
+VERDICT_LINE = re.compile(
+    r"^\s*VERDICT:\s*(approve|changes_requested)\s+IMPLEMENTATION:\s*(\S+)\s+REASON:\s*(.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def review_instructions(implementations: list[str]) -> str:
+    return (
+        "This is a review task: inspect the delivered work of each implementation, do not edit files "
+        "and do not run `agent-bus work done`. End your answer with exactly one line per implementation:\n"
+        "VERDICT: approve|changes_requested IMPLEMENTATION: <task_id> REASON: <one-line reason>\n"
+        f"Implementations to judge: {', '.join(implementations)}. "
+        "The worker records these verdicts; a review without them stays open."
+    )
+
+
+def parse_verdicts(output: str, implementations: list[str]) -> dict[str, tuple[str, str]]:
+    """Last verdict line per implementation under review; other task ids are ignored."""
+    found = {}
+    for verdict, task_id, reason in VERDICT_LINE.findall(output):
+        if task_id in implementations:
+            found[task_id] = (verdict.lower(), reason)
+    return found
+
+
+def _turn_timeout() -> float:
+    raw = os.environ.get("AGENT_BUS_TURN_TIMEOUT", "1800")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 1800.0
+    return value if value > 0 else 1800.0
 
 
 class WorkerDaemon:
@@ -33,6 +72,7 @@ class WorkerDaemon:
         heartbeat_interval_seconds: float = 15.0,
         max_turns_per_task: int = 10,
         max_message_attempts: int = 5,
+        notifier: ExternalNotifier | None = None,
     ) -> None:
         if runner.agent_id != agent_id:
             raise ValueError("Runner identity must match its daemon")
@@ -44,7 +84,12 @@ class WorkerDaemon:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.max_turns_per_task = max_turns_per_task
         self.max_message_attempts = max(1, max_message_attempts)
+        self.turn_timeout_seconds = _turn_timeout()
+        self.notifier = notifier or ExternalNotifier(
+            enable_desktop=os.environ.get("AGENT_BUS_NOTIFY_DESKTOP") == "1"
+        )
         self._running = False
+        self._epoch = uuid.uuid4().hex
         self._task_turn_counts: dict[str, int] = {}
         self._client: httpx.AsyncClient | None = None
         self._sse_client: BusEventClient | None = None
@@ -116,6 +161,14 @@ class WorkerDaemon:
         if event.get("event") == "reset" or event.get("reply_needed") or event.get("message_type") in ("handoff", "task_assigned"):
             self._wake_event.set()
 
+    async def _notify(self, title: str, message: str, level: str = "info") -> None:
+        try:
+            result = await self.notifier.notify(title, message, level=level)
+            if result.error:
+                logger.debug("Worker notification failed: %s", result.error)
+        except Exception as exc:
+            logger.debug("Worker notification raised: %s", exc)
+
     async def _heartbeat_loop(self) -> None:
         while self._running:
             try:
@@ -169,37 +222,72 @@ class WorkerDaemon:
             message_id = message["message_id"]
             if time.monotonic() < self._message_retry_after.get(message_id, 0):
                 continue
+            if int(message.get("attempts", 0) or 0) >= self.max_message_attempts:
+                logger.error(
+                    "Message %s exhausted after %s attempts; the worker continues with its task",
+                    message_id, message.get("attempts"),
+                )
+                continue
             await self._handle_urgent_message(message)
             processed = True
         if processed:
             return
 
-        # 2. Check for assigned / in_progress tasks owned by this agent
-        tasks_resp = await self._client.get("/tasks", params={"owner": self.agent_id, "status": "in_progress"})
-        if tasks_resp.status_code == 200:
-            tasks = tasks_resp.json()
-            if tasks:
-                task = tasks[0]
-                await self._handle_active_task(task)
-                return
+        owned = await self._owned_task()
+        if owned is not None:
+            await self._handle_active_task(owned)
+            return
+        await self._claim_assigned_task()
 
-        # 3. Check for free pending tasks to claim (unlocked only)
-        free_tasks_resp = await self._client.get("/tasks", params={"owner": "free", "status": "pending", "ready_only": "true"})
-        if free_tasks_resp.status_code == 200:
-            free_tasks = free_tasks_resp.json()
-            if free_tasks:
-                task_to_claim = free_tasks[0]
-                claim_resp = await self._client.post(
-                    f"/tasks/{task_to_claim['task_id']}/claim",
-                    json={"agent_id": self.agent_id},
-                )
-                if claim_resp.status_code == 200:
-                    logger.info(f"Agent '{self.agent_id}' claimed task {task_to_claim['task_id']}")
-                    await self._handle_active_task(claim_resp.json())
-                    return
+    async def _owned_task(self) -> dict[str, Any] | None:
+        for status in ("in_progress", "pending"):
+            response = await self._client.get(
+                "/tasks", params={"owner": self.agent_id, "status": status},
+            )
+            if response.status_code != 200:
+                continue
+            tasks = response.json()
+            if isinstance(tasks, list) and tasks:
+                return tasks[0]
+        return None
+
+    async def _claim_assigned_task(self) -> None:
+        assigned = await self._client.get(f"/agents/{self.agent_id}/assignments")
+        if assigned.status_code != 200:
+            return
+        body = assigned.json()
+        rows = body.get("assignments", []) if isinstance(body, dict) else []
+        wanted = {row.get("task_id") for row in rows if row.get("task_id")}
+        if not wanted:
+            return
+        free = await self._client.get(
+            "/tasks", params={"owner": "free", "status": "pending", "ready_only": "true"},
+        )
+        if free.status_code != 200 or not isinstance(free.json(), list):
+            return
+        chosen = next((task for task in free.json() if task.get("task_id") in wanted), None)
+        if chosen is None:
+            return
+        claim = await self._client.post(
+            f"/tasks/{chosen['task_id']}/claim", json={"agent_id": self.agent_id},
+        )
+        if claim.status_code != 200:
+            return
+        logger.info("Agent '%s' claimed assigned task %s", self.agent_id, chosen["task_id"])
+        try:
+            await self._client.post("/runtime/native/start", json={
+                "task_id": chosen["task_id"],
+                "idempotency_key": f"dispatch:{chosen['task_id']}",
+                "agent_id": self.agent_id,
+            })
+        except Exception as exc:
+            logger.debug("Native runtime attempt was not recorded: %s", exc)
+        claimed = claim.json()
+        await self._handle_active_task(claimed if isinstance(claimed, dict) else chosen)
 
     async def _record_message_failure(self, message_id: str, error: str) -> None:
         self._message_retry_after[message_id] = time.monotonic() + max(3.0, self.poll_interval_seconds)
+        logger.warning("Turn for message %s failed: %s", message_id, error.strip()[:500])
         if not self._client:
             return
         try:
@@ -221,6 +309,10 @@ class WorkerDaemon:
             if message.get("acknowledged"):
                 self._message_retry_after.pop(message_id, None)
                 return RunnerResult(success=True, output="", metadata={"already_acknowledged": True})
+            await self._notify(
+                f"agent-bus: {self.agent_id}",
+                f"Mensaje recibido de {message.get('from_agent', '?')} ({message_id[:8]})",
+            )
             attempts = int(message.get("attempts", 0) or 0)
             if attempts >= self.max_message_attempts:
                 detail = (
@@ -242,7 +334,9 @@ class WorkerDaemon:
                 ),
             )
             thread_id = message.get("conversation_id") or message.get("correlation_id") or message_id
-            result = await self.runner.execute_turn(prompt, thread_id=thread_id)
+            result = await self.runner.execute_turn(
+                prompt, thread_id=thread_id, timeout_seconds=self.turn_timeout_seconds,
+            )
             if not result.success:
                 await self._record_message_failure(message_id, result.error or "Runner failed")
                 return result
@@ -258,6 +352,14 @@ class WorkerDaemon:
             )
             response.raise_for_status()
             self._message_retry_after.pop(message_id, None)
+            try:
+                await asyncio.shield(self._notify(
+                    f"agent-bus: {self.agent_id}",
+                    f"Respuesta enviada ({message_id[:8]})",
+                    level="success",
+                ))
+            except asyncio.CancelledError:
+                logger.debug("Worker cancelled after acknowledging message %s", message_id)
             return result
         except asyncio.CancelledError:
             await asyncio.shield(self._record_message_failure(message_id, "Runner cancelled"))
@@ -278,24 +380,154 @@ class WorkerDaemon:
             # Do not loop infinitely on stuck tasks
             return RunnerResult(success=False, output="", error=f"Task {task_id} exceeded max turn limit.")
 
+        if not await self._runtime_allows_execution(task_id):
+            logger.info("Task %s has no executable runtime attempt", task_id)
+            return RunnerResult(success=False, output="", error=f"Task {task_id} is waiting on its runtime attempt")
+
         logger.info(f"Agent '{self.agent_id}' executing task {task_id} (turn {turns}/{self.max_turns_per_task})")
         await self._set_agent_status(AgentStatus.BUSY, work={"type": "task", "task_id": task_id})
 
         decisions = await self._fetch_recent_decisions()
-        prompt = self.runner.assemble_prompt(task=task, decisions=decisions)
+        task = {**task, "runtime_messages": await self._runtime_messages(task_id)}
+        reviewed = [item for item in task.get("independent_from") or [] if isinstance(item, str)]
+        prompt = self.runner.assemble_prompt(
+            task=task, decisions=decisions,
+            extra_instructions=review_instructions(reviewed) if reviewed else None,
+        )
 
-        result = await self.runner.execute_turn(prompt)
+        result = await self.runner.execute_turn(prompt, timeout_seconds=self.turn_timeout_seconds)
+        if result.success and reviewed:
+            result = await self._record_verdicts(task_id, reviewed, result)
+        await self._finish_attempt(task_id, "completed" if result.success else "failed")
+        if not result.success:
+            logger.warning("Turn for task %s failed: %s", task_id, (result.error or "no error details").strip()[:500])
 
-        if result.success:
-            await self._commit_and_submit_review(task_id)
+        # A review has nothing to commit; the hub moves it on from its verdicts.
+        if result.success and not reviewed:
+            if await self._closes_workflow_step(task):
+                await self._client.post(f"/tasks/{task_id}/done", json={"agent_id": self.agent_id})
+            else:
+                await self._commit_and_submit_review(task_id)
 
         await self._set_agent_status(AgentStatus.ONLINE, work=None)
         return result
 
+    async def _record_verdicts(self, task_id: str, reviewed: list[str], result: RunnerResult) -> RunnerResult:
+        """Post each parsed verdict; never approve by default when a line is missing or refused."""
+        verdicts = parse_verdicts(result.output, reviewed)
+        problems = [f"{item}: no VERDICT line" for item in reviewed if item not in verdicts]
+        # changes_requested holds the review for redelivery, so approvals go first.
+        ordered = sorted(verdicts.items(), key=lambda item: item[1][0] != "approve")
+        for implementation, (verdict, reason) in ordered:
+            try:
+                response = await self._client.post(f"/tasks/{task_id}/verdict", json={
+                    "agent_id": self.agent_id, "verdict": verdict, "reason": reason,
+                    "implementation_task_id": implementation,
+                })
+                if response.status_code >= 400:
+                    problems.append(f"{implementation}: hub refused ({response.status_code}) {response.text[:200]}")
+            except Exception as exc:
+                problems.append(f"{implementation}: {exc}")
+        if not problems:
+            return result
+        error = f"Review {task_id} left without a recorded VERDICT for " + "; ".join(problems)
+        logger.error(error)
+        return RunnerResult(success=False, output=result.output, session_id=result.session_id, error=error)
+
+    async def _closes_workflow_step(self, task: dict[str, Any]) -> bool:
+        description = str(task.get("description") or "")
+        task_id = str(task.get("task_id") or "")
+        if not description.startswith("workflow "):
+            return False
+        if task.get("title") == "integration" or task_id.endswith("-integration"):
+            return False
+        if not self._client:
+            return False
+        try:
+            policy = await self._client.get(f"/tasks/{task_id}/evidence-policy")
+            if policy.status_code == 200 and policy.json().get("strict"):
+                return False
+        except Exception:
+            return False
+        return True
+
+    async def _runtime_allows_execution(self, task_id: str) -> bool:
+        if not self._client or not task_id:
+            return True
+        try:
+            started = await self._client.post("/runtime/native/start", json={
+                "task_id": task_id,
+                "idempotency_key": f"dispatch:{task_id}",
+                "agent_id": self.agent_id,
+            })
+            if started.status_code == 409:
+                return False
+            if started.status_code != 200:
+                return True
+            body = started.json()
+            if body.get("state") in {"completed", "failed", "cancelled", "unknown"}:
+                return False
+            claim = await self._client.post(
+                f"/runtime/native/{body['attempt_id']}/execution", json={"epoch": self._epoch},
+            )
+            if claim.status_code != 200:
+                return True
+            return bool(claim.json().get("execute"))
+        except Exception as exc:
+            logger.debug("Runtime gate skipped: %s", exc)
+            return True
+
+    async def _finish_attempt(self, task_id: str, outcome: str) -> None:
+        if not self._client:
+            return
+        try:
+            started = await self._client.post("/runtime/native/start", json={
+                "task_id": task_id,
+                "idempotency_key": f"dispatch:{task_id}",
+                "agent_id": self.agent_id,
+            })
+            if started.status_code != 200:
+                return
+            attempt_id = started.json()["attempt_id"]
+            sha = await self._candidate_sha()
+            await self._client.post(f"/runtime/native/{attempt_id}/complete", json={
+                "outcome": outcome,
+                "candidate_sha": sha,
+                "log_refs": [f"worker:{self.agent_id}:{task_id}"],
+            })
+        except Exception as exc:
+            logger.debug("Runtime result was not recorded: %s", exc)
+
+    async def _candidate_sha(self) -> str | None:
+        checkout = self.runner.worktree_dir
+        if checkout is None or not (checkout / ".git").exists():
+            return None
+        process = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "HEAD", cwd=str(checkout),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, _ = await process.communicate()
+        if process.returncode != 0:
+            return None
+        return out.decode().strip() or None
+
+    async def _runtime_messages(self, task_id: str) -> list[str]:
+        if not self._client or not task_id:
+            return []
+        try:
+            response = await self._client.get(f"/runtime/native/by-task/{task_id}/messages")
+            if response.status_code != 200:
+                return []
+            messages = response.json().get("messages") or []
+            return [message for message in messages if isinstance(message, str)]
+        except Exception as exc:
+            logger.debug("Runtime messages were not loaded: %s", exc)
+            return []
+
     async def _commit_and_submit_review(self, task_id: str) -> None:
         """Commit the worker checkout and enqueue it for serialized integration."""
         checkout = self.runner.worktree_dir.resolve()
-        if not (checkout / ".git").exists():
+        if not self.runner.checkout_assigned or not (checkout / ".git").exists():
             return
         try:
             # Linked worktrees have their own Git directory, distinct from the
@@ -330,7 +562,9 @@ class WorkerDaemon:
             if commit.returncode != 0:
                 raise RuntimeError((err or out).decode(errors="replace")[-500:])
             if self._client:
-                response = await self._client.post(f"/tasks/{task_id}/review")
+                response = await self._client.post(
+                    f"/tasks/{task_id}/review", json={"agent_id": self.agent_id},
+                )
                 response.raise_for_status()
         except Exception as exc:
             logger.error("Could not submit task %s for review: %s", task_id, exc)

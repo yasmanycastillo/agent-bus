@@ -73,6 +73,88 @@ def test_worker_start_creates_pid_and_process(
     assert not pid_file.exists()
 
 
+def test_worker_start_foreground_runs_daemon_without_pid(monkeypatch, tmp_path):
+    from agent_bus.cli import worker_cmds
+
+    started = []
+
+    class FakeDaemon:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def start(self):
+            started.append(self.kwargs)
+
+    class FakeRunner:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(worker_cmds, "worker_environment", lambda *args, **kwargs: {
+        "AGENT_BUS_AGENT_ID": "worker-claude",
+        "AGENT_BUS_SESSION_FILE": "/tmp/worker-session.json",
+        "AGENT_BUS_PROJECT_ROOT": str(tmp_path),
+    })
+    monkeypatch.setattr(worker_cmds, "_worker_provider", lambda *args, **kwargs: "mock")
+    monkeypatch.setenv("AGENT_BUS_AGENT_ID", "interactive-claude")
+    monkeypatch.setenv("AGENT_BUS_SESSION_FILE", "/tmp/interactive-session.json")
+    monkeypatch.setenv("AGENT_BUS_CONFIG_DIR", "/tmp/interactive-runtime")
+    monkeypatch.setattr("agent_bus.worker.daemon.WorkerDaemon", FakeDaemon)
+    monkeypatch.setattr("agent_bus.worker.runner.AgentRunner", FakeRunner)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(
+        worker,
+        ["start", "--agent", "claude", "--provider", "mock", "--foreground"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(started) == 1
+    assert started[0]["agent_id"] == "claude"
+    assert os.environ["AGENT_BUS_AGENT_ID"] == "interactive-claude"
+    assert os.environ["AGENT_BUS_SESSION_FILE"] == "/tmp/interactive-session.json"
+    assert os.environ["AGENT_BUS_CONFIG_DIR"] == "/tmp/interactive-runtime"
+    assert not (tmp_path / "claude.pid").exists()
+
+
+
+def test_worker_start_foreground_restores_environment_on_failure(monkeypatch, tmp_path):
+    from agent_bus.cli import worker_cmds
+
+    class FailingDaemon:
+        def __init__(self, **kwargs):
+            pass
+
+        async def start(self):
+            raise RuntimeError("worker startup failed")
+
+    class FakeRunner:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(worker_cmds, "worker_environment", lambda *args, **kwargs: {
+        "AGENT_BUS_AGENT_ID": "worker-claude",
+        "AGENT_BUS_SESSION_FILE": "/tmp/worker-session.json",
+    })
+    monkeypatch.setattr(worker_cmds, "_worker_provider", lambda *args, **kwargs: "mock")
+    monkeypatch.setenv("AGENT_BUS_AGENT_ID", "interactive-claude")
+    monkeypatch.setenv("AGENT_BUS_SESSION_FILE", "/tmp/interactive-session.json")
+    monkeypatch.setattr("agent_bus.worker.daemon.WorkerDaemon", FailingDaemon)
+    monkeypatch.setattr("agent_bus.worker.runner.AgentRunner", FakeRunner)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(RuntimeError, match="worker startup failed"):
+        CliRunner().invoke(
+            worker,
+            ["start", "--agent", "claude", "--provider", "mock", "--foreground"],
+            catch_exceptions=False,
+        )
+
+    assert os.environ["AGENT_BUS_AGENT_ID"] == "interactive-claude"
+    assert os.environ["AGENT_BUS_SESSION_FILE"] == "/tmp/interactive-session.json"
+
+
 def test_worker_start_idempotente(monkeypatch, tmp_path, spawned_processes):
     """Un segundo start con el proceso vivo no duplica el worker."""
     import subprocess

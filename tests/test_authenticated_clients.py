@@ -67,6 +67,15 @@ async def test_mcp_binds_actor_and_token_at_startup(credentials, monkeypatch):
         assert tool.input_schema["additionalProperties"] is False
 
 
+async def test_pane_session_file_wins_over_shared_agent_flag(credentials, monkeypatch):
+    """A pane spawned as bob keeps bob even when its MCP config hard-codes --agent alice."""
+    monkeypatch.setenv("AGENT_BUS_SESSION_FILE", str(credentials["bob"][1]))
+    monkeypatch.setenv("AGENT_BUS_AGENT_ID", "bob")
+    server = McpServer(bus_url="http://127.0.0.1:8420", agent_id="alice")
+    assert server.agent_id == "bob"
+    assert server.session["token"] == credentials["bob"][0]["token"]
+
+
 async def test_mcp_decision_uses_session_actor(credentials, monkeypatch):
     import agent_bus.mcp.server as mcp
     server = McpServer(agent_id="alice")
@@ -130,7 +139,7 @@ async def test_runner_passes_own_session_path(credentials, monkeypatch):
     captured = {}
     class Process:
         returncode = 0
-        async def communicate(self):
+        async def communicate(self, input=None):
             return b"ok", b""
     async def spawn(*args, **kwargs):
         captured.update(kwargs)

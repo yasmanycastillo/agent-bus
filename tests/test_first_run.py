@@ -15,7 +15,7 @@ import pytest
 from mcp import Client, StdioServerParameters, stdio_client
 
 import agent_bus
-from agent_bus.cli.first_run import parse_agents, probe_hub
+from agent_bus.cli.first_run import is_uv_tool_env, parse_agents, probe_hub
 
 
 @pytest.mark.parametrize('value', ['', '../bad:claude', 'one:claude,one:codex', 'free', 'one:'])
@@ -63,6 +63,7 @@ def test_mcp_onboarding_real_hub_repeat_and_revocation(tmp_path):
         first = invoke(tmp_path, env, *args)
         assert first.returncode == 0, first.stdout + first.stderr
         assert 'sesiones verificados' in first.stdout
+        assert 'uv tool install' in first.stdout  # test venv is not a uv tool env
         credentials = {p.name: p.read_bytes() for p in (runtime / 'credentials').glob('*.json')}
         for raw in credentials.values():
             assert json.loads(raw)['token'] not in first.stdout
@@ -127,3 +128,10 @@ def test_inherited_database_override_is_rejected(tmp_path):
     assert 'sin overrides' in result.stderr
     assert not (tmp_path / '.agent-bus').exists()
     assert not (tmp_path / 'other.db').exists()
+
+
+def test_uv_tool_env_is_detected_by_receipt(tmp_path):
+    # uv tool install writes uv-receipt.toml at the root of the tool environment.
+    assert not is_uv_tool_env(tmp_path)
+    (tmp_path / 'uv-receipt.toml').write_text('[tool]\n')
+    assert is_uv_tool_env(tmp_path)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from jsonschema import Draft202012Validator
 
@@ -36,9 +36,13 @@ class BreakdownTaskItem(BaseModel):
     )
 
 
+PLAN_VERSION: Literal["1"] = "1"
+
+
 class TaskBreakdownPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    plan_version: Literal["1"] = PLAN_VERSION
     objective: str = Field(..., min_length=1, description="Objetivo global desglosado")
     tasks: list[BreakdownTaskItem] = Field(..., min_length=1, description="Lista de tareas del desglose")
     summary: str | None = Field(default=None, description="Resumen o justificación del desglose")
@@ -52,6 +56,11 @@ TASK_BREAKDOWN_JSON_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["objective", "tasks"],
     "properties": {
+        "plan_version": {
+            "type": "string",
+            "const": PLAN_VERSION,
+            "description": "Versión del contrato. Ausente significa la versión 1.",
+        },
         "objective": {
             "type": "string",
             "minLength": 1,

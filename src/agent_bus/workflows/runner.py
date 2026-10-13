@@ -1,0 +1,316 @@
+"""Advance one ready workflow task through the router and its runtime."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+import httpx
+from httpx import ASGITransport
+
+from agent_bus.core.artifacts import ArtifactStore
+from agent_bus.core.bus import MessageBus
+from agent_bus.core.evidence import EvidenceLog
+from agent_bus.runtimes.registry import RegistryError, RuntimeRegistry
+from agent_bus.types import Envelope, MessageType
+
+
+async def advance_workflow(
+    bus: MessageBus,
+    workflow: str,
+    instance_id: str,
+    *,
+    workspace_ref: str | None = None,
+    repo_dir: str | None = None,
+    candidate_branch: str | None = None,
+    timeout: float = 30,
+) -> dict[str, Any]:
+    prefix = f"{workflow}-{instance_id}-"
+    tasks = [task for task in await bus.tasks.list_all() if task.task_id.startswith(prefix)]
+    if not tasks:
+        return {"status": "absent", "workflow": workflow, "instance_id": instance_id}
+    evidence = EvidenceLog(bus.db, bus.project_id)
+    waiting = []
+    ready = []
+    for task in tasks:
+        policy = await evidence.policy(task.task_id)
+        if policy and policy["strict"]:
+            if task.status.value == "pending":
+                waiting.append(task.task_id)
+            continue
+        if task.status.value == "pending" and task.owner == "free":
+            ready.append(task)
+    if not ready:
+        if waiting:
+            if repo_dir and workspace_ref:
+                return await _integrate(
+                    bus, waiting[0], f"{prefix}implementation", repo_dir, workspace_ref, candidate_branch, timeout,
+                )
+            return {"status": "waiting_for_integration", "task_id": waiting[0], "workflow": workflow, "instance_id": instance_id}
+        return {"status": "idle", "workflow": workflow, "instance_id": instance_id}
+    ready.sort(key=lambda task: (len(task.depends_on), task.task_id))
+    task = ready[0]
+    decision = await bus._decide(task.requirements)
+    excluded = set()
+    for dependency_id in task.independent_from:
+        dependency = await bus.tasks.get(dependency_id)
+        if dependency is not None and dependency.owner != "free":
+            excluded.add(dependency.owner)
+    eligible = [agent_id for agent_id in decision.eligible if agent_id not in excluded]
+    if not eligible:
+        reasons = dict(decision.reasons)
+        reasons.update({agent_id: "completed an independent step" for agent_id in excluded})
+        return {"status": "unroutable", "task_id": task.task_id, "reasons": reasons}
+    registry = RuntimeRegistry(bus.db, bus.project_id, sandbox_opener=bus.sandbox_opener)
+    spec = await registry.get(eligible[0])
+    if spec is None:
+        return {"status": "no_runtime", "task_id": task.task_id, "selected_agent": decision.selected_agent}
+    if spec["runtime"] == "sandbox" and bus.sandbox_opener is None:
+        raise RegistryError("a sandbox runtime needs an injected opener")
+    claimed = await bus.tasks.claim(task.task_id, spec["agent_id"])
+    if claimed is None:
+        return {"status": "not_claimed", "task_id": task.task_id, "selected_agent": spec["agent_id"]}
+    launched = await registry.launch(
+        task.task_id, spec["agent_id"], spec["runtime"], spec["command"], workspace_ref, timeout,
+    )
+    if launched["state"] == "completed":
+        await bus.tasks.complete(task.task_id, actor=spec["agent_id"])
+        if launched.get("candidate_sha"):
+            await bus._notify_reviewers_of_candidate(task.task_id, launched["candidate_sha"])
+    elif launched["state"] in ("failed", "unknown"):
+        await bus.tasks.release(task.task_id)
+    stored = await bus.tasks.get(task.task_id)
+    return {
+        "status": "dispatched",
+        "workflow": workflow,
+        "instance_id": instance_id,
+        "task_id": task.task_id,
+        "selected_agent": spec["agent_id"],
+        "runtime": spec["runtime"],
+        "state": launched["state"],
+        "task_status": stored.status.value if stored else None,
+    }
+
+
+async def _integrate(
+    bus: MessageBus,
+    task_id: str,
+    implementation_task_id: str,
+    repo_dir: str,
+    workspace_ref: str,
+    candidate_branch: str | None,
+    timeout: float,
+) -> dict[str, Any]:
+    del timeout
+    attempt = await _implementation_attempt(bus, implementation_task_id)
+    if attempt is None:
+        reason = "implementation attempt is missing"
+        await bus.tasks.block(task_id, reason=reason)
+        await _notify_blocked(bus, task_id, reason)
+        return {"status": "blocked", "task_id": task_id, "error": reason}
+    review_gap = await _independent_review_gap(bus, task_id, implementation_task_id, attempt["candidate_sha"])
+    if review_gap:
+        await _notify_review_wait(bus, task_id, implementation_task_id, attempt["candidate_sha"], review_gap)
+        stored = await bus.tasks.get(task_id)
+        return {
+            "status": "waiting_for_review",
+            "task_id": task_id,
+            "error": review_gap,
+            "task_status": stored.status.value if stored else "pending",
+        }
+    target_sha = await _rev_parse(repo_dir, "HEAD")
+    candidate_sha = await _rev_parse(workspace_ref, "HEAD")
+    branch = candidate_branch or await _rev_parse(workspace_ref, "--abbrev-ref", "HEAD")
+    evidence = EvidenceLog(bus.db, bus.project_id)
+    existing = await bus.db.conn.execute_fetchall(
+        "SELECT evidence_id FROM task_evidence WHERE task_id = ?", (task_id,),
+    )
+    implementation = await bus.tasks.get(implementation_task_id)
+    test_cmd = list(implementation.test_cmd) if implementation and implementation.test_cmd else ["uv", "run", "pytest", "-q"]
+    passed, output = await _run_tests(test_cmd, workspace_ref)
+    if not passed:
+        reason = f"tests failed\n{output[-1000:]}"
+        await bus.tasks.block(task_id, reason=reason)
+        await _notify_blocked(bus, task_id, reason)
+        return {"status": "blocked", "task_id": task_id, "error": reason}
+    if not existing:
+        artifact = await ArtifactStore(bus.db, bus.project_id).publish(
+            task_id=task_id,
+            producer="workflow",
+            kind="test-report",
+            media_type="text/plain",
+            content=f"candidate {attempt['candidate_sha']}\n{output}".encode(),
+            summary="Implementation tests",
+            attempt_id=attempt["attempt_id"],
+        )
+        await evidence.add(
+            task_id,
+            criterion="all tests pass",
+            artifact_id=artifact.artifact_id,
+            status="passed",
+            attempt_id=attempt["attempt_id"],
+            target_sha=target_sha,
+        )
+    gap = await evidence.gap(task_id, candidate_sha=candidate_sha, target_sha=target_sha, verdict="approve")
+    if gap:
+        await bus.tasks.block(task_id, reason=gap)
+        await _notify_blocked(bus, task_id, gap)
+        return {"status": "blocked", "task_id": task_id, "error": gap}
+    from agent_bus.worker.integrator import BranchIntegrator
+
+    # The integrator persists its review before merging (fail closed), so it needs a
+    # principal; this runner already holds the hub in process, so an admin session
+    # grants nothing it does not have.
+    session = await bus.sessions.create("integrator", role="admin")
+    headers = {"Authorization": f"Bearer {session['token']}"}
+
+    def client_factory(timeout: float):
+        @asynccontextmanager
+        async def opener():
+            async with httpx.AsyncClient(
+                transport=ASGITransport(app=bus.app), base_url="http://bus.local", timeout=timeout,
+                headers=headers,
+            ) as client:
+                yield client
+        return opener()
+
+    integrator = BranchIntegrator(
+        repo_dir=Path(repo_dir), bus_url="http://bus.local", require_approval=True, client_factory=client_factory,
+    )
+    result = await integrator.integrate_task(
+        task_id, "workflow", Path(workspace_ref), branch, test_cmd=test_cmd,
+    )
+    if result.merged:
+        stored = await bus.tasks.get(task_id)
+        if stored is None or stored.status.value != "done":
+            stored = await bus.tasks.finish_integration(task_id)
+        if stored is not None and stored.status.value == "done":
+            return {"status": "integrated", "task_id": task_id, "candidate_sha": candidate_sha}
+    if not result.success:
+        await _notify_blocked(bus, task_id, result.error or "integration blocked")
+        return {"status": "blocked", "task_id": task_id, "error": result.error}
+    return {"status": "integrated", "task_id": task_id, "candidate_sha": candidate_sha}
+
+
+async def _independent_review_gap(
+    bus: MessageBus, task_id: str, implementation_task_id: str, candidate_sha: str,
+) -> str | None:
+    integration = await bus.tasks.get(task_id)
+    review_task = None
+    for dependency_id in integration.depends_on if integration else []:
+        dependency = await bus.tasks.get(dependency_id)
+        if dependency is not None and "code-review" in dependency.requirements:
+            review_task = dependency
+            break
+    if review_task is None:
+        return "independent review is missing"
+    implementation = await bus.tasks.get(implementation_task_id)
+    implementer = None
+    if implementation is not None and implementation.owner not in (None, "free"):
+        implementer = implementation.owner
+    matching = [
+        review for review in await bus.reviews.list_for_task(review_task.task_id)
+        if review.sha == candidate_sha
+    ]
+    if not matching:
+        return "independent review is missing"
+    latest = matching[0]
+    verdict = latest.verdict.value if hasattr(latest.verdict, "value") else str(latest.verdict)
+    if verdict != "approve":
+        return "independent review is not approved"
+    if implementer is not None and latest.reviewer_agent_id == implementer:
+        return "independent review was recorded by the implementer"
+    if review_task.owner not in (None, "free") and latest.reviewer_agent_id != review_task.owner:
+        return "independent review is not from the assigned reviewer"
+    return None
+
+
+async def _notify_review_wait(
+    bus: MessageBus, task_id: str, implementation_task_id: str, candidate_sha: str, reason: str,
+) -> None:
+    integration = await bus.tasks.get(task_id)
+    review_task = None
+    for dependency_id in integration.depends_on if integration else []:
+        dependency = await bus.tasks.get(dependency_id)
+        if dependency is not None and "code-review" in dependency.requirements:
+            review_task = dependency
+            break
+    if review_task is None or review_task.owner in (None, "free"):
+        return
+    implementation = await bus.tasks.get(implementation_task_id)
+    if implementation is not None and implementation.owner == review_task.owner:
+        return
+    digest = hashlib.sha256(f"{review_task.task_id}:{candidate_sha}:{reason}".encode()).hexdigest()[:32]
+    await bus.inbox.send(Envelope(
+        from_agent="workflow",
+        to_agent=review_task.owner,
+        message_type=MessageType.INBOX,
+        reply_needed=True,
+        related_task=review_task.task_id,
+        body={"text": f"Review {candidate_sha}: {reason[:300]}", "sha": candidate_sha, "reason": reason[:300]},
+    ), [review_task.owner], idempotency_key=f"review-wait:{digest}")
+
+
+async def _notify_blocked(bus: MessageBus, task_id: str, reason: str) -> None:
+    integration = await bus.tasks.get(task_id)
+    review_task = None
+    for dependency_id in integration.depends_on if integration else []:
+        dependency = await bus.tasks.get(dependency_id)
+        if dependency is not None and "code-review" in dependency.requirements:
+            review_task = dependency
+            break
+    recipients: list[str] = []
+    if review_task is not None and review_task.owner not in (None, "free"):
+        recipients.append(review_task.owner)
+    for implementation_id in review_task.independent_from if review_task is not None else []:
+        implementation = await bus.tasks.get(implementation_id)
+        if implementation is None or implementation.owner in (None, "free"):
+            continue
+        if implementation.owner not in recipients:
+            recipients.append(implementation.owner)
+    if not recipients:
+        return
+    digest = hashlib.sha256(f"{task_id}:{reason}".encode()).hexdigest()[:32]
+    body = {"text": f"Task {task_id} blocked: {reason[:300]}", "reason": reason[:300]}
+    for recipient in recipients:
+        await bus.inbox.send(Envelope(
+            from_agent="integrator",
+            to_agent=recipient,
+            message_type=MessageType.BLOCKER,
+            reply_needed=True,
+            related_task=task_id,
+            body=body,
+        ), [recipient], idempotency_key=f"block:{digest}:{recipient}")
+
+
+async def _implementation_attempt(bus: MessageBus, task_id: str) -> dict | None:
+    rows = await bus.db.conn.execute_fetchall(
+        """SELECT * FROM runtime_attempts
+           WHERE task_id = ? AND state = 'completed' AND candidate_sha IS NOT NULL
+           ORDER BY updated_at DESC LIMIT 1""",
+        (task_id,),
+    )
+    return dict(rows[0]) if rows else None
+
+
+async def _run_tests(cmd: list[str], cwd: str) -> tuple[bool, str]:
+    process = await asyncio.create_subprocess_exec(
+        *cmd, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await process.communicate()
+    output = out.decode(errors="replace") + err.decode(errors="replace")
+    return process.returncode == 0, output
+
+
+async def _rev_parse(cwd: str, *args: str) -> str:
+    process = await asyncio.create_subprocess_exec(
+        "git", "rev-parse", *args, cwd=cwd,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError(err.decode().strip() or "git rev-parse failed")
+    return out.decode().strip()

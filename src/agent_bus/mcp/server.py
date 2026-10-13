@@ -10,6 +10,7 @@ import logging
 import sys
 from typing import Any, Literal
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
@@ -22,15 +23,30 @@ from mcp.types import (
 )
 from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr
 
+from agent_bus import __version__
 from agent_bus.security import AuthenticationError, async_bus_client, load_session
 from agent_bus.core.sse import iter_sse_frames
 from agent_bus.mcp.transport import cancellable_stdio
-from agent_bus.mcp import coordination
+from agent_bus.mcp import coordination, panes_tool
+from agent_bus.types import is_stale
 
 logger = logging.getLogger("agent_bus.mcp")
 
 SERVER_NAME = "agent-bus"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = __version__
+IDENTITY_FIELDS = ("agent_id", "from_agent", "decided_by")
+# assign_work copies the whole instruction into each task; keep the overview small.
+TASK_SUMMARY_CHARS = 200
+
+
+def _summarize_task(task: dict[str, Any]) -> dict[str, Any]:
+    if is_stale(task):
+        # Likely finished without complete_handoff; the coordinator checks the worktree.
+        task = {**task, "stale": True}
+    description = task.get("description")
+    if not isinstance(description, str) or len(description) <= TASK_SUMMARY_CHARS:
+        return task
+    return {**task, "description": description[:TASK_SUMMARY_CHARS] + "…", "description_truncated": True}
 
 
 class DecisionToolArguments(BaseModel):
@@ -42,9 +58,16 @@ class DecisionToolArguments(BaseModel):
     context: StrictStr = Field(default="", description="Contexto adicional")
 
 
+WAIT_MAX_SECONDS = 50
+
+
 class WaitArguments(BaseModel):
     agent_id: StrictStr = Field(min_length=1)
-    timeout: StrictInt = Field(default=120, ge=1, le=120, description="Plazo total en segundos, incluida la consulta inicial")
+    # 50 s: MCP clients commonly abort a request at 60 s (Claude Code and the TS
+    # SDK default, Codex tool_timeout_sec). The margin covers hub latency and
+    # transport so the client gets the empty "timeout" result, not an error.
+    timeout: StrictInt = Field(default=WAIT_MAX_SECONDS, ge=1, le=WAIT_MAX_SECONDS,
+                               description="Plazo total en segundos (máx. 50), incluida la consulta inicial")
     event_cursor: StrictStr | None = Field(default=None, min_length=1, max_length=2048,
                                            description="Cursor de eventos para reanudar; distinto del cursor del inbox")
 
@@ -101,7 +124,9 @@ class RenewLockArguments(ReleaseLockArguments):
 TOOLS_DEFINITIONS = [
     {
         "name": "wait_for_updates",
-        "description": "Bloquea la ejecución hasta recibir un nuevo mensaje, tarea o evento del bus por SSE (patrón long-polling reactivo).",
+        "description": ("Bloquea la ejecución hasta recibir un nuevo mensaje, tarea o evento del bus por SSE "
+                        "(patrón long-polling reactivo). Espera como máximo 50 s y, al agotar el plazo, "
+                        "devuelve status=timeout sin pendientes y el event_cursor; vuelve a llamar para seguir esperando."),
         "inputSchema": WaitArguments.model_json_schema(),
     },
     {
@@ -137,13 +162,144 @@ TOOLS_DEFINITIONS = [
         },
     },
     {
+        "name": "register_capabilities",
+        "description": "Registrar capacidades declaradas y, si la sesión puede, las aprobadas por el proyecto.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "declared": {"type": "array", "items": {"type": "string"}},
+                "approved": {"type": "array", "items": {"type": "string"}},
+                "priority": {"type": "integer"},
+                "cost_class": {"type": "string"},
+                "can_edit": {"type": "boolean"},
+            },
+            "required": ["agent_id", "declared"],
+        },
+    },
+    {
+        "name": "route_task",
+        "description": "Enrutar una tarea libre hacia un agente elegible sin reclamarla.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "publish_artifact",
+        "description": "Publicar un artefacto acotado y recibir su metadata. El cuerpo no es un file://.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "producer": {"type": "string"},
+                "kind": {"type": "string"},
+                "media_type": {"type": "string"},
+                "content": {},
+                "summary": {"type": "string"},
+                "attempt_id": {"type": "string"},
+            },
+            "required": ["task_id", "producer", "kind", "content"],
+        },
+    },
+    {
+        "name": "list_task_artifacts",
+        "description": "Listar metadatos de los artefactos de una tarea.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "get_artifact_metadata",
+        "description": "Obtener metadatos de un artefacto por id, sin el cuerpo.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"artifact_id": {"type": "string"}},
+            "required": ["artifact_id"],
+        },
+    },
+    {
+        "name": "submit_instruction",
+        "description": "Guardar el encargo que el humano ya confirmó. Los agentes son hermes, grok, claude, codex o agy. No uses subagentes de esta sesión ni empieces el trabajo aquí.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "instruction": {"type": "string"},
+                "confirmed": {"type": "boolean"},
+                "agents": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "agent_id": {"type": "string"},
+                            "provider": {"type": "string", "enum": ["hermes", "grok", "claude", "codex", "agy"]},
+                        },
+                        "required": ["agent_id", "provider"],
+                    },
+                },
+                "agent_id": {"type": "string"},
+            },
+            "required": ["instruction", "confirmed", "agents", "agent_id"],
+        },
+    },
+    {
+        "name": "assign_work",
+        "description": "Entregar una parte del encargo confirmado a hermes, grok, claude, codex o agy. Quien revisa no puede ser quien implementa. No la reclames tú ni se la des a un subagente.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "instruction_id": {"type": "string"},
+                "assignee": {"type": "string"},
+                "role": {"type": "string", "enum": ["plan", "implement", "review"]},
+                "title": {"type": "string"},
+                "reviews": {
+                    "type": "array", "items": {"type": "string"}, "minItems": 1,
+                    "description": "Sólo role=review: task_id de las implementaciones que cubre; si se omite, todas",
+                },
+            },
+            "required": ["instruction_id", "assignee", "role", "title"],
+        },
+    },
+    {
+        "name": "record_verdict",
+        "description": (
+            "Registrar approve o changes_requested sobre una implementación de la review: usa el "
+            "candidate_sha que entregó con complete_handoff. Si la review cubre varias, indica "
+            "implementation_task_id o sha; changes_requested reabre sólo esa."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Tarea de review"},
+                "verdict": {"type": "string", "enum": ["approve", "changes_requested"]},
+                "implementation_task_id": {
+                    "type": "string", "description": "Implementación juzgada; obligatoria si hay varias y no pasas sha",
+                },
+                "sha": {"type": "string", "description": "candidate_sha entregado por la implementación"},
+                "reason": {"type": "string"},
+                "agent_id": {"type": "string"},
+            },
+            "required": ["task_id", "verdict", "agent_id"],
+        },
+    },
+    {
         "name": "complete_task",
-        "description": "Marcar una tarea como completada (done).",
+        "description": (
+            "Marcar una tarea como completada (done). El coordinador del encargo también cierra así una "
+            "implementación in_review que integró él mismo, si su último candidate_sha tiene approve vigente."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "ID de la tarea (ej: T1)"},
                 "agent_id": {"type": "string", "description": "ID del agente"},
+                "merged_sha": {
+                    "type": "string", "pattern": "^[0-9a-f]{7,64}$",
+                    "description": "Opcional: SHA del commit fusionado; queda en la evidencia",
+                },
             },
             "required": ["task_id", "agent_id"],
         },
@@ -165,8 +321,15 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "get_project_status",
-        "description": "Obtener el resumen global del estado del bus, tareas y agentes.",
-        "inputSchema": {"type": "object", "properties": {}},
+        "description": (
+            "Obtener el resumen global del estado del bus, tareas y agentes. Las descripciones de "
+            f"tareas se recortan a {TASK_SUMMARY_CHARS} caracteres (description_truncated=true); "
+            "pasa task_id para recibir solo esa tarea con su descripción completa."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "task_id": {"type": "string", "minLength": 1,
+                        "description": "Devuelve solo esta tarea, con la descripción completa."},
+        }},
     },
     {
         "name": "record_decision",
@@ -174,6 +337,22 @@ TOOLS_DEFINITIONS = [
         "inputSchema": DecisionToolArguments.model_json_schema(),
     },
 ]
+
+# Hub statuses whose body is a deliberate rule explanation. Auth (401/403) and
+# server errors (5xx) stay opaque: their bodies may carry session or backend data.
+_RULE_STATUSES = {400, 404, 409, 422}
+_DETAIL_CHARS = 300
+
+
+def _hub_rule_detail(response: httpx.Response) -> str | None:
+    if response.status_code not in _RULE_STATUSES:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    detail = body.get("detail") or body.get("error") if isinstance(body, dict) else None
+    return detail[:_DETAIL_CHARS] if isinstance(detail, str) and detail.strip() else None
 
 
 class McpServer:
@@ -187,18 +366,32 @@ class McpServer:
         self._event_cursors: dict[str, str] = {}
         self.session = None
         if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
-            self.session = load_session(agent_id)
+            # An explicit session file (set per pane by `panes spawn --agent`) is the credential;
+            # it outranks the --agent flag that a shared MCP config hard-codes.
+            selected = None if os.environ.get("AGENT_BUS_SESSION_FILE") else agent_id
+            try:
+                self.session = load_session(selected)
+            except AuthenticationError:
+                self.session = None
         self.agent_id = self.session["agent_id"] if self.session else agent_id
         self.tools = copy.deepcopy(TOOLS_DEFINITIONS + coordination.TOOLS)
         for tool in self.tools:
             tool["description"] += " " + coordination.TOOL_GUIDANCE[tool["name"]]
-        if self.session:
-            for tool in self.tools:
-                schema = tool["inputSchema"]
-                for field in ("agent_id", "from_agent", "decided_by"):
-                    schema.get("properties", {}).pop(field, None)
-                    if field in schema.get("required", []):
-                        schema["required"].remove(field)
+        if panes_tool.enabled():
+            self.tools.append(copy.deepcopy(panes_tool.TOOL))
+            self.tools[-1]["description"] += " " + panes_tool.GUIDANCE
+        # Identity is bound from the session (or --agent), never required as input:
+        # bootstrap_agent may adopt a session after this catalog was published.
+        self._identity_fields = {}
+        for tool in self.tools:
+            schema = tool["inputSchema"]
+            properties = schema.get("properties", {})
+            self._identity_fields[tool["name"]] = [f for f in IDENTITY_FIELDS if f in properties]
+            for field in self._identity_fields[tool["name"]]:
+                if self.session:
+                    properties.pop(field)
+                if field in schema.get("required", []):
+                    schema["required"].remove(field)
 
         self._validators = {}
         for tool in self.tools:
@@ -254,6 +447,9 @@ class McpServer:
             status = exc.response.status_code
             failure = {"code": "hub_error", "http_status": status,
                        "error": f"Hub rejected the operation (HTTP {status})"}
+            detail = _hub_rule_detail(exc.response)
+            if detail:
+                failure["detail"] = detail
         except httpx.TransportError:
             failure = {"code": "bus_unavailable", "error": "Cannot complete the hub request"}
         except Exception:
@@ -265,24 +461,43 @@ class McpServer:
         return self._tool_result({"status": "error", **failure}, error=True)
 
     def _client(self, timeout: float | None = 30.0):
-        return async_bus_client(
-            self.agent_id, session=self.session, project_id=self.project_id, base_url=self.bus_url, timeout=timeout,
-        )
+        try:
+            return async_bus_client(
+                self.agent_id, session=self.session, project_id=self.project_id, base_url=self.bus_url, timeout=timeout,
+            )
+        except AuthenticationError:
+            if self.session is not None:
+                raise
+            # The session adopted by bootstrap_agent lives only in this process;
+            # a restarted/reconnected MCP falls back to the config-dir credential.
+            raise AuthenticationError(
+                "Este proceso MCP no tiene sesión adoptada (p. ej. el servidor MCP se reinició o reconectó). "
+                "Repite bootstrap_agent con project_path del proyecto que coordinas."
+            ) from None
 
-    def _bind_identity(self, args: dict[str, Any]) -> dict[str, Any]:
-        if not self.session:
-            return dict(args)
+    def _bind_identity(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         bound = dict(args)
-        for field in ("agent_id", "from_agent", "decided_by"):
-            if field in bound and bound[field] != self.agent_id:
-                raise ValueError(f"{field} must match the authenticated MCP session")
-            bound[field] = self.agent_id
+        for field in self._identity_fields.get(name, IDENTITY_FIELDS):
+            if self.session:
+                if field in bound and bound[field] != self.agent_id:
+                    raise ValueError(f"{field} must match the authenticated MCP session")
+                bound[field] = self.agent_id
+            elif field not in bound:
+                if not self.agent_id:
+                    raise ValueError(f"{field} is required: call bootstrap_agent or start the MCP with --agent")
+                bound[field] = self.agent_id
         return bound
 
     async def execute_tool(self, name: str, args: dict[str, Any]) -> Any:
         if name in coordination.MODELS:
             return await coordination.execute(self, name, args)
-        args = self._bind_identity(args)
+        if name == panes_tool.NAME:
+            if self.session is None:
+                raise AuthenticationError("Llama bootstrap_agent antes de manejar paneles.")
+            async with self._client() as client:
+                return await panes_tool.call(args, Path(self._lock_project_root or self._lock_cwd), client,
+                                             self.project_id)
+        args = self._bind_identity(name, args)
         if name == "wait_for_updates":
             wait = WaitArguments.model_validate(args)
             return await self._wait_for_updates(wait.agent_id, wait.timeout, wait.event_cursor)
@@ -332,10 +547,86 @@ class McpServer:
                 resp.raise_for_status()
                 return resp.json()
 
+            elif name == "register_capabilities":
+                agent_id = args["agent_id"]
+                payload = {
+                    "declared": args.get("declared") or [],
+                    "approved": args.get("approved") or [],
+                    "priority": args.get("priority", 0),
+                    "cost_class": args.get("cost_class", "medium"),
+                    "can_edit": args.get("can_edit", True),
+                }
+                resp = await client.post(f"/agents/{agent_id}/route-profile", json=payload)
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "route_task":
+                resp = await client.post(f"/tasks/{args['task_id']}/route")
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "publish_artifact":
+                resp = await client.post(f"/tasks/{args['task_id']}/artifacts", json={
+                    "producer": args.get("producer"),
+                    "kind": args.get("kind"),
+                    "media_type": args.get("media_type") or "application/json",
+                    "content": args.get("content"),
+                    "summary": args.get("summary") or "",
+                    "attempt_id": args.get("attempt_id"),
+                })
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "list_task_artifacts":
+                resp = await client.get(f"/tasks/{args['task_id']}/artifacts")
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "get_artifact_metadata":
+                resp = await client.get(f"/artifacts/{args['artifact_id']}")
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "submit_instruction":
+                resp = await client.post("/instructions", json={
+                    "agent_id": args["agent_id"],
+                    "instruction": args["instruction"],
+                    "confirmed": args["confirmed"],
+                    "agents": args["agents"],
+                })
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "assign_work":
+                resp = await client.post(f"/instructions/{args['instruction_id']}/assignments", json={
+                    "assignee": args["assignee"],
+                    "role": args["role"],
+                    "title": args["title"],
+                    **({"reviews": args["reviews"]} if args.get("reviews") is not None else {}),
+                })
+                resp.raise_for_status()
+                return resp.json()
+
+            elif name == "record_verdict":
+                payload = {
+                    "agent_id": args["agent_id"],
+                    "verdict": args["verdict"],
+                    "reason": args.get("reason") or "",
+                }
+                for key in ("sha", "implementation_task_id"):
+                    if args.get(key):
+                        payload[key] = args[key]
+                resp = await client.post(f"/tasks/{args['task_id']}/verdict", json=payload)
+                resp.raise_for_status()
+                return resp.json()
+
             elif name == "complete_task":
                 task_id = args["task_id"]
                 agent_id = args["agent_id"]
-                resp = await client.post(f"/tasks/{task_id}/done", json={"agent_id": agent_id})
+                payload = {"agent_id": agent_id}
+                if args.get("merged_sha"):
+                    payload["merged_sha"] = args["merged_sha"]
+                resp = await client.post(f"/tasks/{task_id}/done", json=payload)
                 resp.raise_for_status()
                 return resp.json()
 
@@ -367,15 +658,23 @@ class McpServer:
                     response.raise_for_status()
                     return response.json()
 
+                if args.get("task_id"):
+                    return {"task": await get_json("/tasks/" + quote(args["task_id"], safe=""))}
                 status = await get_json("/status")
-                tasks = await get_json("/tasks")
+                tasks = [_summarize_task(task) for task in await get_json("/tasks")]
                 locks = await get_json("/locks")
                 agents = await get_json("/agents")
+                try:
+                    providers = await get_json("/project/provider-sessions")
+                except Exception:
+                    providers = {"providers": []}
                 return {
                     "server": status,
+                    "mcp_version": SERVER_VERSION,
                     "tasks": tasks,
                     "locks": locks,
                     "agents": agents,
+                    "provider_sessions": providers.get("providers", []),
                 }
 
             elif name == "record_decision":

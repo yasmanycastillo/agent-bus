@@ -9,9 +9,9 @@ from pathlib import Path
 
 import click
 
-from agent_bus.config import get_config_dir, load_config
+from agent_bus.config import load_config
 from agent_bus.reputation.database import Database, ProjectMismatchError
-from agent_bus.security import AuthenticationError, SessionStore, validate_id
+from agent_bus.security import AuthenticationError, SessionStore, credentials_dir, validate_id
 
 
 @click.group()
@@ -37,7 +37,7 @@ def create(agent: str | None, provider: str | None, role: str, ttl: int, output:
                 raise AuthenticationError("Provide --agent or --provider")
             agent = f"{provider[:115]}-{uuid.uuid4().hex[:12]}"
         validate_id(agent)
-        target = output or get_config_dir() / "credentials" / f"{agent}.json"
+        target = output or credentials_dir() / f"{agent}.json"
         target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         # Reserve without following symlinks or replacing another session.
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)

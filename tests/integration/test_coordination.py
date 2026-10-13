@@ -53,7 +53,10 @@ async def test_task_claim(client: AsyncClient):
 
 async def test_task_complete(client: AsyncClient):
     await client.post("/tasks", json={"task_id": "T1", "title": "Setup CI"})
-    resp = await client.post("/tasks/T1/done")
+    assert (await client.post("/tasks/T1/done")).status_code == 422
+    claimed = await client.post("/tasks/T1/claim", json={"agent_id": "claude"})
+    assert claimed.status_code == 200
+    resp = await client.post("/tasks/T1/done", json={"agent_id": "claude"})
     assert resp.status_code == 200
     assert resp.json()["status"] == "done"
 

@@ -99,8 +99,11 @@ async def test_mcp_coordination_tools_against_real_hub(live_bus_url):
     assert status["server"]["bus_version"]
     assert status["agents"] == []
     await call_tool(server, "release_lock", {"file_path": "a.py", "agent_id": "claude", "acquisition_id": lock["acquisition_id"]})
-    done = await call_tool(server, "complete_task", {"task_id": "T1", "agent_id": "claude"})
+    done = await call_tool(server, "complete_task", {"task_id": "T1", "agent_id": "claude", "merged_sha": "abc1234"})
     assert done["status"] == "done"
+    async with httpx.AsyncClient(base_url=live_bus_url) as client:
+        evidence = (await client.get("/tasks/T1/evidence")).json()["evidence"]
+    assert evidence[0]["evidence"] == {"merged_sha": "abc1234"}
     assert (await call_tool(server, "get_project_status", {}))["locks"] == []
 
 
@@ -133,3 +136,31 @@ async def test_mcp_record_decision_invalid_arguments(live_bus_url, invalid):
     assert response["code"] == "invalid_arguments"
     async with httpx.AsyncClient(base_url=live_bus_url) as client:
         assert (await client.get("/decisions")).json() == []
+
+
+async def test_mcp_assign_work_forwards_the_review_scope(live_bus_url):
+    server = McpServer(bus_url=live_bus_url)
+    instruction = await call_tool(server, "submit_instruction", {
+        "agent_id": "lead", "instruction": "Backend y frontend", "confirmed": True,
+        "agents": [{"agent_id": "codex", "provider": "codex"}, {"agent_id": "grok", "provider": "grok"}],
+    })
+    base = {"instruction_id": instruction["instruction_id"]}
+    await call_tool(server, "assign_work", {**base, "assignee": "codex", "role": "implement", "title": "Backend"})
+    frontend = await call_tool(server, "assign_work", {**base, "assignee": "grok", "role": "implement", "title": "Frontend"})
+    review = await call_tool(server, "assign_work", {
+        **base, "assignee": "codex", "role": "review", "title": "Revisar frontend", "reviews": [frontend["task_id"]],
+    })
+    async with httpx.AsyncClient(base_url=live_bus_url) as client:
+        task = (await client.get(f"/tasks/{review['task_id']}")).json()
+    assert task["independent_from"] == [frontend["task_id"]]
+    missing = await call_tool(server, "assign_work", {
+        **base, "instruction_id": "ins-nope", "assignee": "codex", "role": "plan", "title": "x",
+    }, expected_error=True)
+    assert "ins-nope" in missing["detail"]
+
+
+def test_project_status_flags_in_progress_tasks_without_recent_activity():
+    from agent_bus.mcp.server import _summarize_task
+    old = {'task_id': 'T1', 'status': 'in_progress', 'updated_at': '2026-01-01T00:00:00+00:00'}
+    assert _summarize_task(old)['stale'] is True
+    assert 'stale' not in _summarize_task({**old, 'status': 'in_review'})

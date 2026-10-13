@@ -133,6 +133,7 @@ def test_schema_valid_breakdown():
 
     plan = validate_breakdown_dict(valid_data)
     assert isinstance(plan, TaskBreakdownPlan)
+    assert plan.plan_version == "1"
     assert plan.objective == "Build user auth system"
     assert len(plan.tasks) == 2
     assert plan.tasks[0].task_id == "auth-db"

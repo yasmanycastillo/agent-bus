@@ -2,10 +2,31 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shlex
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Coroutine
+
+_STDERR_TAIL_CHARS = 4000
+_STDERR_LINE_CHARS = 400
+
+
+def _agy_error(base: str, payload: dict[str, Any], stderr: str | None) -> str:
+    """Explain an AGY failure with its denied tools and last stderr line, bounded."""
+    parts = [base[:200]]
+    denied = [
+        f"{item.get('action')} ({item.get('display_name')})" if item.get("display_name") else str(item.get("action"))
+        for item in payload.get("denied_actions") or []
+        if isinstance(item, dict)
+    ]
+    if denied:
+        parts.append("denied actions: " + ", ".join(denied[:5]))
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    if lines:
+        parts.append("stderr: " + lines[-1][:_STDERR_LINE_CHARS])
+    return "; ".join(parts)
 
 
 @dataclass
@@ -39,6 +60,8 @@ class AgentRunner:
         self.provider = provider.lower()
         self.model = model
         self.worktree_dir = worktree_dir or Path.cwd()
+        # Only an explicitly assigned checkout may receive automatic commits.
+        self.checkout_assigned = worktree_dir is not None
         self.custom_executor = custom_executor
         self.session_map: dict[str, str] = {}  # thread_id -> CLI session_id
         self.session_file = session_file
@@ -85,6 +108,10 @@ class AgentRunner:
                 parts.append(f"- Description: {task.get('description')}")
             if task.get("locked_files"):
                 parts.append(f"- Locked files: {', '.join(task.get('locked_files', []))}")
+            runtime_messages = task.get("runtime_messages") or []
+            if runtime_messages:
+                parts.append("- Runtime messages:")
+                parts.extend(f"  - {message}" for message in runtime_messages)
 
         if message:
             parts.append("\n## High Priority Incoming Message (Reply Needed):")
@@ -185,6 +212,8 @@ class AgentRunner:
             )
 
         cmd = [claude_bin, "-p", prompt, "--output-format", "json"]
+        if self.model:
+            cmd.extend(["--model", self.model])
 
         if thread_id and thread_id in self.session_map:
             cmd.extend(["--resume", self.session_map[thread_id]])
@@ -228,11 +257,14 @@ class AgentRunner:
         cmd = [agy_bin, "--prompt", prompt, "--output-format", "stream-json"]
         if self.model:
             cmd.extend(["--model", self.model])
+        # Operator opt-in only (e.g. --settings <file>); no permission bypass by default.
+        cmd.extend(shlex.split(os.environ.get("AGENT_BUS_AGY_ARGS", "")))
 
         result = await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
         if not result.success:
             return result
         response = None
+        payload: dict[str, Any] = {}
         conversation_id = result.session_id
         for line in result.output.splitlines():
             try:
@@ -244,9 +276,11 @@ class AgentRunner:
                 response = payload.get("response")
                 conversation_id = payload.get("conversation_id") or conversation_id
                 if payload.get("status") != "SUCCESS":
-                    return RunnerResult(False, "", session_id=conversation_id, error=str(response or payload.get("status")), exit_code=1)
+                    error = _agy_error(str(response or payload.get("status")), payload, result.metadata.get("stderr"))
+                    return RunnerResult(False, "", session_id=conversation_id, error=error, exit_code=1)
         if not isinstance(response, str) or not response.strip():
-            return RunnerResult(False, "", session_id=conversation_id, error="AGY stream returned no successful response", exit_code=1)
+            error = _agy_error("AGY stream returned no successful response", payload, result.metadata.get("stderr"))
+            return RunnerResult(False, "", session_id=conversation_id, error=error, exit_code=1)
         if thread_id and conversation_id:
             self.session_map[thread_id] = conversation_id
             self._save_sessions()
@@ -289,7 +323,55 @@ class AgentRunner:
             cmd.extend(["--model", self.model])
         if thread_id and thread_id in self.session_map:
             cmd.extend(["--resume", self.session_map[thread_id]])
-        return await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+        previous_session = self.session_map.get(thread_id) if thread_id else None
+        result = await self._run_subprocess(cmd, timeout_seconds, thread_id=thread_id)
+        if not result.success:
+            return result
+        # _run_subprocess can discover a session ID before this provider-specific
+        # envelope is validated. Restore the previous mapping on every rejected
+        # Grok response so failed turns cannot poison the next --resume.
+        def restore_session() -> None:
+            if not thread_id:
+                return
+            if previous_session is None:
+                self.session_map.pop(thread_id, None)
+            else:
+                self.session_map[thread_id] = previous_session
+            self._save_sessions()
+
+        # Grok's JSON envelope contains internal fields (for example `thought`).
+        # Deliver only the explicit final text and never the raw envelope.
+        try:
+            envelope = json.loads(result.output)
+        except (ValueError, TypeError):
+            envelope = None
+        text = envelope.get("text") if isinstance(envelope, dict) else None
+        session_id = envelope.get("sessionId") if isinstance(envelope, dict) else None
+        stop_reason = envelope.get("stopReason") if isinstance(envelope, dict) else None
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("is_error")
+            or stop_reason != "end_turn"
+            or not isinstance(text, str)
+            or not text.strip()
+            or not isinstance(session_id, str)
+            or not session_id.strip()
+        ):
+            restore_session()
+            result.success = False
+            result.error = (
+                text[:500] if isinstance(text, str) and text.strip()
+                else "Grok CLI returned no successful text result"
+            )
+            result.output = ""
+            return result
+        if isinstance(session_id, str) and session_id.strip():
+            result.session_id = session_id
+            if thread_id:
+                self.session_map[thread_id] = session_id
+                self._save_sessions()
+        result.output = text.strip()
+        return result
 
     async def _execute_codex_cli(
         self,
@@ -445,6 +527,8 @@ class AgentRunner:
                 error=stderr_text if exit_code != 0 else None,
                 exit_code=exit_code,
                 session_id=new_session_id,
+                # Bounded tail: adapters use it to explain "successful" empty turns.
+                metadata={"stderr": stderr_text[-_STDERR_TAIL_CHARS:]},
             )
 
         except Exception as exc:

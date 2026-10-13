@@ -1,11 +1,16 @@
 """Compact MCP facade over the authenticated hub coordination workflows."""
+import logging
+
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from agent_bus.core.coordination import (
     BootstrapRequest, HandoffRequest, INSTRUCTIONS, PrepareEditRequest,
 )
 from agent_bus.core.lock_paths import client_lock_path
+from agent_bus import __version__
 from agent_bus.security import AuthenticationError
+
+logger = logging.getLogger("agent_bus.mcp")
 
 
 class PendingArguments(BaseModel):
@@ -27,10 +32,10 @@ MODELS = {
     "get_agent_instructions": InstructionsArguments,
 }
 DESCRIPTIONS = {
-    "bootstrap_agent": "Entrar con tu sesión existente y recibir instrucciones, pendientes, agentes y decisiones. No crea credenciales.",
+    "bootstrap_agent": "Entrar al proyecto. Pasa project_path del proyecto que coordinas. La credencial se crea allí. No la crees en el directorio de agent-bus.",
     "my_pending_items": "Consultar mensajes y tareas propios sin confirmar. Pagina con next_cursor y next_task_offset.",
     "prepare_edit": "Reservar todos los archivos o ninguno. Conserva operation_key, acquisition_id y expires_at; reintentar no renueva locks.",
-    "complete_handoff": "Entregar tarea, evidencia declarada, ACK y liberaciones en una transacción. in_review por defecto; conserva operation_key al reintentar.",
+    "complete_handoff": "Entregar tarea, evidencia declarada, ACK y liberaciones en una transacción. in_review por defecto; conserva operation_key al reintentar. Si entregas código, pasa candidate_sha (SHA completo de tu commit): la revisión lo necesita.",
     "get_agent_instructions": "Obtener el protocolo de coordinación sin crear sesión ni cambiar estado.",
 }
 TOOLS = [{"name": name, "description": DESCRIPTIONS[name], "inputSchema": model.model_json_schema()}
@@ -38,23 +43,31 @@ TOOLS = [{"name": name, "description": DESCRIPTIONS[name], "inputSchema": model.
 
 
 TOOL_GUIDANCE = {
-    "bootstrap_agent": "Primera llamada al conectar: bootstrap_agent({}). Requiere una credencial provisionada. Después atiende my_pending_items.",
+    "bootstrap_agent": "Primera llamada: bootstrap_agent con project_path del proyecto abierto. No ejecutes auth create. Después atiende my_pending_items.",
     "get_agent_instructions": "Requiere sesión provisionada. Para incorporarte al proyecto, continúa con bootstrap_agent({}).",
     "my_pending_items": "Empieza con bootstrap_agent. Después procesa pendientes y usa ack_messages o reply_message según corresponda.",
     "prepare_edit": "Antes: bootstrap_agent y una tarea propia. Edita sólo tras authorized=true; después renueva con renew_lock o entrega con complete_handoff.",
-    "complete_handoff": "Antes: bootstrap_agent, tarea propia y tokens vigentes de los locks que liberas. Adjunta evidencia real; después consulta pendientes o espera respuesta.",
+    "complete_handoff": "Antes: bootstrap_agent, tarea propia y tokens vigentes de los locks que liberas. Adjunta evidencia real y candidate_sha de tu commit; después consulta pendientes o espera respuesta.",
     "wait_for_updates": "Antes: bootstrap_agent y my_pending_items. Conserva event_cursor; al recibir trabajo, procésalo antes de confirmar.",
     "post_message": "Antes: bootstrap_agent. Conserva destinatario, contenido e idempotency_key al reintentar; si pides respuesta, continúa con wait_for_updates.",
     "read_messages": "Para entrar al proyecto usa bootstrap_agent. Lee todas las páginas; después confirma sólo lo procesado con ack_messages.",
     "ack_messages": "Requiere IDs de mensajes de tu inbox que ya procesaste. Obtén pendientes con my_pending_items después de bootstrap_agent.",
     "reply_message": "Requiere un mensaje de tu inbox obtenido con my_pending_items o read_messages. Si acknowledge=true, responde y confirma en una operación.",
     "claim_task": "Antes: bootstrap_agent y consulta de tareas disponibles. Requiere tarea libre y pendiente; tras reclamar, usa prepare_edit antes de editar.",
+    "register_capabilities": "Declara capacidades de tu sesión. La aprobación del proyecto la hace un administrador. Después enruta con route_task.",
+    "route_task": "Elige un agente elegible para una tarea libre. No reclama. Si el resultado no te incluye, no reclames esa tarea.",
+    "publish_artifact": "Publica contenido acotado de una tarea. Guarda el artifact_id. No envíes un file:// ni un binario grande.",
+    "list_task_artifacts": "Lista metadatos de los artefactos de una tarea. El contenido se pide aparte con get_artifact_metadata y la ruta de contenido.",
+    "get_artifact_metadata": "Devuelve metadatos y el uri artifact://. No incluye la ruta local ni el cuerpo.",
     "complete_task": "Requiere una tarea propia en estado permitido. Para entregar evidencia, mensaje y locks juntos, prefiere complete_handoff; usa in_review si falta revisión.",
     "acquire_lock": "Antes: bootstrap_agent. Para varios archivos usa prepare_edit; después renueva con renew_lock o libera con release_lock usando el token recibido.",
     "release_lock": "Requiere el acquisition_id vigente de la misma sesión, ruta y scope. Si falla, consulta get_project_status y no liberes un lock ajeno.",
     "renew_lock": "Requiere el token vigente de la misma sesión. Si vence o falla la renovación, detén la edición y consulta get_project_status antes de adquirir de nuevo.",
     "get_project_status": "Para incorporarte al proyecto usa primero bootstrap_agent. Después selecciona una tarea disponible o consulta tus pendientes con my_pending_items.",
     "record_decision": "Antes: bootstrap_agent y revisión de decisiones recientes. Registra sólo un acuerdo alcanzado; después comunica el resultado si corresponde.",
+    "record_verdict": "Sólo el dueño de la tarea de review. Juzga el último candidate_sha de una implementación; si la review cubre varias, indica implementation_task_id o sha (sin ellos el error lista las candidatas). approve autoriza la integración de ese SHA. changes_requested reabre sólo esa implementación y la review espera su nueva entrega.",
+    "submit_instruction": "Sólo tras la confirmación del humano. confirmed=true. Agentes reales: hermes, grok, claude, codex o agy. No uses un subagente ni empieces el trabajo aquí.",
+    "assign_work": "Entrega una parte del encargo confirmado a uno de esos agentes. Quien revisa no puede ser quien implementa lo revisado; para una revisión cruzada pasa reviews con los task_id que cubre. No la reclames tú ni se la des a un subagente.",
 }
 
 
@@ -63,10 +76,10 @@ def connection_instructions(authenticated: bool) -> str:
         return INSTRUCTIONS
     return (
         "agent-bus está en modo legacy sin sesión autenticada. Las operaciones compactas "
-        "requieren una credencial propia del proyecto. Solicita al operador provisionarla "
-        "con agent-bus auth create y configura el cliente según docs/authentication.md; "
-        "no inventes identidades ni muestres tokens. Reconecta MCP y ejecuta bootstrap_agent({}) "
-        "como primera llamada. Las herramientas legacy conservan sus argumentos de identidad."
+        "usan una credencial propia del proyecto, creada por bootstrap_agent. "
+        "Pasa project_path del proyecto que coordinas. No ejecutes auth create ni escribas "
+        "credenciales en el directorio de agent-bus. Reconecta MCP después de instalar. "
+        "No inventes identidades ni muestres tokens."
     )
 
 
@@ -76,8 +89,8 @@ def recovery_hint(name: str, code: str, http_status: int | None = None) -> str:
         return ("Recupera pendientes con read_messages sin cursor de paginación. Usa el event_cursor "
                 "de recuperación si se devuelve; si no, obtén uno nuevo con my_pending_items antes de esperar.")
     if code == "unauthenticated" or http_status == 401:
-        return ("Solicita al operador una credencial vigente del proyecto; configura su archivo "
-                "en el cliente, reconecta MCP y ejecuta bootstrap_agent({}). No muestres el token.")
+        return ("Llama bootstrap_agent con project_path del proyecto que coordinas. "
+                "La credencial se crea allí. No ejecutes auth create ni uses el directorio de agent-bus.")
     if http_status == 403:
         return ("La sesión no tiene permiso para esta operación. Comprueba tu identidad/proyecto "
                 "y trabaja sólo sobre recursos autorizados; no suplantes a otro agente.")
@@ -105,9 +118,15 @@ def recovery_hint(name: str, code: str, http_status: int | None = None) -> str:
 
 
 async def execute(server, name, args):
-    if not server.session:
-        raise AuthenticationError("Coordination workflows require a provisioned MCP session")
     payload = MODELS[name].model_validate(args).model_dump(exclude_none=True)
+    if name == "bootstrap_agent" and server.session is None:
+        from agent_bus.mcp.join import join_workspace
+        await join_workspace(server, payload.get("project_path"))
+    if server.session is None and name != "get_agent_instructions":
+        raise AuthenticationError(
+            "Llama bootstrap_agent con project_path del proyecto. No crees la credencial en agent-bus."
+        )
+    payload.pop("project_path", None)
     if name == "get_agent_instructions":
         return {"instructions": INSTRUCTIONS, "agent_id": server.agent_id, "project_id": server.project_id}
 
@@ -129,4 +148,27 @@ async def execute(server, name, args):
         else:
             response = await client.post("/coordination/" + routes[name], json=payload)
         response.raise_for_status()
-        return response.json()
+        body = response.json()
+        if name == "bootstrap_agent" and isinstance(body, dict):
+            # The connected package is the protocol. A hub started earlier must not
+            # replace it with the instructions it had when it booted.
+            body["instructions"] = INSTRUCTIONS
+            warning = await version_warning(client)
+            if warning:
+                body["version_warning"] = warning
+        return body
+
+
+async def version_warning(client) -> str | None:
+    """Warn when this long-lived MCP process runs other code than the hub (e.g. after an upgrade)."""
+    try:
+        response = await client.get("/status")
+        response.raise_for_status()
+        hub = response.json().get("bus_version")
+    except Exception as exc:  # bootstrap must not depend on this hint
+        logger.warning("Could not read the hub version: %s", type(exc).__name__)
+        return None
+    if not isinstance(hub, str) or hub == __version__:
+        return None
+    return (f"El MCP de este cliente es {__version__} y el hub {hub}; reconecta el MCP del "
+            "cliente para usar la versión actual (si el anticuado es el hub, reinicia el hub).")

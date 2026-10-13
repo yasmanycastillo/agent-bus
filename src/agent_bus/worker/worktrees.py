@@ -120,18 +120,24 @@ class WorktreeManager:
         return self._git("rev-parse", "HEAD", cwd=self.path_for(agent_id))
 
     def remove(self, agent_id: str, force: bool = False) -> None:
-        """Elimina el worktree y su rama local."""
+        """Elimina el worktree y su rama local sin perder trabajo, salvo con ``force``.
+
+        Sin ``force`` falla si hay cambios sin commitear y conserva la rama si
+        no está fusionada.
+        """
         if not self.exists(agent_id):
             return
+        if not force and self.has_changes(agent_id):
+            raise RuntimeError(f"Worktree for agent '{agent_id}' has uncommitted changes; commit them or pass force=True")
         args = ["worktree", "remove"]
-        if force or self.has_changes(agent_id):
+        if force:
             args.append("--force")
         args.append(str(self.path_for(agent_id)))
         self._git(*args)
         try:
-            self._git("branch", "-D", self.branch_for(agent_id))
+            self._git("branch", "-D" if force else "-d", self.branch_for(agent_id))
         except RuntimeError:
-            pass  # rama ya fusionada/borrada
+            logger.info("Kept branch %s: not merged or already gone", self.branch_for(agent_id))
         logger.info("Removed worktree for '%s'", agent_id)
 
     def list_all(self) -> list[WorktreeInfo]:

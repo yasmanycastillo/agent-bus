@@ -8,6 +8,7 @@
 | [Demo](demo.md) | Probar coordinación, revisión y decisión humana sin modelos comerciales |
 | [Consola](console.md) | Supervisar tareas, solicitudes, reservas y conexión |
 | [Proyectos y sesiones](projects.md) | Configurar varios proyectos y trabajar desde worktrees |
+| [Workflow feature-development](workflows.md) | Compilar, avanzar, registrar el veredicto e integrar |
 | [Autenticación](authentication.md) | Provisionar, renovar y revocar credenciales; entender permisos |
 
 ## Coordinar agentes e integrar clientes

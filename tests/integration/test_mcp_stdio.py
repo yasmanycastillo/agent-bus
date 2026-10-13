@@ -196,7 +196,7 @@ async def test_legacy_versions_negotiate_without_stdout_noise(secure_bus, versio
 async def test_wait_does_not_block_ping_or_tools_and_cancellation_closes_sse(secure_bus, observed_streams):
     async with raw_peer(secure_bus) as peer:
         await peer.initialize()
-        await peer.send("tools/call", request_id=2, params={"name": "wait_for_updates", "arguments": {"timeout": 120}})
+        await peer.send("tools/call", request_id=2, params={"name": "wait_for_updates", "arguments": {"timeout": 50}})
         await eventually(lambda: observed_streams() == 1)
         await peer.send("ping", request_id=3)
         await peer.send("tools/list", request_id=4)
@@ -234,7 +234,7 @@ async def test_protocol_errors_are_distinct_from_tool_failures(secure_bus):
 async def test_disconnect_while_waiting_stops_process_and_hub_stream(secure_bus, observed_streams, broken_pipe):
     async with raw_peer(secure_bus) as peer:
         await peer.initialize()
-        await peer.send("tools/call", request_id=2, params={"name": "wait_for_updates", "arguments": {"timeout": 120}})
+        await peer.send("tools/call", request_id=2, params={"name": "wait_for_updates", "arguments": {"timeout": 50}})
         await eventually(lambda: observed_streams() == 1)
         if broken_pipe:
             # Close only our child's stdout read end. A subsequent reply forces

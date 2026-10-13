@@ -99,10 +99,18 @@ class HermesOrchestrator:
         config: OrchestratorConfig | None = None,
         client: InferenceClient | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        backend=None,
     ) -> None:
         self.config = config or OrchestratorConfig.from_env()
-        self.client = client or InferenceClient(self.config)
+        self.client = client if client is not None or backend is not None else InferenceClient(self.config)
+        self.backend = backend
         self.system_prompt = system_prompt
+
+    async def _complete(self, messages: list[dict[str, str]]) -> str:
+        if self.backend is not None:
+            return await self.backend.complete(messages)
+        from agent_bus.planning.backends.openai_compatible import OpenAICompatibleBackend
+        return await OpenAICompatibleBackend(self.client).complete(messages)
 
     async def breakdown_objective(
         self,
@@ -127,10 +135,7 @@ class HermesOrchestrator:
 
         raw_response: str | None = None
         try:
-            raw_response = await self.client.chat_completion(
-                messages,
-                response_format={"type": "json_object"},
-            )
+            raw_response = await self._complete(messages)
             plan = parse_and_validate_plan(raw_response, operation_key=operation_key)
             return BreakdownResult(success=True, plan=plan)
 

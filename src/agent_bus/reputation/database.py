@@ -4,8 +4,8 @@ import aiosqlite
 import asyncio
 import os
 import secrets
-import re
 import sqlite3
+import re
 import stat
 import time
 from datetime import datetime, timezone
@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     actor_session_id TEXT NOT NULL,
     previous_owner TEXT,
     new_owner TEXT,
+    evidence TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -186,6 +187,11 @@ CREATE TABLE IF NOT EXISTS kickoff (
     result TEXT,
     completed_by TEXT,
     completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS registered_agents (
+    agent_id TEXT PRIMARY KEY,
+    info TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -365,7 +371,11 @@ class Database:
             if descriptor is not None:
                 os.close(descriptor)
         self._connection.row_factory = aiosqlite.Row
+        # In-memory databases have nothing to restore after a failed migration.
+        snapshot = Path(str(self._file_path) + ".migration-snapshot") if self._file_path else None
         try:
+            if snapshot is not None:
+                await self._write_snapshot(snapshot)
             await self._connection.executescript(SCHEMA)
             if self.project_id is not None:
                 await self.bind_project(self.project_id)
@@ -374,9 +384,48 @@ class Database:
             await self._migrate_tasks()
             await self._migrate_reviews()
             await self._migrate_worker_control()
+            await self._migrate_audit_log()
+            await self._migrate_phase1()
+            await self._migrate_artifacts()
+            await self._migrate_evidence()
+            await self._migrate_usage()
+            await self._migrate_runtime_registry()
+            from agent_bus.core.instructions import InstructionLog
+            await InstructionLog(self).ensure_schema()
+            from agent_bus.core.tasks import close_approved_review
+            await self._connection._execute(close_approved_review, self._connection._conn,
+                                            None, datetime.now(timezone.utc).isoformat())
+            await self._connection.commit()
         except BaseException:
             await self._close_locked()
+            if snapshot is not None:
+                self._restore_snapshot(snapshot)
             raise
+        else:
+            if snapshot is not None:
+                snapshot.unlink(missing_ok=True)
+
+    async def _write_snapshot(self, snapshot: Path) -> None:
+        def copy(connection: sqlite3.Connection) -> None:
+            if snapshot.exists():
+                snapshot.unlink()
+            # Same privacy as the database itself (0600 in its 0700 parent).
+            os.close(os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600))
+            target = sqlite3.connect(snapshot)
+            try:
+                connection.backup(target)
+            finally:
+                target.close()
+
+        await self.conn._execute(copy, self.conn._conn)
+
+    def _restore_snapshot(self, snapshot: Path) -> None:
+        if not snapshot.exists():
+            return
+        path = self._file_path
+        for suffix in ("-wal", "-shm"):
+            Path(str(path) + suffix).unlink(missing_ok=True)
+        snapshot.replace(path)
 
     async def bind_project(self, project_id: str) -> None:
         """Adopt an unbound legacy database once, or verify its durable owner.
@@ -492,6 +541,9 @@ class Database:
                 ("test_cmd", "TEXT"),
                 ("depends_on", "TEXT DEFAULT '[]'"),
                 ("operation_key", "TEXT"),
+                ("requirements", "TEXT DEFAULT '[]'"),
+                ("independent_from", "TEXT DEFAULT '[]'"),
+                ("blocked_reason", "TEXT"),
             ]
             for name, col_def in new_cols:
                 if name not in columns:
@@ -539,6 +591,181 @@ class Database:
                     updated_at TEXT NOT NULL
                 )"""
             )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_phase1(self) -> None:
+        """Capability profiles, route decisions and native runtime attempts."""
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS agent_route_profiles (
+                    agent_id TEXT PRIMARY KEY,
+                    declared TEXT NOT NULL DEFAULT '[]',
+                    approved TEXT NOT NULL DEFAULT '[]',
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    cost_class TEXT NOT NULL DEFAULT 'medium',
+                    max_in_progress INTEGER NOT NULL DEFAULT 1,
+                    can_edit INTEGER NOT NULL DEFAULT 1
+                )"""
+            )
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS route_decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    selected_agent TEXT,
+                    eligible TEXT NOT NULL,
+                    reasons TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS runtime_messages (
+                    message_id TEXT PRIMARY KEY,
+                    attempt_id TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    consumed INTEGER NOT NULL DEFAULT 0
+                )"""
+            )
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS runtime_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    state TEXT NOT NULL,
+                    external_ref TEXT,
+                    workspace_ref TEXT,
+                    updated_at TEXT NOT NULL,
+                    outcome TEXT,
+                    candidate_sha TEXT,
+                    log_refs TEXT DEFAULT '[]',
+                    execution_epoch TEXT
+                )"""
+            )
+            columns = {row["name"] for row in await self.conn.execute_fetchall("PRAGMA table_info(runtime_attempts)")}
+            for name, definition in (
+                ("outcome", "TEXT"),
+                ("candidate_sha", "TEXT"),
+                ("log_refs", "TEXT DEFAULT '[]'"),
+                ("execution_epoch", "TEXT"),
+                ("observation_json", "TEXT"),
+            ):
+                if name not in columns:
+                    await self.conn.execute(f"ALTER TABLE runtime_attempts ADD COLUMN {name} {definition}")
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_artifacts(self) -> None:
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    producer TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    retention TEXT NOT NULL,
+                    summary TEXT,
+                    attempt_id TEXT,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            await self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(project_id, task_id)"
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_evidence(self) -> None:
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS evidence_policies (
+                    task_id TEXT PRIMARY KEY,
+                    strict INTEGER NOT NULL,
+                    require_review INTEGER NOT NULL,
+                    require_sha_match INTEGER NOT NULL
+                )"""
+            )
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS task_evidence (
+                    evidence_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    criterion TEXT NOT NULL,
+                    artifact_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt_id TEXT NOT NULL,
+                    target_sha TEXT NOT NULL
+                )"""
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_usage(self) -> None:
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS usage_records (
+                    record_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    agent_id TEXT,
+                    runtime TEXT,
+                    provider TEXT,
+                    model TEXT,
+                    task_id TEXT,
+                    workflow_id TEXT,
+                    input_tokens INTEGER,
+                    cached_input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    wall_seconds REAL,
+                    estimated_cost_usd REAL,
+                    retries INTEGER NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_runtime_registry(self) -> None:
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS agent_runtimes (
+                    agent_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    runtime TEXT NOT NULL,
+                    command TEXT NOT NULL DEFAULT '[]'
+                )"""
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+
+    async def _migrate_audit_log(self) -> None:
+        """Ensure evidence column exists in audit_log."""
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row["name"] for row in await self.conn.execute_fetchall("PRAGMA table_info(audit_log)")}
+            if "evidence" not in columns:
+                await self.conn.execute("ALTER TABLE audit_log ADD COLUMN evidence TEXT")
             await self.conn.commit()
         except BaseException:
             await self.conn.rollback()

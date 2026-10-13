@@ -37,7 +37,12 @@ def integrator():
 @click.option("--agent", default="integrator", help="Identidad del integrador.")
 @click.option("--interval", default=5.0, type=float, show_default=True)
 @click.option("--bus-url", default=None)
-@click.option("--require-approval", is_flag=True, default=False, help="Exigir aprobación formal del Gatekeeper para fusionar.")
+@click.option(
+    "--require-approval/--advisory-review",
+    default=True,
+    show_default=True,
+    help="Exigir aprobación del Gatekeeper; advisory-review permite fusionar con cambios solicitados si pasan las pruebas.",
+)
 def start(agent: str, interval: float, bus_url: str | None, require_approval: bool):
     """Iniciar el polling de tareas `in_review`."""
     pid_file = _pid()
@@ -69,7 +74,12 @@ def start(agent: str, interval: float, bus_url: str | None, require_approval: bo
 @integrator.command("once")
 @click.option("--agent", default="integrator", help="Identidad del integrador.")
 @click.option("--bus-url", default=None)
-@click.option("--require-approval", is_flag=True, default=False, help="Exigir aprobación formal del Gatekeeper para fusionar.")
+@click.option(
+    "--require-approval/--advisory-review",
+    default=True,
+    show_default=True,
+    help="Exigir aprobación del Gatekeeper; advisory-review permite fusionar con cambios solicitados si pasan las pruebas.",
+)
 def once(agent: str, bus_url: str | None, require_approval: bool):
     """Ejecutar una pasada de integración y salir."""
     import asyncio

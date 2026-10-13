@@ -1,6 +1,6 @@
 [project]
 name = "agent-bus"
-version = "0.1.0"
+version = "0.2.1"
 description = "Protocolo de comunicacion entre agentes IA sin dependencia de tmux"
 readme = "README.md"
 license = "MIT"
@@ -49,6 +49,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
+    "pytest-xdist>=3.6",
     "ruff>=0.7",
     "mypy>=1.12",
 ]
