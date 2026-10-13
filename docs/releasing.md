@@ -19,8 +19,13 @@ uv run ruff check .
 uv run python scripts/check_mypy_baseline.py
 uv run pytest -q
 rm -rf dist
-uv build
+# Construye desde el commit, no desde el checkout: así no entran archivos sin seguimiento.
+build_src="$(mktemp -d)"
+git archive HEAD | tar -x -C "$build_src"
+uv build "$build_src" -o dist
+rm -rf "$build_src"
 sha256sum dist/*.whl dist/*.tar.gz > dist/SHA256SUMS
+tar tzf dist/*.tar.gz   # revisa que solo haya archivos del repositorio
 ```
 
 Instala el wheel resultante en un entorno temporal fuera del checkout y verifica:
@@ -28,7 +33,7 @@ Instala el wheel resultante en un entorno temporal fuera del checkout y verifica
 ```sh
 release_env="$(mktemp -d)"
 python -m venv "$release_env/venv"
-"$release_env/venv/bin/pip" install "$(pwd)"/dist/agent_bus-<version>-py3-none-any.whl
+"$release_env/venv/bin/pip" install "$(pwd)"/dist/agent_bus_coord-<version>-py3-none-any.whl
 "$release_env/venv/bin/agent-bus" --help
 "$release_env/venv/bin/agent-bus" demo --yes
 rm -rf "$release_env"
@@ -43,7 +48,7 @@ prueba.
 1. Obtén una revisión independiente del commit exacto que será etiquetado.
 2. Crea un tag anotado `v<version>` y verifica que apunta al commit revisado.
 3. Crea el release de GitHub con las notas del changelog y adjunta el sdist y wheel.
-4. Publica en PyPI sólo mediante una credencial o trusted publisher configurado fuera
+4. Publica en PyPI (proyecto `agent-bus-coord`) sólo mediante una credencial o trusted publisher configurado fuera
    del repositorio. Nunca guardes tokens en Git, scripts o logs.
 5. Descarga los artefactos publicados y verifica que coinciden con `dist/SHA256SUMS`,
    generado inmediatamente después del build revisado.
