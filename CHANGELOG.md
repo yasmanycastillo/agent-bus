@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0 — 2026-10-13
+
+- Paneles de agente: `agent-bus panes spawn|send|screen|close|list|view` abre Claude,
+  agy, Codex o Grok en un servidor tmux privado por proyecto. El coordinador los
+  maneja con la herramienta MCP opcional `agent_panes` (`AGENT_BUS_PANES=1`); el
+  humano los mira en solo lectura con `view` o en el panel «Agentes en vivo» de la
+  consola, y responde sus preguntas de permisos con `panes answer`.
+- Cada panel arranca con su propio watcher (`watch --cli tmux`), que le escribe las
+  tareas asignadas, los avisos del hub y los mensajes pendientes, y le recuerda hacer
+  handoff si una tarea lleva 15 minutos en `in_progress` sin cambios.
+- `assign_work` puede limitar una revisión a implementaciones concretas; la revisión
+  espera a que estén entregadas y se cierra sola al aprobarlas todas.
+  `complete_handoff` guarda el SHA candidato y `changes_requested` devuelve la tarea a
+  quien la tenía.
+- El coordinador puede cerrar con `complete_task` una implementación aprobada que
+  integró por su cuenta. `my_pending_items` filtra por `instruction_id`.
+- Los agentes registrados sobreviven al reinicio del hub y pasan a offline cuando
+  dejan de latir. `bootstrap_agent` avisa si MCP y hub tienen versiones distintas.
+- Seguridad: solo el coordinador de una instrucción asigna su trabajo o la marca
+  integrada; los paneles no heredan claves de API, `SSH_AUTH_SOCK` ni la identidad del
+  coordinador, y `send` elimina caracteres de control; el directorio de credenciales
+  trae su propio `.gitignore`.
+- Cada operación de tareas usa su propia transacción SQLite; el integrador cuenta los
+  reintentos desde las revisiones persistidas, prueba el SHA revisado exacto y rechaza
+  checkouts que no son Git.
+- `wait_for_updates` espera como máximo 50 s para que los clientes MCP reciban el
+  timeout vacío. Los errores del hub y de agy explican la regla o la acción denegada.
+
 ## 0.2.1 — 2026-10-07
 
 - `watch --cli muxel --muxel-agent <agente>` escribe la solicitud en un panel vivo de
