@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
@@ -55,12 +56,8 @@ def _detect_cycles(graph: dict[str, list[str]]) -> list[str] | None:
     return None
 
 
-async def _validate_dag(
-    conn: aiosqlite.Connection,
-    new_tasks: list[dict[str, Any]],
-) -> None:
-    """Validate that all dependencies exist and do not form cycles."""
-    rows = await conn.execute_fetchall("SELECT task_id, depends_on FROM tasks")
+def _validate_dag_rows(rows: list[Any], new_tasks: list[dict[str, Any]]) -> None:
+    """Validate dependencies and cycles from rows owned by the caller transaction."""
     graph: dict[str, list[str]] = {}
     for row in rows:
         t_id = row["task_id"] if hasattr(row, "keys") and not isinstance(row, (tuple, list)) else row[0]
@@ -100,18 +97,6 @@ class TaskManager:
         depends_on: list[str] | None = None,
         operation_key: str | None = None,
     ) -> Task:
-        if operation_key:
-            existing = await self._db.conn.execute_fetchall(
-                "SELECT * FROM tasks WHERE operation_key = ? LIMIT 1",
-                (operation_key,),
-            )
-            if existing:
-                return self._row_to_task(existing[0])
-
-        existing_task = await self.get(task_id)
-        if existing_task is not None:
-            return existing_task
-
         task_dict = {
             "task_id": task_id,
             "title": title,
@@ -122,49 +107,60 @@ class TaskManager:
             "depends_on": depends_on or [],
             "operation_key": operation_key,
         }
-        res = await self.create_batch([task_dict], operation_key=operation_key)
+        res = await self.create_batch([task_dict], operation_key=operation_key, _return_existing=True)
         return res[0]
 
     async def create_batch(
         self,
         tasks: list[dict[str, Any]],
         operation_key: str | None = None,
+        _return_existing: bool = False,
     ) -> list[Task]:
+        """_return_existing (create() only): an existing task_id is returned as stored, unvalidated."""
         if not tasks:
             return []
-
-        if operation_key:
-            existing = await self._db.conn.execute_fetchall(
-                "SELECT * FROM tasks WHERE operation_key = ? ORDER BY rowid",
-                (operation_key,),
-            )
-            if existing:
-                return [self._row_to_task(row) for row in existing]
 
         batch_ids = [t["task_id"] for t in tasks]
         if len(batch_ids) != len(set(batch_ids)):
             raise ValueError("Duplicate task_id within batch")
 
-        await _validate_dag(self._db.conn, tasks)
-
-        all_deps: set[str] = set()
-        for t in tasks:
-            all_deps.update(t.get("depends_on") or [])
-
-        done_task_ids: set[str] = set()
-        if all_deps:
-            placeholders = ",".join("?" * len(all_deps))
-            rows = await self._db.conn.execute_fetchall(
-                f"SELECT task_id FROM tasks WHERE task_id IN ({placeholders}) AND status = 'done'",
-                tuple(all_deps),
-            )
-            done_task_ids = {r["task_id"] if hasattr(r, "keys") and not isinstance(r, (tuple, list)) else r[0] for r in rows}
-
         now = datetime.now(timezone.utc).isoformat()
-        created_tasks: list[Task] = []
 
-        await self._db.conn.execute("BEGIN IMMEDIATE")
-        try:
+        def transaction(connection: sqlite3.Connection) -> Any:
+            if operation_key:
+                existing = connection.execute(
+                    "SELECT * FROM tasks WHERE operation_key = ? ORDER BY rowid",
+                    (operation_key,),
+                ).fetchall()
+                if existing:
+                    return existing
+            if _return_existing:
+                stored = connection.execute(
+                    "SELECT * FROM tasks WHERE task_id = ?", (tasks[0]["task_id"],),
+                ).fetchall()
+                if stored:
+                    return stored
+
+            existing_rows = connection.execute(
+                "SELECT task_id, depends_on FROM tasks"
+            ).fetchall()
+            _validate_dag_rows(existing_rows, tasks)
+
+            all_deps = {
+                dependency
+                for task in tasks
+                for dependency in (task.get("depends_on") or [])
+            }
+            done_task_ids: set[str] = set()
+            if all_deps:
+                placeholders = ",".join("?" * len(all_deps))
+                rows = connection.execute(
+                    f"SELECT task_id FROM tasks WHERE task_id IN ({placeholders}) "
+                    "AND status = 'done'",
+                    tuple(all_deps),
+                ).fetchall()
+                done_task_ids = {row["task_id"] for row in rows}
+
             for t in tasks:
                 task_id = t["task_id"]
                 title = t["title"]
@@ -183,7 +179,7 @@ class TaskManager:
 
                 test_cmd_json = json.dumps(test_cmd) if test_cmd is not None else None
 
-                await self._db.conn.execute(
+                connection.execute(
                     """INSERT OR IGNORE INTO tasks
                        (task_id, title, description, owner, status, locked_files, created_at, updated_at,
                         acceptance_criteria, test_cmd, depends_on, operation_key)
@@ -202,16 +198,15 @@ class TaskManager:
                         op_key,
                     ),
                 )
-            await self._db.conn.commit()
-        except BaseException:
-            await self._db.conn.rollback()
-            raise
+            return [
+                connection.execute(
+                    "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                for task_id in batch_ids
+            ]
 
-        for t in tasks:
-            task = await self.get(t["task_id"])
-            if task:
-                created_tasks.append(task)
-        return created_tasks
+        rows = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+        return [self._row_to_task(row) for row in rows if row is not None]
 
     async def get(self, task_id: str) -> Task | None:
         cursor = await self._db.conn.execute_fetchall(
@@ -257,121 +252,136 @@ class TaskManager:
 
     async def claim(self, task_id: str, agent_id: str) -> Task | None:
         """Claim a free pending task once; retries, competing claims, and unmet dependencies conflict."""
-        task = await self.get(task_id)
-        if not task:
-            return None
-        if task.owner != "free" or task.status != TaskStatus.PENDING:
-            return None
-
-        if task.depends_on:
-            placeholders = ",".join("?" * len(task.depends_on))
-            rows = await self._db.conn.execute_fetchall(
-                f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) AND status = 'done'",
-                tuple(task.depends_on),
-            )
-            done_count = rows[0]["COUNT(*)"] if hasattr(rows[0], "keys") and not isinstance(rows[0], (tuple, list)) else rows[0][0]
-            if done_count < len(task.depends_on):
-                return None
-
         now = datetime.now(timezone.utc).isoformat()
-        rows = await self._db.conn.execute_fetchall(
-            """UPDATE tasks SET owner = ?, status = 'in_progress', updated_at = ?
-               WHERE task_id = ? AND owner = 'free' AND status = 'pending'
-               RETURNING *""",
-            (agent_id, now, task_id),
-        )
-        await self._db.conn.commit()
-        return self._row_to_task(rows[0]) if rows else None
+
+        def transaction(connection: sqlite3.Connection) -> Any:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None or row["owner"] != "free" or row["status"] != "pending":
+                return None
+            dependencies = json.loads(row["depends_on"] or "[]")
+            if dependencies:
+                placeholders = ",".join("?" * len(dependencies))
+                done_count = connection.execute(
+                    f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) "
+                    "AND status = 'done'",
+                    tuple(dependencies),
+                ).fetchone()[0]
+                if done_count < len(dependencies):
+                    return None
+            return connection.execute(
+                """UPDATE tasks SET owner = ?, status = 'in_progress', updated_at = ?
+                   WHERE task_id = ? AND owner = 'free' AND status = 'pending'
+                   RETURNING *""",
+                (agent_id, now, task_id),
+            ).fetchone()
+
+        row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+        return self._row_to_task(row) if row is not None else None
 
     async def reassign(self, task_id: str, new_owner: str) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
-        if new_owner == "free":
-            task = await self.get(task_id)
-            is_blocked = False
-            if task and task.depends_on:
-                placeholders = ",".join("?" * len(task.depends_on))
-                rows = await self._db.conn.execute_fetchall(
-                    f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) AND status = 'done'",
-                    tuple(task.depends_on),
-                )
-                done_count = rows[0]["COUNT(*)"] if hasattr(rows[0], "keys") and not isinstance(rows[0], (tuple, list)) else rows[0][0]
-                if done_count < len(task.depends_on):
-                    is_blocked = True
-            status_sql = ", status = 'blocked'" if is_blocked else ", status = 'pending'"
-        else:
-            status_sql = ", status = 'in_progress'"
 
-        await self._db.conn.execute(
-            "UPDATE tasks SET owner = ?, updated_at = ?" + status_sql
-            + " WHERE task_id = ?",
-            (new_owner, now, task_id),
-        )
-        await self._db.conn.commit()
-        return await self.get(task_id)
+        def transaction(connection: sqlite3.Connection) -> Any:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            if new_owner == "free":
+                dependencies = json.loads(row["depends_on"] or "[]")
+                is_blocked = False
+                if dependencies:
+                    placeholders = ",".join("?" * len(dependencies))
+                    done_count = connection.execute(
+                        f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) "
+                        "AND status = 'done'",
+                        tuple(dependencies),
+                    ).fetchone()[0]
+                    is_blocked = done_count < len(dependencies)
+                status = "blocked" if is_blocked else "pending"
+            else:
+                status = "in_progress"
+            return connection.execute(
+                "UPDATE tasks SET owner = ?, status = ?, updated_at = ? "
+                "WHERE task_id = ? RETURNING *",
+                (new_owner, status, now, task_id),
+            ).fetchone()
+
+        row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+        return self._row_to_task(row) if row is not None else None
 
     async def complete(self, task_id: str, actor: str | None = None) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
         condition = " AND owner = ? AND status IN ('in_progress', 'in_review')" if actor else " AND status != 'done'"
         params = (now, task_id, actor) if actor else (now, task_id)
-        rows = await self._db.conn.execute_fetchall(
-            "UPDATE tasks SET status = 'done', updated_at = ? WHERE task_id = ?"
-            + condition + " RETURNING *", params,
-        )
-        if not rows:
-            await self._db.conn.commit()
-            return None
 
-        # Unblock any blocked tasks whose dependencies are now all 'done'
-        blocked_rows = await self._db.conn.execute_fetchall(
-            "SELECT * FROM tasks WHERE status = 'blocked'"
-        )
-        for b_row in blocked_rows:
-            b_task = self._row_to_task(b_row)
-            if not b_task.depends_on:
-                await self._db.conn.execute(
-                    "UPDATE tasks SET status = 'pending', updated_at = ? WHERE task_id = ? AND status = 'blocked'",
-                    (now, b_task.task_id),
-                )
-            else:
-                placeholders = ",".join("?" * len(b_task.depends_on))
-                done_rows = await self._db.conn.execute_fetchall(
-                    f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) AND status = 'done'",
-                    tuple(b_task.depends_on),
-                )
-                done_count = done_rows[0]["COUNT(*)"] if hasattr(done_rows[0], "keys") and not isinstance(done_rows[0], (tuple, list)) else done_rows[0][0]
-                if done_count == len(b_task.depends_on):
-                    await self._db.conn.execute(
-                        "UPDATE tasks SET status = 'pending', updated_at = ? WHERE task_id = ? AND status = 'blocked'",
-                        (now, b_task.task_id),
+        def transaction(connection: sqlite3.Connection) -> Any:
+            row = connection.execute(
+                "UPDATE tasks SET status = 'done', updated_at = ? WHERE task_id = ?"
+                + condition + " RETURNING *",
+                params,
+            ).fetchone()
+            if row is None:
+                return None
+
+            for blocked in connection.execute(
+                "SELECT task_id, depends_on FROM tasks WHERE status = 'blocked'"
+            ).fetchall():
+                dependencies = json.loads(blocked["depends_on"] or "[]")
+                if not dependencies:
+                    ready = True
+                else:
+                    placeholders = ",".join("?" * len(dependencies))
+                    done_count = connection.execute(
+                        f"SELECT COUNT(*) FROM tasks WHERE task_id IN ({placeholders}) "
+                        "AND status = 'done'",
+                        tuple(dependencies),
+                    ).fetchone()[0]
+                    ready = done_count == len(dependencies)
+                if ready:
+                    connection.execute(
+                        "UPDATE tasks SET status = 'pending', updated_at = ? "
+                        "WHERE task_id = ? AND status = 'blocked'",
+                        (now, blocked["task_id"]),
                     )
+            return row
 
-        await self._db.conn.commit()
-        return self._row_to_task(rows[0])
+        row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+        return self._row_to_task(row) if row is not None else None
 
     async def submit_review(self, task_id: str, actor: str | None = None) -> Task | None:
         """Move owned work to the serialized integration queue."""
         now = datetime.now(timezone.utc).isoformat()
         condition = " AND owner = ?" if actor else ""
         params = (now, task_id, actor) if actor else (now, task_id)
-        rows = await self._db.conn.execute_fetchall(
-            "UPDATE tasks SET status = 'in_review', updated_at = ? "
-            "WHERE task_id = ? AND status = 'in_progress'" + condition + " RETURNING *", params,
-        )
-        await self._db.conn.commit()
-        return self._row_to_task(rows[0]) if rows else None
+        def transaction(connection: sqlite3.Connection) -> Any:
+            return connection.execute(
+                "UPDATE tasks SET status = 'in_review', updated_at = ? "
+                "WHERE task_id = ? AND status = 'in_progress'"
+                + condition + " RETURNING *",
+                params,
+            ).fetchone()
+
+        row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+        return self._row_to_task(row) if row is not None else None
 
     async def block(self, task_id: str, reason: str | None = None, actor: str | None = None) -> Task | None:
         """Mark a task as blocked."""
         now = datetime.now(timezone.utc).isoformat()
         condition = " AND owner = ?" if actor else ""
         params = (now, task_id, actor) if actor else (now, task_id)
-        rows = await self._db.conn.execute_fetchall(
-            "UPDATE tasks SET status = 'blocked', updated_at = ? WHERE task_id = ? AND status != 'done'"
-            + condition + " RETURNING *",
-            params,
-        )
-        await self._db.conn.commit()
-        return self._row_to_task(rows[0]) if rows else None
+        def transaction(connection: sqlite3.Connection) -> Any:
+            return connection.execute(
+                "UPDATE tasks SET status = 'blocked', updated_at = ? "
+                "WHERE task_id = ? AND status != 'done'"
+                + condition + " RETURNING *",
+                params,
+            ).fetchone()
+
+        row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+        return self._row_to_task(row) if row is not None else None
 
     async def lock_files(self, task_id: str, paths: list[str], actor: str | None = None) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
@@ -379,12 +389,15 @@ class TaskManager:
         params = (json.dumps(paths), now, task_id)
         if actor:
             params += (actor,)
-        rows = await self._db.conn.execute_fetchall(
-            "UPDATE tasks SET locked_files = ?, updated_at = ? WHERE task_id = ?"
-            + condition + " RETURNING *", params,
-        )
-        await self._db.conn.commit()
-        return self._row_to_task(rows[0]) if rows else None
+        def transaction(connection: sqlite3.Connection) -> Any:
+            return connection.execute(
+                "UPDATE tasks SET locked_files = ?, updated_at = ? WHERE task_id = ?"
+                + condition + " RETURNING *",
+                params,
+            ).fetchone()
+
+        row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+        return self._row_to_task(row) if row is not None else None
 
     async def transfer(
         self, task_id: str, new_owner: str, *, actor: str, session_id: str,
@@ -402,7 +415,7 @@ class TaskManager:
             params += (actor,)
         action = "handoff" if require_owner else "reassign"
 
-        def transaction(connection):
+        def transaction(connection: sqlite3.Connection) -> Any:
             audit = connection.execute(
                 """INSERT INTO audit_log
                 (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, created_at)
@@ -436,18 +449,21 @@ class TaskManager:
             ).fetchall()
             return rows[0]
 
-        row = await self._db.transaction(transaction)
+        row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
         return self._row_to_task(row) if row is not None else None
 
     async def unlock_files(self, task_id: str) -> Task | None:
         now = datetime.now(timezone.utc).isoformat()
-        await self._db.conn.execute(
-            """UPDATE tasks SET locked_files = '[]', updated_at = ?
-               WHERE task_id = ?""",
-            (now, task_id),
-        )
-        await self._db.conn.commit()
-        return await self.get(task_id)
+
+        def transaction(connection: sqlite3.Connection) -> Any:
+            return connection.execute(
+                """UPDATE tasks SET locked_files = '[]', updated_at = ?
+                   WHERE task_id = ? RETURNING *""",
+                (now, task_id),
+            ).fetchone()
+
+        row = await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+        return self._row_to_task(row) if row is not None else None
 
     @staticmethod
     def _row_to_task(row: tuple | aiosqlite.Row | dict) -> Task:

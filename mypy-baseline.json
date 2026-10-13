@@ -140,9 +140,7 @@
     "src/agent_bus/core/tasks.py:assignment:Incompatible types in assignment (expression has type \"Any | None\", variable has type \"list[Any] | list[str | Any]\")": 1,
     "src/agent_bus/core/tasks.py:assignment:Incompatible types in assignment (expression has type \"tuple[str, str, str, str]\", variable has type \"tuple[str, str, str]\")": 1,
     "src/agent_bus/core/tasks.py:assignment:Incompatible types in assignment (expression has type \"tuple[str, str]\", variable has type \"tuple[str]\")": 1,
-    "src/agent_bus/core/tasks.py:index:Value of type \"Iterable[Row]\" is not indexable": 10,
-    "src/agent_bus/core/tasks.py:no-untyped-call:Call to untyped function \"transaction\" in typed context": 1,
-    "src/agent_bus/core/tasks.py:no-untyped-def:Function is missing a type annotation": 1,
+    "src/agent_bus/core/tasks.py:index:Value of type \"Iterable[Row]\" is not indexable": 1,
     "src/agent_bus/core/tasks.py:type-arg:Missing type arguments for generic type \"dict\"": 1,
     "src/agent_bus/core/tasks.py:type-arg:Missing type arguments for generic type \"tuple\"": 1,
     "src/agent_bus/crypto.py:arg-type:Argument 1 to \"SigningKey\" has incompatible type \"str\"; expected \"bytes\"": 1,
@@ -206,5 +204,5 @@
     "src/agent_bus/worker/integrator.py:arg-type:Argument 1 to \"Path\" has incompatible type \"Path | Awaitable[Path]\"; expected \"str | PathLike[str]\"": 1,
     "src/agent_bus/worker/worktrees.py:type-arg:Missing type arguments for generic type \"dict\"": 1
   },
-  "total_errors": 606
+  "total_errors": 595
 }

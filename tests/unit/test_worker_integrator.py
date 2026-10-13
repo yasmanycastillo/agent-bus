@@ -7,7 +7,9 @@ from pathlib import Path
 import httpx
 import pytest
 
+import agent_bus.worker.integrator as integrator_module
 from agent_bus.security import async_bus_client
+from agent_bus.worker.gatekeeper import ReviewDecision, Verdict
 from agent_bus.worker.integrator import BranchIntegrator, IntegratorResult
 
 # ---------------------------------------------------------------------------
@@ -62,9 +64,160 @@ def _init_repo(path: Path) -> None:
     _run_git("checkout", "main", cwd=path, env=env)
 
 
+class _JsonResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class _ReviewClient:
+    def __init__(self, reviews):
+        self.reviews = reviews
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def get(self, path):
+        assert path == "/tasks/T-restart/reviews"
+        return _JsonResponse(self.reviews)
+
+
+class _BlockClient:
+    def __init__(self, post_payload, get_payload):
+        self.post_payload = post_payload
+        self.get_payload = get_payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def post(self, path, json):
+        assert path == "/tasks/T-block/block"
+        assert "reason" in json
+        return _JsonResponse(self.post_payload)
+
+    async def get(self, path):
+        assert path == "/tasks/T-block"
+        return _JsonResponse(self.get_payload)
+
+
+def _set_retry_counts(integrator: BranchIntegrator, *counts: int) -> None:
+    values = iter(counts)
+    last = counts[-1]
+
+    async def durable_count(_task_id: str, _review_id: str | None = None) -> int:
+        nonlocal last
+        last = next(values, last)
+        return last
+
+    integrator._durable_retry_count = durable_count  # type: ignore[method-assign]
+
+
 # ---------------------------------------------------------------------------
 # Existing behavior: retry / blocked / success (mocked, non-git paths)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retry_count_is_recovered_from_persisted_reviews_after_restart(
+    tmp_path, monkeypatch
+):
+    def review(review_id: str, reviewer: str) -> dict:
+        return ReviewDecision(
+            review_id=review_id,
+            task_id="T-restart",
+            sha="abc",
+            verdict=Verdict.CHANGES_REQUESTED,
+            reason="retry",
+            reviewer_agent_id=reviewer,
+        ).model_dump(mode="json")
+
+    reviews = [review("r1", "integrator"), review("r2", "other-reviewer"),
+               review("r3", "integrator")]
+    monkeypatch.setattr(
+        integrator_module,
+        "async_bus_client",
+        lambda *_args, **_kwargs: _ReviewClient(reviews),
+    )
+
+    first = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+    restarted = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+
+    assert await first._durable_retry_count("T-restart") == 2
+    assert await restarted._durable_retry_count("T-restart") == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_count_rejects_malformed_review_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        integrator_module,
+        "async_bus_client",
+        lambda *_args, **_kwargs: _ReviewClient([{}]),
+    )
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+    assert await integrator._durable_retry_count("T-restart") is None
+
+
+@pytest.mark.asyncio
+async def test_mark_blocked_requires_blocked_response_and_readback(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        integrator_module,
+        "async_bus_client",
+        lambda *_args, **_kwargs: _BlockClient(
+            {"task_id": "T-block", "status": "blocked"},
+            {"task_id": "T-block", "status": "in_review"},
+        ),
+    )
+    integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
+    assert await integrator._mark_task_blocked("T-block", "limit") is False
+
+
+@pytest.mark.asyncio
+async def test_retry_limit_never_claims_blocked_when_durable_transition_fails(tmp_path):
+    integrator = BranchIntegrator(
+        repo_dir=tmp_path,
+        bus_url="http://test",
+        max_retries_per_task=0,
+    )
+
+    async def fail_tests(_worktree_dir, _test_cmd=None):
+        return False, "failure"
+
+    async def persist(decision):
+        return decision
+
+    async def retry_count(_task_id, _review_id=None):
+        return 1
+
+    async def fail_block(_task_id, _reason=""):
+        return False
+
+    integrator.run_tests = fail_tests
+    integrator._record_review = persist  # type: ignore[method-assign]
+    integrator._durable_retry_count = retry_count  # type: ignore[method-assign]
+    integrator._mark_task_blocked = fail_block  # type: ignore[method-assign]
+
+    result = await integrator.integrate_task(
+        "T-limit",
+        "claude",
+        tmp_path,
+        "agent/claude",
+        acceptance_criteria=[],
+    )
+
+    assert result.status == "error"
+    assert result.metadata["task_blocked"] is False
+    assert "failed to mark" in (result.error or "").lower()
 
 
 @pytest.mark.asyncio
@@ -87,6 +240,7 @@ async def test_integrator_test_failure_triggers_author_feedback(tmp_path):
     integrator.run_tests = mock_fail_tests
     integrator._record_review = mock_record  # type: ignore
     integrator._notify_author_failure = mock_notify  # type: ignore
+    _set_retry_counts(integrator, 1)
 
     res = await integrator.integrate_task(
         task_id="T800",
@@ -122,10 +276,15 @@ async def test_integrator_exceeding_max_retries_blocks_task(tmp_path):
     async def mock_block(task_id, author_agent, details):
         pass
 
+    async def mock_mark(_task_id, _reason=""):
+        return True
+
     integrator._test_candidate = mock_candidate  # type: ignore
     integrator.run_tests = mock_fail_tests
     integrator._record_review = mock_record  # type: ignore
     integrator._notify_author_failure = mock_notify  # type: ignore
+    _set_retry_counts(integrator, 1, 2, 3)
+    integrator._mark_task_blocked = mock_mark  # type: ignore[method-assign]
     integrator._notify_bus_blocked = mock_block  # type: ignore
 
     res1 = await integrator.integrate_task("T801", "claude", tmp_path, "agent/claude", acceptance_criteria=[])
@@ -282,6 +441,7 @@ async def test_integrator_conflict_against_current_main_requests_retry(tmp_path)
 
     integrator._record_review = mock_record  # type: ignore
     integrator._notify_author_failure = mock_notify  # type: ignore
+    _set_retry_counts(integrator, 1)
 
     res = await integrator.integrate_task(
         "T902", "claude", candidate_worktree, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
@@ -313,6 +473,7 @@ async def test_integrator_refuses_merge_when_target_moved(tmp_path):
 
     integrator._record_review = mock_record  # type: ignore
     integrator._notify_author_failure = mock_notify  # type: ignore
+    _set_retry_counts(integrator, 1)
 
     # Sneak a new commit into main after _test_candidate captured target_sha
     # but before _integrate runs, simulating a concurrent update.
@@ -710,6 +871,7 @@ async def test_pending_ref_deleted_on_failure(tmp_path):
         pass
     integrator._record_review = mock_record  # type: ignore
     integrator._notify_author_failure = mock_notify  # type: ignore
+    _set_retry_counts(integrator, 1)
 
     res = await integrator.integrate_task(
         "T916", "claude", wt, "agent/claude", test_cmd=["/bin/true"], acceptance_criteria=[],
@@ -737,6 +899,7 @@ async def test_target_cas_race_detected_via_update_ref(tmp_path):
         pass
     integrator._record_review = mock_record  # type: ignore
     integrator._notify_author_failure = mock_notify  # type: ignore
+    _set_retry_counts(integrator, 1)
 
     original = integrator._test_candidate
 
@@ -878,6 +1041,7 @@ async def test_publication_race_concurrent_advance_never_erased(tmp_path):
 
     integrator._record_review = mock_record  # type: ignore
     integrator._notify_author_failure = mock_notify  # type: ignore
+    _set_retry_counts(integrator, 1)
 
     original_git_output = integrator._git_output
     raced: dict = {}
@@ -934,6 +1098,7 @@ async def test_pre_publication_conflict_is_plain_conflict(tmp_path):
 
     integrator._record_review = mock_record  # type: ignore
     integrator._notify_author_failure = mock_notify  # type: ignore
+    _set_retry_counts(integrator, 1)
 
     original = integrator._test_candidate
 
@@ -1105,6 +1270,7 @@ async def test_feedback_failure_reported_not_claimed(tmp_path, secure_bus, http_
         return decision
 
     integrator._record_review = mock_record  # type: ignore
+    _set_retry_counts(integrator, 1)
 
     # Real HTTP to the live bus: /tasks/<unknown>/reassign returns 404,
     # so _notify_author_failure must return False (no swallowed success).

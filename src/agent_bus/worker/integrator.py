@@ -91,7 +91,6 @@ class BranchIntegrator:
         self.max_retries_per_task = max_retries_per_task
         self.require_approval = require_approval
         self.gatekeeper = gatekeeper or CodeReviewGatekeeper()
-        self._retry_counts: dict[str, int] = {}  # task_id -> retry count
 
     async def process_pending(
         self,
@@ -304,7 +303,24 @@ class BranchIntegrator:
 
         # If verdict is BLOCKED, DO NOT MERGE under any policy
         if decision.verdict == Verdict.BLOCKED:
-            blocked = await self._mark_task_blocked(task_id, f"Gatekeeper review blocked: {decision.reason}")
+            blocked = await self._mark_task_blocked(
+                task_id, f"Gatekeeper review blocked: {decision.reason}"
+            )
+            if not blocked:
+                return IntegratorResult(
+                    success=False,
+                    merged=False,
+                    status="error",
+                    output=test_output,
+                    error=(
+                        f"Gatekeeper blocked task {task_id}, but failed to mark it "
+                        "blocked durably."
+                    ),
+                    metadata={
+                        "review": decision.model_dump(mode="json"),
+                        "task_blocked": False,
+                    },
+                )
             notified = await self._notify_bus_blocked(
                 task_id, author_agent, f"Task {task_id} blocked by gatekeeper: {decision.reason}"
             )
@@ -324,22 +340,57 @@ class BranchIntegrator:
         if effective_require_approval:
             # Under require_approval=True:
             if decision.verdict == Verdict.CHANGES_REQUESTED:
-                retries = self._retry_counts.get(task_id, 0) + 1
-                self._retry_counts[task_id] = retries
+                retries = await self._durable_retry_count(task_id, decision.review_id)
+                if retries is None:
+                    return IntegratorResult(
+                        False,
+                        False,
+                        "error",
+                        output=test_output,
+                        error=f"Failed to read durable integration attempts for task {task_id}.",
+                        metadata={"review": decision.model_dump(mode="json")},
+                    )
 
                 if retries > self.max_retries_per_task:
-                    await self._mark_task_blocked(
-                        task_id, f"Exceeded max retries ({self.max_retries_per_task}). Gatekeeper: {decision.reason}"
+                    blocked = await self._mark_task_blocked(
+                        task_id,
+                        f"Exceeded max retries ({self.max_retries_per_task}). "
+                        f"Gatekeeper: {decision.reason}",
                     )
-                    notified = await self._notify_bus_blocked(task_id, author_agent, test_output)
+                    if not blocked:
+                        return IntegratorResult(
+                            False,
+                            False,
+                            "error",
+                            output=test_output,
+                            error=(
+                                f"Task {task_id} exceeded retry limit, but failed to "
+                                "mark it blocked durably."
+                            ),
+                            retry_count=retries,
+                            metadata={
+                                "review": decision.model_dump(mode="json"),
+                                "task_blocked": False,
+                            },
+                        )
+                    notified = await self._notify_bus_blocked(
+                        task_id, author_agent, test_output
+                    )
                     return IntegratorResult(
                         success=False,
                         merged=False,
                         status="blocked",
                         output=test_output,
-                        error=f"Task {task_id} failed integration after {retries} retries. Gatekeeper: {decision.reason}",
+                        error=(
+                            f"Task {task_id} failed integration after {retries} retries. "
+                            f"Gatekeeper: {decision.reason}"
+                        ),
                         retry_count=retries,
-                        metadata={"review": decision.model_dump(mode="json"), "author_notified": notified},
+                        metadata={
+                            "review": decision.model_dump(mode="json"),
+                            "task_blocked": True,
+                            "author_notified": notified,
+                        },
                     )
 
                 # Send feedback to author with reason and evidence, and reassign task to author
@@ -383,9 +434,22 @@ class BranchIntegrator:
             else:
                 merge_ok, merge_output = await self._merge_branches(candidate_sha, target_branch)
             if not merge_ok:
-                retries = self._retry_counts.get(task_id, 0) + 1
-                self._retry_counts[task_id] = retries
-                feedback_sent = await self._notify_author_failure(task_id, author_agent, f"Merge conflict:\n{merge_output}", retries)
+                retries = await self._durable_retry_count(task_id, decision.review_id)
+                if retries is None:
+                    return IntegratorResult(
+                        False,
+                        False,
+                        "error",
+                        output=merge_output,
+                        error=f"Failed to read durable integration attempts for task {task_id}.",
+                        metadata={"review": decision.model_dump(mode="json")},
+                    )
+                feedback_sent = await self._notify_author_failure(
+                    task_id,
+                    author_agent,
+                    f"Merge conflict:\n{merge_output}",
+                    retries,
+                )
                 return IntegratorResult(
                     success=False,
                     merged=False,
@@ -400,7 +464,6 @@ class BranchIntegrator:
                     metadata={"review": decision.model_dump(mode="json"), "feedback_sent": feedback_sent},
                 )
 
-            self._retry_counts.pop(task_id, None)
             # Task completion MUST succeed before reporting merged success;
             # otherwise the bus would still show the task as in_review.
             completed, completion_error = await self._finalize_merge(task_id)
@@ -421,22 +484,56 @@ class BranchIntegrator:
             # Under require_approval=False:
             # Record audit decision, merge if tests passed and not explicitly blocked
             if not tests_passed:
-                retries = self._retry_counts.get(task_id, 0) + 1
-                self._retry_counts[task_id] = retries
+                retries = await self._durable_retry_count(task_id, decision.review_id)
+                if retries is None:
+                    return IntegratorResult(
+                        False,
+                        False,
+                        "error",
+                        output=test_output,
+                        error=f"Failed to read durable integration attempts for task {task_id}.",
+                        metadata={"review": decision.model_dump(mode="json")},
+                    )
 
                 if retries > self.max_retries_per_task:
-                    await self._mark_task_blocked(
-                        task_id, f"Exceeded max integration retries ({self.max_retries_per_task})."
+                    blocked = await self._mark_task_blocked(
+                        task_id,
+                        f"Exceeded max integration retries ({self.max_retries_per_task}).",
                     )
-                    notified = await self._notify_bus_blocked(task_id, author_agent, test_output)
+                    if not blocked:
+                        return IntegratorResult(
+                            False,
+                            False,
+                            "error",
+                            output=test_output,
+                            error=(
+                                f"Task {task_id} exceeded retry limit, but failed to "
+                                "mark it blocked durably."
+                            ),
+                            retry_count=retries,
+                            metadata={
+                                "review": decision.model_dump(mode="json"),
+                                "task_blocked": False,
+                            },
+                        )
+                    notified = await self._notify_bus_blocked(
+                        task_id, author_agent, test_output
+                    )
                     return IntegratorResult(
                         success=False,
                         merged=False,
                         status="blocked",
                         output=test_output,
-                        error=f"Task {task_id} failed integration after {retries} retries. Marked as blocked.",
+                        error=(
+                            f"Task {task_id} failed integration after {retries} retries. "
+                            "Marked as blocked."
+                        ),
                         retry_count=retries,
-                        metadata={"review": decision.model_dump(mode="json"), "author_notified": notified},
+                        metadata={
+                            "review": decision.model_dump(mode="json"),
+                            "task_blocked": True,
+                            "author_notified": notified,
+                        },
                     )
 
                 # Send feedback message to author requiring reply
@@ -478,9 +575,22 @@ class BranchIntegrator:
             else:
                 merge_ok, merge_output = await self._merge_branches(candidate_sha, target_branch)
             if not merge_ok:
-                retries = self._retry_counts.get(task_id, 0) + 1
-                self._retry_counts[task_id] = retries
-                feedback_sent = await self._notify_author_failure(task_id, author_agent, f"Merge conflict:\n{merge_output}", retries)
+                retries = await self._durable_retry_count(task_id, decision.review_id)
+                if retries is None:
+                    return IntegratorResult(
+                        False,
+                        False,
+                        "error",
+                        output=merge_output,
+                        error=f"Failed to read durable integration attempts for task {task_id}.",
+                        metadata={"review": decision.model_dump(mode="json")},
+                    )
+                feedback_sent = await self._notify_author_failure(
+                    task_id,
+                    author_agent,
+                    f"Merge conflict:\n{merge_output}",
+                    retries,
+                )
                 return IntegratorResult(
                     success=False,
                     merged=False,
@@ -495,7 +605,6 @@ class BranchIntegrator:
                     metadata={"review": decision.model_dump(mode="json"), "feedback_sent": feedback_sent},
                 )
 
-            self._retry_counts.pop(task_id, None)
             # Task completion MUST succeed before reporting merged success;
             # otherwise the bus would still show the task as in_review.
             completed, completion_error = await self._finalize_merge(task_id)
@@ -940,6 +1049,31 @@ class BranchIntegrator:
             logger.error(f"Failed to fetch acceptance criteria for task {task_id}: {exc}")
             return None
 
+    async def _durable_retry_count(
+        self, task_id: str, expected_review_id: str | None = None
+    ) -> int | None:
+        """Count persisted integration reviews so restarts cannot reset retry limits."""
+        try:
+            async with async_bus_client(
+                self.agent_id, base_url=self.bus_url, timeout=10.0
+            ) as client:
+                response = await client.get(f"/tasks/{task_id}/reviews")
+                response.raise_for_status()
+                reviews = response.json()
+            if not isinstance(reviews, list):
+                raise ValueError("review history response is not a list")
+            decisions = [ReviewDecision.model_validate(review) for review in reviews]
+            if expected_review_id and not any(
+                review.review_id == expected_review_id for review in decisions
+            ):
+                raise ValueError("persisted review is missing from review history")
+            return sum(
+                1 for review in decisions if review.reviewer_agent_id == self.agent_id
+            )
+        except Exception as exc:
+            logger.error(f"Failed to read durable retry count for {task_id}: {exc}")
+            return None
+
     async def _record_review(self, decision: ReviewDecision) -> ReviewDecision | None:
         """Persist the review decision and return the authoritative persisted record.
 
@@ -962,11 +1096,31 @@ class BranchIntegrator:
             return None
 
     async def _mark_task_blocked(self, task_id: str, reason: str = "") -> bool:
-        """Mark the task blocked; False if the bus rejected the request."""
+        """Mark the task blocked and verify the durable state before reporting success."""
         try:
-            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10.0) as client:
-                resp = await client.post(f"/tasks/{task_id}/block", json={"reason": reason})
-                resp.raise_for_status()
+            async with async_bus_client(
+                self.agent_id, base_url=self.bus_url, timeout=10.0
+            ) as client:
+                response = await client.post(
+                    f"/tasks/{task_id}/block", json={"reason": reason}
+                )
+                response.raise_for_status()
+                posted = response.json()
+                if (
+                    not isinstance(posted, dict)
+                    or posted.get("task_id") != task_id
+                    or posted.get("status") != "blocked"
+                ):
+                    raise ValueError("block response did not confirm blocked task state")
+                readback = await client.get(f"/tasks/{task_id}")
+                readback.raise_for_status()
+                persisted = readback.json()
+                if (
+                    not isinstance(persisted, dict)
+                    or persisted.get("task_id") != task_id
+                    or persisted.get("status") != "blocked"
+                ):
+                    raise ValueError("task readback did not confirm blocked state")
             return True
         except Exception as exc:
             logger.error(f"Failed to mark task {task_id} blocked: {exc}")
