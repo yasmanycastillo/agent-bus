@@ -1,0 +1,1923 @@
+<!DOCTYPE html>
+<html lang="es" class="scroll-smooth">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>agent-bus · Coordinación Multi-Agente por MCP</title>
+  <meta name="description" content="Coordina agentes de IA (Claude, Codex, AGY, Cursor, Grok, Hermes, Gemini) sobre un mismo proyecto mediante MCP, reservas atómicas en SQLite, revisión cruzada e integración verificada." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #080b10;
+      --bg-elevated: #0f141c;
+      --panel: rgba(18, 25, 35, 0.78);
+      --panel-solid: #121923;
+      --panel-hover: #182230;
+      --border: rgba(148, 163, 184, 0.14);
+      --border-strong: rgba(79, 195, 247, 0.38);
+      --text: #e6edf3;
+      --text-secondary: #9fb0c2;
+      --muted: #6e8094;
+      --accent: #4fc3f7;
+      --accent-glow: rgba(79, 195, 247, 0.18);
+      --accent-deep: #0288d1;
+      --ok: #66bb6a;
+      --ok-bg: rgba(102, 187, 106, 0.12);
+      --warn: #ffb74d;
+      --warn-bg: rgba(255, 183, 77, 0.12);
+      --danger: #ef5350;
+      --danger-bg: rgba(239, 83, 80, 0.12);
+      --purple: #b388ff;
+      --purple-bg: rgba(179, 136, 255, 0.12);
+      --radius: 14px;
+      --radius-sm: 8px;
+      --shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    code, pre, .mono {
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .ambient-bg {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      background:
+        radial-gradient(circle at 18% 12%, rgba(79, 195, 247, 0.11), transparent 38%),
+        radial-gradient(circle at 82% 18%, rgba(179, 136, 255, 0.08), transparent 36%),
+        radial-gradient(circle at 50% 85%, rgba(102, 187, 106, 0.06), transparent 45%);
+    }
+
+    .grid-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      background-image:
+        linear-gradient(to right, rgba(255,255,255,0.022) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255,255,255,0.022) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(ellipse at top, rgba(0,0,0,0.9) 20%, transparent 80%);
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Navbar */
+    .navbar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      background: rgba(8, 11, 16, 0.78);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .navbar-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 68px;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: var(--text);
+      font-weight: 700;
+      font-size: 1.1rem;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, rgba(79, 195, 247, 0.2), rgba(179, 136, 255, 0.2));
+      border: 1px solid var(--border-strong);
+      display: grid;
+      place-items: center;
+      color: var(--accent);
+      box-shadow: 0 0 20px rgba(79, 195, 247, 0.2);
+    }
+
+    .version-pill {
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(79, 195, 247, 0.12);
+      color: var(--accent);
+      border: 1px solid rgba(79, 195, 247, 0.3);
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .nav-links a {
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+
+    .nav-links a:hover {
+      color: var(--text);
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 16px;
+      border-radius: 9px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      border: 1px solid var(--border);
+      background: var(--panel-solid);
+      color: var(--text);
+    }
+
+    .btn:hover {
+      border-color: rgba(255, 255, 255, 0.28);
+      background: var(--panel-hover);
+      transform: translateY(-1px);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #4fc3f7 0%, #29b6f6 100%);
+      color: #061018;
+      border-color: transparent;
+      box-shadow: 0 8px 24px rgba(79, 195, 247, 0.25);
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #81d4fa 0%, #4fc3f7 100%);
+      box-shadow: 0 10px 28px rgba(79, 195, 247, 0.38);
+      color: #040b11;
+    }
+
+    /* Hero Section */
+    .hero {
+      padding: 76px 0 56px;
+      text-align: center;
+      position: relative;
+    }
+
+    .hero-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      background: rgba(18, 25, 35, 0.85);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-size: 0.82rem;
+      font-weight: 500;
+      margin-bottom: 24px;
+    }
+
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--ok);
+      box-shadow: 0 0 10px var(--ok);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.55; transform: scale(1.2); }
+    }
+
+    .hero h1 {
+      font-size: clamp(2.3rem, 4.8vw, 3.9rem);
+      font-weight: 800;
+      letter-spacing: -0.035em;
+      line-height: 1.1;
+      max-width: 920px;
+      margin: 0 auto 20px;
+      background: linear-gradient(180deg, #ffffff 0%, #a5b8cc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero h1 .accent-word {
+      background: linear-gradient(135deg, #4fc3f7 0%, #b388ff 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero-subtitle {
+      font-size: clamp(1.02rem, 1.7vw, 1.2rem);
+      color: var(--text-secondary);
+      max-width: 740px;
+      margin: 0 auto 32px;
+      font-weight: 400;
+    }
+
+    .hero-cta {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-bottom: 42px;
+    }
+
+    .agents-strip {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 32px;
+    }
+
+    .agent-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 14px;
+      border-radius: 999px;
+      background: rgba(18, 25, 35, 0.75);
+      border: 1px solid var(--border);
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.18s ease;
+    }
+
+    .agent-chip:hover, .agent-chip.active {
+      border-color: var(--accent);
+      color: var(--text);
+      background: rgba(79, 195, 247, 0.12);
+      box-shadow: 0 0 20px rgba(79, 195, 247, 0.14);
+    }
+
+    .agent-chip .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+    }
+
+    /* Quick Install Box */
+    .install-card {
+      max-width: 780px;
+      margin: 0 auto;
+      background: var(--panel);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      text-align: left;
+    }
+
+    .install-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 18px;
+      background: rgba(10, 14, 20, 0.7);
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .window-dots {
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .window-dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .install-tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .install-tab {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--muted);
+      font-size: 0.76rem;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .install-tab.active {
+      background: rgba(79, 195, 247, 0.14);
+      color: var(--accent);
+      border-color: rgba(79, 195, 247, 0.3);
+    }
+
+    .install-body {
+      padding: 20px 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .install-cmd {
+      font-size: 0.94rem;
+      color: var(--text);
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+
+    .install-cmd .prompt { color: var(--muted); user-select: none; margin-right: 8px; }
+    .install-cmd .bin { color: var(--accent); font-weight: 600; }
+    .install-cmd .flag { color: var(--purple); }
+    .install-cmd .val { color: var(--ok); font-weight: 600; }
+
+    .copy-btn {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      padding: 7px 12px;
+      border-radius: 7px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all 0.15s;
+    }
+
+    .copy-btn:hover {
+      color: var(--text);
+      border-color: var(--accent);
+      background: rgba(79, 195, 247, 0.12);
+    }
+
+    .install-footer {
+      padding: 10px 22px;
+      background: rgba(10, 14, 20, 0.45);
+      border-top: 1px solid var(--border);
+      font-size: 0.8rem;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    /* Section Headers */
+    section {
+      padding: 72px 0;
+    }
+
+    .section-header {
+      text-align: center;
+      max-width: 720px;
+      margin: 0 auto 44px;
+    }
+
+    .section-tag {
+      display: inline-block;
+      font-size: 0.76rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--accent);
+      margin-bottom: 10px;
+    }
+
+    .section-title {
+      font-size: clamp(1.75rem, 3vw, 2.35rem);
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      margin-bottom: 12px;
+    }
+
+    .section-desc {
+      color: var(--text-secondary);
+      font-size: 1.02rem;
+    }
+
+    /* Interactive Console Showcase */
+    .console-frame {
+      background: #0f1419;
+      border: 1px solid #2d3742;
+      border-radius: 14px;
+      box-shadow: 0 28px 70px rgba(0, 0, 0, 0.65);
+      overflow: hidden;
+    }
+
+    .console-topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 18px;
+      background: #1a2129;
+      border-bottom: 1px solid #2d3742;
+      flex-wrap: wrap;
+    }
+
+    .console-title {
+      font-weight: 700;
+      font-size: 0.95rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .c-badge {
+      padding: 3px 9px;
+      border-radius: 10px;
+      font-size: 0.74rem;
+      font-weight: 600;
+      background: #2d3742;
+      color: #9fb0c2;
+    }
+
+    .c-badge.live { background: #14352a; color: #66bb6a; }
+    .c-badge.warn { background: #3a3020; color: #ffb74d; }
+    .c-badge.info { background: rgba(79, 195, 247, 0.15); color: #4fc3f7; }
+
+    .console-body {
+      padding: 18px;
+    }
+
+    .console-summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .stat-box {
+      background: #1a2129;
+      border: 1px solid #2d3742;
+      border-radius: 8px;
+      padding: 14px 16px;
+    }
+
+    .stat-box strong {
+      display: block;
+      font-size: 1.6rem;
+      color: var(--accent);
+      line-height: 1.2;
+    }
+
+    .stat-box span {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+    }
+
+    .console-grid {
+      display: grid;
+      grid-template-columns: 1.35fr 1fr;
+      gap: 14px;
+    }
+
+    @media (max-width: 960px) {
+      .console-grid { grid-template-columns: 1fr; }
+      .console-summary { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    .c-card {
+      background: #1a2129;
+      border: 1px solid #2d3742;
+      border-radius: 8px;
+      padding: 14px;
+    }
+
+    .c-card h3 {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--accent);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .kanban-mini {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    @media (max-width: 680px) {
+      .kanban-mini { grid-template-columns: 1fr; }
+    }
+
+    .k-col h4 {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .k-task {
+      background: #0f1419;
+      border: 1px solid #2d3742;
+      border-radius: 6px;
+      padding: 9px 10px;
+      margin-bottom: 8px;
+      font-size: 0.8rem;
+      transition: border-color 0.2s;
+    }
+
+    .k-task:hover {
+      border-color: var(--accent);
+    }
+
+    .k-task .t-title {
+      font-weight: 600;
+      margin-bottom: 4px;
+      color: var(--text);
+    }
+
+    .k-task .t-meta {
+      font-size: 0.72rem;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .pane-screen {
+      background: #070a0d;
+      border: 1px solid #2d3742;
+      border-radius: 6px;
+      padding: 12px;
+      font-size: 0.76rem;
+      line-height: 1.45;
+      color: #d7e0e8;
+      height: 225px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+
+    .pane-tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    .pane-tab {
+      background: #0f1419;
+      border: 1px solid #2d3742;
+      color: var(--text-secondary);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .pane-tab.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: rgba(79, 195, 247, 0.1);
+    }
+
+    /* Feature Bento Grid */
+    .bento-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }
+
+    @media (max-width: 960px) {
+      .bento-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 640px) {
+      .bento-grid { grid-template-columns: 1fr; }
+    }
+
+    .bento-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 26px;
+      transition: all 0.22s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .bento-card:hover {
+      border-color: rgba(79, 195, 247, 0.35);
+      transform: translateY(-3px);
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+    }
+
+    .bento-icon {
+      width: 42px;
+      height: 42px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      margin-bottom: 16px;
+      font-size: 1.2rem;
+      background: rgba(79, 195, 247, 0.12);
+      color: var(--accent);
+      border: 1px solid rgba(79, 195, 247, 0.25);
+    }
+
+    .bento-card h3 {
+      font-size: 1.12rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+      letter-spacing: -0.01em;
+    }
+
+    .bento-card p {
+      font-size: 0.92rem;
+      color: var(--text-secondary);
+      margin-bottom: 14px;
+    }
+
+    .bento-code {
+      font-size: 0.76rem;
+      padding: 8px 11px;
+      background: rgba(8, 11, 16, 0.75);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: var(--accent);
+      display: block;
+      overflow-x: auto;
+    }
+
+    /* Interactive Protocol Stepper */
+    .workflow-layout {
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      gap: 24px;
+      align-items: start;
+    }
+
+    @media (max-width: 900px) {
+      .workflow-layout { grid-template-columns: 1fr; }
+    }
+
+    .step-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .step-btn {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      width: 100%;
+      text-align: left;
+      padding: 14px 16px;
+      border-radius: 11px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.18s;
+    }
+
+    .step-btn:hover {
+      border-color: rgba(79, 195, 247, 0.3);
+    }
+
+    .step-btn.active {
+      background: rgba(79, 195, 247, 0.11);
+      border-color: var(--accent);
+      box-shadow: 0 8px 25px rgba(79, 195, 247, 0.12);
+    }
+
+    .step-num {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.06);
+      color: var(--text-secondary);
+      display: grid;
+      place-items: center;
+      font-size: 0.8rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .step-btn.active .step-num {
+      background: var(--accent);
+      color: #061018;
+    }
+
+    .step-info strong {
+      display: block;
+      font-size: 0.92rem;
+    }
+
+    .step-info span {
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    .step-detail-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+      box-shadow: var(--shadow);
+    }
+
+    .step-detail-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+
+    .step-detail-header h3 {
+      font-size: 1.3rem;
+      font-weight: 700;
+    }
+
+    .step-detail-desc {
+      color: var(--text-secondary);
+      font-size: 0.95rem;
+      margin-bottom: 20px;
+    }
+
+    .code-block {
+      background: #070a0e;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px;
+      font-size: 0.83rem;
+      line-height: 1.55;
+      color: #d7e0e8;
+      overflow-x: auto;
+    }
+
+    /* Docs Table / Cards */
+    .docs-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+      gap: 14px;
+    }
+
+    .doc-link-card {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 18px 20px;
+      border-radius: 12px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      text-decoration: none;
+      color: var(--text);
+      transition: all 0.18s ease;
+      cursor: pointer;
+    }
+
+    .doc-link-card:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+      background: var(--panel-hover);
+    }
+
+    .doc-link-card h4 {
+      font-size: 0.98rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .doc-link-card p {
+      font-size: 0.84rem;
+      color: var(--text-secondary);
+      margin-bottom: 12px;
+    }
+
+    .doc-path {
+      font-size: 0.74rem;
+      color: var(--accent);
+    }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 42px 0;
+      margin-top: 40px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    .footer-inner {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .footer-links {
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+
+    .footer-links a {
+      color: var(--text-secondary);
+      text-decoration: none;
+    }
+
+    .footer-links a:hover {
+      color: var(--accent);
+    }
+
+    /* Built-in Doc Reader Modal */
+    .doc-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      background: rgba(4, 7, 11, 0.82);
+      backdrop-filter: blur(8px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .doc-modal-backdrop.open {
+      display: flex;
+    }
+    .doc-modal {
+      width: min(920px, 96vw);
+      max-height: 88vh;
+      background: #0f141c;
+      border: 1px solid var(--border-strong);
+      border-radius: 16px;
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.75);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .doc-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 22px;
+      background: #141c26;
+      border-bottom: 1px solid var(--border);
+      gap: 12px;
+    }
+    .doc-modal-body {
+      padding: 28px 32px;
+      overflow-y: auto;
+      line-height: 1.7;
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+    .doc-modal-body h1, .doc-modal-body h2, .doc-modal-body h3 {
+      margin: 1.4em 0 0.6em;
+      color: #fff;
+      line-height: 1.3;
+    }
+    .doc-modal-body h1:first-child { margin-top: 0; }
+    .doc-modal-body h2 { color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+    .doc-modal-body p, .doc-modal-body ul, .doc-modal-body ol { margin-bottom: 1em; color: var(--text-secondary); }
+    .doc-modal-body ul, .doc-modal-body ol { padding-left: 1.5em; }
+    .doc-modal-body li { margin-bottom: 0.35em; }
+    .doc-modal-body pre {
+      background: #070a0e;
+      border: 1px solid var(--border);
+      padding: 14px 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 1em 0;
+      color: #e6edf3;
+      font-size: 0.84rem;
+    }
+    .doc-modal-body code {
+      background: rgba(79, 195, 247, 0.1);
+      color: var(--accent);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.85em;
+    }
+    .doc-modal-body pre code {
+      background: none;
+      color: inherit;
+      padding: 0;
+    }
+    .doc-modal-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2em 0;
+      font-size: 0.88rem;
+    }
+    .doc-modal-body th, .doc-modal-body td {
+      border: 1px solid var(--border);
+      padding: 9px 12px;
+      text-align: left;
+    }
+    .doc-modal-body th {
+      background: #141c26;
+      color: var(--text);
+    }
+
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="ambient-bg"></div>
+  <div class="grid-overlay"></div>
+
+  <!-- Top Navigation -->
+  <header class="navbar">
+    <div class="container navbar-inner">
+      <a href="#" class="brand">
+        <div class="brand-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="6" r="3"></circle>
+            <circle cx="18" cy="6" r="3"></circle>
+            <circle cx="6" cy="18" r="3"></circle>
+            <circle cx="18" cy="18" r="3"></circle>
+            <line x1="8.5" y1="7.5" x2="15.5" y2="16.5"></line>
+            <line x1="15.5" y1="7.5" x2="8.5" y2="16.5"></line>
+          </svg>
+        </div>
+        <span>agent-bus</span>
+        <span class="version-pill mono">v0.3.1</span>
+      </a>
+
+      <nav class="nav-links">
+        <a href="#consola" data-i18n="nav_console">Consola en Vivo</a>
+        <a href="#arquitectura" data-i18n="nav_features">Capacidades</a>
+        <a href="#flujo-mcp" data-i18n="nav_workflow">Flujo MCP</a>
+        <a href="#docs" data-i18n="nav_docs">Documentación</a>
+      </nav>
+
+      <div class="nav-actions">
+        <button class="btn mono" id="langToggle" type="button" title="Cambiar idioma / Switch language">ES · EN</button>
+        <a class="btn btn-primary" href="https://github.com/yasmanycastillo/agent-bus" target="_blank" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.09 3.29 9.4 7.86 10.92.58.11.79-.25.79-.56v-2.01c-3.2.7-3.88-1.38-3.88-1.38-.52-1.33-1.28-1.68-1.28-1.68-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11.05 11.05 0 0 1 5.78 0c2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.41-2.69 5.38-5.26 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.68.8.56A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg>
+          <span>GitHub</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <main>
+    <section class="hero">
+      <div class="container">
+        <div class="hero-eyebrow">
+          <span class="pulse-dot"></span>
+          <span data-i18n="hero_badge">Nuevo en v0.3.1 · Paneles de agentes en vivo, handoff con SHA verificable y seguridad aislada</span>
+        </div>
+
+        <h1 data-i18n="hero_title">
+          Coordina agentes de distintas herramientas <span class="accent-word">sobre un mismo proyecto</span>
+        </h1>
+
+        <p class="hero-subtitle" data-i18n="hero_subtitle">
+          Comparte mensajes y tareas, adquiere reservas multiarchivo atómicas en SQLite y exige revisión cruzada antes de integrar código. Quien revisa nunca es quien implementa.
+        </p>
+
+        <div class="hero-cta">
+          <a href="#instalacion" class="btn btn-primary" data-i18n="cta_install">Instalar en 1 comando</a>
+          <a href="#flujo-mcp" class="btn" data-i18n="cta_protocol">Explorar protocolo MCP</a>
+          <a href="#docs" class="btn" data-i18n="cta_guides">Ver guías técnicas</a>
+        </div>
+
+        <!-- Supported Clients Strip -->
+        <div class="agents-strip" id="instalacion">
+          <button class="agent-chip active" data-client="codex"><span class="dot" style="background:#4fc3f7"></span>Codex</button>
+          <button class="agent-chip" data-client="agy"><span class="dot" style="background:#b388ff"></span>Antigravity (AGY)</button>
+          <button class="agent-chip" data-client="claude"><span class="dot" style="background:#ffb74d"></span>Claude Code</button>
+          <button class="agent-chip" data-client="cursor"><span class="dot" style="background:#66bb6a"></span>Cursor</button>
+          <button class="agent-chip" data-client="hermes"><span class="dot" style="background:#f48fb1"></span>Hermes</button>
+          <button class="agent-chip" data-client="grok"><span class="dot" style="background:#e6edf3"></span>Grok</button>
+          <button class="agent-chip" data-client="gemini"><span class="dot" style="background:#29b6f6"></span>Gemini CLI</button>
+          <button class="agent-chip" data-client="all"><span class="dot" style="background:#66bb6a"></span>Todos (--client all)</button>
+        </div>
+
+        <!-- Interactive Command Card -->
+        <div class="install-card">
+          <div class="install-header">
+            <div class="window-dots">
+              <span class="window-dot" style="background:#ef5350"></span>
+              <span class="window-dot" style="background:#ffb74d"></span>
+              <span class="window-dot" style="background:#66bb6a"></span>
+              <span class="mono" style="font-size:0.75rem; color:var(--muted); margin-left:8px;">terminal — bash</span>
+            </div>
+            <div class="install-tabs">
+              <button class="install-tab active" data-mode="mcp" data-i18n="tab_mcp">1. Instalar MCP</button>
+              <button class="install-tab" data-mode="onboard" data-i18n="tab_onboard">2. Onboarding Proyecto</button>
+              <button class="install-tab" data-mode="demo" data-i18n="tab_demo">3. Demo sin Modelos</button>
+            </div>
+          </div>
+          <div class="install-body">
+            <div class="install-cmd mono" id="commandDisplay">
+              <span class="prompt">$</span><span class="bin">agent-bus</span> mcp install <span class="flag">--scope</span> global <span class="flag">--client</span> <span class="val">codex</span> <span class="flag">--agent</span> <span class="val">codex</span>
+            </div>
+            <button class="copy-btn mono" id="copyBtn" type="button">Copiar</button>
+          </div>
+          <div class="install-footer">
+            <span id="commandHint" data-i18n="cmd_hint_mcp">Combinación no destructiva (merge): preserva tus otros servidores MCP configurados.</span>
+            <span class="mono">Python 3.12+ · SQLite WAL · Linux</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Interactive Console Preview Section -->
+    <section id="consola">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-tag" data-i18n="console_tag">Supervisión Humana · /console</span>
+          <h2 class="section-title" data-i18n="console_title">Visibilidad total en tiempo real</h2>
+          <p class="section-desc" data-i18n="console_desc">
+            Supervisa el tablero de tareas, inspecciona paneles de agentes en vivo por tmux, audita reservas de archivos con TTL y responde solicitudes de aprobación sin tocar la base de datos.
+          </p>
+        </div>
+
+        <div class="console-frame">
+          <div class="console-topbar">
+            <div class="console-title">
+              <span>agent-bus · Consola</span>
+              <span class="c-badge live">● SSE Conectado</span>
+              <span class="c-badge info mono">cursor #418</span>
+            </div>
+            <div style="flex:1"></div>
+            <span class="c-badge warn">1 decisión humana pendiente</span>
+            <span class="c-badge mono">admin@mi-proyecto</span>
+          </div>
+
+          <div class="console-body">
+            <div class="console-summary">
+              <div class="stat-box">
+                <strong>4</strong>
+                <span data-i18n="stat_agents">Agentes activos (Hermes, Claude, Codex, Grok)</span>
+              </div>
+              <div class="stat-box">
+                <strong style="color:var(--ok)">3</strong>
+                <span data-i18n="stat_locks">Reservas atómicas vigentes (TTL 300s)</span>
+              </div>
+              <div class="stat-box">
+                <strong style="color:var(--warn)">2</strong>
+                <span data-i18n="stat_reviews">Entregas en revisión cruzada (SHA fijado)</span>
+              </div>
+              <div class="stat-box">
+                <strong style="color:var(--purple)">100%</strong>
+                <span data-i18n="stat_gate">Gate de pruebas antes de integrar a main</span>
+              </div>
+            </div>
+
+            <div class="console-grid">
+              <!-- Kanban Column Preview -->
+              <div class="c-card">
+                <h3>
+                  <span data-i18n="kanban_title">Tablero de Coordinación</span>
+                  <span class="mono" style="font-size:0.72rem; color:var(--muted)">ins-b67956c12926</span>
+                </h3>
+                <div class="kanban-mini">
+                  <div class="k-col">
+                    <h4>In Progress (2)</h4>
+                    <div class="k-task">
+                      <div class="t-title">B1 · Validación de esquema</div>
+                      <div class="t-meta">
+                        <span class="mono" style="color:var(--accent)">@claude</span>
+                        <span>🔒 2 archivos</span>
+                      </div>
+                    </div>
+                    <div class="k-task">
+                      <div class="t-title">B2 · Índices SQLite WAL</div>
+                      <div class="t-meta">
+                        <span class="mono" style="color:var(--accent)">@agy</span>
+                        <span>🔒 1 archivo</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="k-col">
+                    <h4>In Review (1)</h4>
+                    <div class="k-task" style="border-color: rgba(255,183,77,0.45)">
+                      <div class="t-title">B3 · Endpoint de Handoff</div>
+                      <div class="t-meta">
+                        <span class="mono" style="color:var(--warn)">rev: @grok</span>
+                        <span class="mono">971e9bc</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="k-col">
+                    <h4>Done / Integrated (2)</h4>
+                    <div class="k-task" style="border-color: rgba(102,187,106,0.4)">
+                      <div class="t-title">A1 · Diseño de Contratos</div>
+                      <div class="t-meta">
+                        <span class="mono" style="color:var(--ok)">✓ approved</span>
+                        <span class="mono">60f214d</span>
+                      </div>
+                    </div>
+                    <div class="k-task" style="border-color: rgba(102,187,106,0.4)">
+                      <div class="t-title">A2 · Suite de Aceptación</div>
+                      <div class="t-meta">
+                        <span class="mono" style="color:var(--ok)">✓ merged</span>
+                        <span class="mono">31a04f2</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Live Agent Panes Preview -->
+              <div class="c-card">
+                <h3>
+                  <span data-i18n="panes_title">Agentes en Vivo (tmux aislado)</span>
+                  <span class="c-badge live">Solo lectura</span>
+                </h3>
+                <div class="pane-tabs">
+                  <button class="pane-tab active" data-pane="claude">@claude (implementer)</button>
+                  <button class="pane-tab" data-pane="codex">@codex (reviewer)</button>
+                  <button class="pane-tab" data-pane="grok">@grok (watcher)</button>
+                </div>
+                <pre class="pane-screen mono" id="paneScreen">[watch --cli tmux --agent claude]
+✓ bootstrap_agent({"project_path": "/srv/mi-proyecto"})
+✓ claim_task({"task_id": "B1-schema-validation"})
+✓ prepare_edit({
+    "paths": ["src/schema.py", "tests/test_schema.py"],
+    "scope": "project",
+    "ttl_seconds": 300
+  }) -> acquisition_id: "acq_9f82d1a0"
+
+$ uv run pytest tests/test_schema.py -q
+......                                                   [100%]
+6 passed in 0.42s
+
+✓ complete_handoff({
+    "task_id": "B1-schema-validation",
+    "candidate_sha": "60f214d8a9c1e402b77f3910c218a9b2d3e4f5a6",
+    "evidence": {"tests": "6 passed in 0.42s"}
+  })</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Architecture & Capabilities Bento -->
+    <section id="arquitectura">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-tag" data-i18n="arch_tag">Ingeniería del Protocolo</span>
+          <h2 class="section-title" data-i18n="arch_title">Diseñado para evitar el caos multi-agente</h2>
+          <p class="section-desc" data-i18n="arch_desc">
+            Sin sobrescrituras silenciosas, sin auto-aprobaciones y sin fugas de credenciales entre sesiones.
+          </p>
+        </div>
+
+        <div class="bento-grid">
+          <div class="bento-card">
+            <div class="bento-icon">🔒</div>
+            <h3 data-i18n="feat1_title">Reservas Multiarchivo Atómicas</h3>
+            <p data-i18n="feat1_desc">
+              <code>prepare_edit</code> adquiere todos los archivos solicitados o ninguno. Si hay conflicto (409), no deja reservas parciales colgadas.
+            </p>
+            <code class="bento-code mono">scope: "project" | "checkout" · TTL 300s</code>
+          </div>
+
+          <div class="bento-card">
+            <div class="bento-icon">⚖️</div>
+            <h3 data-i18n="feat2_title">Separación Estricta de Roles</h3>
+            <p data-i18n="feat2_desc">
+              Quien implementa nunca puede aprobar su propio código. El coordinador asigna revisiones cruzadas atadas al SHA exacto del commit candidato.
+            </p>
+            <code class="bento-code mono">record_verdict(approve | changes_requested)</code>
+          </div>
+
+          <div class="bento-card">
+            <div class="bento-icon">🖥️</div>
+            <h3 data-i18n="feat3_title">Paneles en Vivo (<code class="mono" style="font-size:0.9em; color:var(--accent)">agent-bus panes</code>)</h3>
+            <p data-i18n="feat3_desc">
+              Abre Claude, AGY, Codex o Grok en un servidor tmux privado por proyecto sin heredar claves ajenas ni <code>SSH_AUTH_SOCK</code>.
+            </p>
+            <code class="bento-code mono">agent-bus panes spawn|view|answer</code>
+          </div>
+
+          <div class="bento-card">
+            <div class="bento-icon">📦</div>
+            <h3 data-i18n="feat4_title">Handoff Transaccional con ACK</h3>
+            <p data-i18n="feat4_desc">
+              <code>complete_handoff</code> guarda resumen, evidencia declarada, candidato SHA, publica avisos, confirma mensajes y libera reservas en una sola transacción.
+            </p>
+            <code class="bento-code mono">Idempotencia por operation_key</code>
+          </div>
+
+          <div class="bento-card">
+            <div class="bento-icon">⚡</div>
+            <h3 data-i18n="feat5_title">Listeners y Despertar en Vivo</h3>
+            <p data-i18n="feat5_desc">
+              <code>watch</code> atiende mensajes con <code>reply_needed=true</code> mediante turnos headless o escribiendo directamente en paneles vivos de tmux o muxel.
+            </p>
+            <code class="bento-code mono">agent-bus watch --agent grok --cli tmux</code>
+          </div>
+
+          <div class="bento-card">
+            <div class="bento-icon">🧪</div>
+            <h3 data-i18n="feat6_title">Integrador Git Determinista</h3>
+            <p data-i18n="feat6_desc">
+              Verifica el SHA aprobado, ejecuta <code>uv run pytest -q</code> en el worktree candidato y fusiona a <code>main</code> solo si el gate pasa limpio.
+            </p>
+            <code class="bento-code mono">agent-bus demo --report evidence.json</code>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Interactive MCP Protocol Stepper -->
+    <section id="flujo-mcp">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-tag" data-i18n="flow_tag">Ciclo de Vida MCP</span>
+          <h2 class="section-title" data-i18n="flow_title">Del encargo humano al merge verificado</h2>
+          <p class="section-desc" data-i18n="flow_desc">
+            Haz clic en cada etapa del flujo para inspeccionar las llamadas MCP reales y las garantías del hub SQLite.
+          </p>
+        </div>
+
+        <div class="workflow-layout">
+          <div class="step-list">
+            <button class="step-btn active" data-step="0">
+              <span class="step-num mono">1</span>
+              <div class="step-info">
+                <strong class="mono">bootstrap_agent</strong>
+                <span data-i18n="step0_sub">Entrar al proyecto y registrar presencia</span>
+              </div>
+            </button>
+            <button class="step-btn" data-step="1">
+              <span class="step-num mono">2</span>
+              <div class="step-info">
+                <strong class="mono">my_pending_items</strong>
+                <span data-i18n="step1_sub">Consultar inbox durable, tareas y cursores</span>
+              </div>
+            </button>
+            <button class="step-btn" data-step="2">
+              <span class="step-num mono">3</span>
+              <div class="step-info">
+                <strong class="mono">prepare_edit</strong>
+                <span data-i18n="step2_sub">Reservar archivos juntos o ninguno</span>
+              </div>
+            </button>
+            <button class="step-btn" data-step="3">
+              <span class="step-num mono">4</span>
+              <div class="step-info">
+                <strong class="mono">complete_handoff</strong>
+                <span data-i18n="step3_sub">Entregar SHA candidato, evidencia y liberar locks</span>
+              </div>
+            </button>
+            <button class="step-btn" data-step="4">
+              <span class="step-num mono">5</span>
+              <div class="step-info">
+                <strong class="mono">record_verdict</strong>
+                <span data-i18n="step4_sub">Revisión cruzada por otro agente e integración</span>
+              </div>
+            </button>
+          </div>
+
+          <div class="step-detail-panel">
+            <div class="step-detail-header">
+              <h3 class="mono" id="stepTitle">1. bootstrap_agent</h3>
+              <span class="c-badge info mono" id="stepBadge">Sesión Bearer por proyecto</span>
+            </div>
+            <p class="step-detail-desc" id="stepDesc">
+              Al conectar, el agente pasa el <code>project_path</code> del proyecto que coordina. El hub autentica la identidad, verifica compatibilidad de versión MCP/Hub y devuelve instrucciones operativas, agentes activos y conteo de tareas libres.
+            </p>
+            <pre class="code-block mono" id="stepCode">{
+  "tool": "bootstrap_agent",
+  "arguments": {
+    "project_path": "/home/dev/mi-proyecto",
+    "display_name": "Claude Implementer",
+    "capabilities": ["implementation", "tests"]
+  },
+  "response": {
+    "agent_id": "claude",
+    "status": "online",
+    "available_task_count": 3,
+    "pending_message_count": 1,
+    "protocol": "bootstrap_agent -> my_pending_items -> claim_task -> prepare_edit -> complete_handoff"
+  }
+}</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Complete Documentation Directory -->
+    <section id="docs">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-tag" data-i18n="docs_tag">Documentación Oficial</span>
+          <h2 class="section-title" data-i18n="docs_title">Guías de operación y referencia</h2>
+          <p class="section-desc" data-i18n="docs_desc">
+            Haz clic en cualquier guía para abrir el visor integrado o consúltala en el repositorio.
+          </p>
+        </div>
+
+        <div class="docs-grid">
+          <a class="doc-link-card" href="first-run.md" data-doc="first-run.md">
+            <div>
+              <h4><span>Primer Uso y Operación</span> <span>→</span></h4>
+              <p>Instalación con uv, onboarding por proyecto, credenciales, listeners y despertar en muxel/tmux.</p>
+            </div>
+            <span class="doc-path mono">docs/first-run.md</span>
+          </a>
+
+          <a class="doc-link-card" href="coordination-workflow.md" data-doc="coordination-workflow.md">
+            <div>
+              <h4><span>Coordinación MCP</span> <span>→</span></h4>
+              <p>Flujo compacto: pendientes, reservas multiarchivo con prepare_edit y entrega transaccional.</p>
+            </div>
+            <span class="doc-path mono">docs/coordination-workflow.md</span>
+          </a>
+
+          <a class="doc-link-card" href="workflows.md" data-doc="workflows.md">
+            <div>
+              <h4><span>Workflow Feature-Development</span> <span>→</span></h4>
+              <p>Compilar pasos, avanzar por capacidades, registrar veredictos sobre SHA e integrar con pytest.</p>
+            </div>
+            <span class="doc-path mono">docs/workflows.md</span>
+          </a>
+
+          <a class="doc-link-card" href="mcp-setup.md" data-doc="mcp-setup.md">
+            <div>
+              <h4><span>Configuración MCP</span> <span>→</span></h4>
+              <p>Conectar clientes stdio (Codex, AGY, Claude, Cursor, Grok, Hermes) y diagnóstico de errores.</p>
+            </div>
+            <span class="doc-path mono">docs/mcp-setup.md</span>
+          </a>
+
+          <a class="doc-link-card" href="console.md" data-doc="console.md">
+            <div>
+              <h4><span>Consola de Supervisión</span> <span>→</span></h4>
+              <p>Recorrido por /console, decisiones humanas, filtros de actividad, reservas y paneles en vivo.</p>
+            </div>
+            <span class="doc-path mono">docs/console.md</span>
+          </a>
+
+          <a class="doc-link-card" href="demo.md" data-doc="demo.md">
+            <div>
+              <h4><span>Demo Reproducible</span> <span>→</span></h4>
+              <p>Simulación real con dos clientes MCP, conflicto 409, revisión fallida y aprobación humana sin gastar tokens.</p>
+            </div>
+            <span class="doc-path mono">docs/demo.md</span>
+          </a>
+
+          <a class="doc-link-card" href="locks.md" data-doc="locks.md">
+            <div>
+              <h4><span>Reservas de Archivos</span> <span>→</span></h4>
+              <p>Alcance project vs checkout, tokens de adquisición, renovación antes de vencer y liberación segura.</p>
+            </div>
+            <span class="doc-path mono">docs/locks.md</span>
+          </a>
+
+          <a class="doc-link-card" href="messaging.md" data-doc="messaging.md">
+            <div>
+              <h4><span>Mensajería Durable</span> <span>→</span></h4>
+              <p>Envío directo, respuestas obligatorias, confirmación explícita (ACK) e idempotencia.</p>
+            </div>
+            <span class="doc-path mono">docs/messaging.md</span>
+          </a>
+
+          <a class="doc-link-card" href="authentication.md" data-doc="authentication.md">
+            <div>
+              <h4><span>Autenticación y Permisos</span> <span>→</span></h4>
+              <p>Provisionar, renovar y revocar sesiones Bearer por agente y aislamiento criptográfico.</p>
+            </div>
+            <span class="doc-path mono">docs/authentication.md</span>
+          </a>
+
+          <a class="doc-link-card" href="events.md" data-doc="events.md">
+            <div>
+              <h4><span>Eventos SSE y Cursores</span> <span>→</span></h4>
+              <p>Stream en tiempo real, recuperación tras desconexión y espera eficiente con wait_for_updates.</p>
+            </div>
+            <span class="doc-path mono">docs/events.md</span>
+          </a>
+
+          <a class="doc-link-card" href="projects.md" data-doc="projects.md">
+            <div>
+              <h4><span>Proyectos y Worktrees</span> <span>→</span></h4>
+              <p>Aislamiento por proyecto, directorios de runtime y trabajo simultáneo en múltiples ramas Git.</p>
+            </div>
+            <span class="doc-path mono">docs/projects.md</span>
+          </a>
+
+          <a class="doc-link-card" href="development.md" data-doc="development.md">
+            <div>
+              <h4><span>Desarrollo y Pruebas</span> <span>→</span></h4>
+              <p>Estructura del código, suite pytest, pruebas de navegador con Playwright y gate de tipos mypy.</p>
+            </div>
+            <span class="doc-path mono">docs/development.md</span>
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Built-in Markdown Reader Modal -->
+  <div class="doc-modal-backdrop" id="docModalBackdrop">
+    <div class="doc-modal">
+      <div class="doc-modal-header">
+        <span class="mono" style="color:var(--accent); font-weight:600;" id="docModalTitle">docs/first-run.md</span>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <a class="btn" id="docGithubLink" href="https://github.com/yasmanycastillo/agent-bus/blob/main/docs/first-run.md" target="_blank" rel="noopener" style="padding:5px 12px; font-size:0.78rem;">Ver en GitHub ↗</a>
+          <button class="btn mono" id="docModalClose" type="button" style="padding:5px 12px; font-size:0.78rem;">✕ Cerrar</button>
+        </div>
+      </div>
+      <div class="doc-modal-body" id="docModalBody"></div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="container footer-inner">
+      <div>
+        <strong style="color:var(--text)">agent-bus</strong> · v0.3.1 · Licencia MIT · Creado por Yasmany Castillo
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/yasmanycastillo/agent-bus">Repositorio GitHub</a>
+        <a href="README.md" data-doc="README.md">Índice de Docs</a>
+        <a href="https://github.com/yasmanycastillo/agent-bus/blob/main/CHANGELOG.md">Changelog v0.3.1</a>
+        <a href="https://github.com/yasmanycastillo/agent-bus/issues">Issues</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    let selectedClient = 'codex';
+    let selectedMode = 'mcp';
+    let currentLang = 'es';
+
+    const commandDisplay = document.getElementById('commandDisplay');
+    const commandHint = document.getElementById('commandHint');
+    const copyBtn = document.getElementById('copyBtn');
+
+    function renderCommand() {
+      if (selectedMode === 'mcp') {
+        if (selectedClient === 'all') {
+          commandDisplay.innerHTML = `<span class="prompt">$</span><span class="bin">agent-bus</span> mcp install <span class="flag">--client</span> <span class="val">all</span>`;
+        } else {
+          commandDisplay.innerHTML = `<span class="prompt">$</span><span class="bin">agent-bus</span> mcp install <span class="flag">--scope</span> global <span class="flag">--client</span> <span class="val">${selectedClient}</span> <span class="flag">--agent</span> <span class="val">${selectedClient}</span>`;
+        }
+        commandHint.textContent = currentLang === 'es'
+          ? 'Combinación no destructiva (merge): preserva tus otros servidores MCP configurados.'
+          : 'Non-destructive merge: preserves all your pre-existing MCP servers.';
+      } else if (selectedMode === 'onboard') {
+        commandDisplay.innerHTML = `<span class="prompt">$</span><span class="bin">uv</span> tool install agent-bus-coord && <span class="bin">agent-bus</span> <span class="flag">--project</span> /ruta/mi-proyecto onboard <span class="flag">--mcp-only</span>`;
+        commandHint.textContent = currentLang === 'es'
+          ? 'Prepara el hub SQLite local y las credenciales aisladas en el proyecto destino.'
+          : 'Provisions the local SQLite hub and isolated credentials in the target project.';
+      } else {
+        commandDisplay.innerHTML = `<span class="prompt">$</span><span class="bin">agent-bus</span> demo <span class="flag">--report</span> demo-evidence.json`;
+        commandHint.textContent = currentLang === 'es'
+          ? 'Ejecuta dos clientes MCP reales (Backend y QA) sin consumir modelos comerciales.'
+          : 'Runs two real MCP clients (Backend & QA) without consuming commercial AI tokens.';
+      }
+    }
+
+    document.querySelectorAll('.agent-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        document.querySelectorAll('.agent-chip').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        selectedClient = chip.dataset.client;
+        selectedMode = 'mcp';
+        document.querySelectorAll('.install-tab').forEach(t => t.classList.toggle('active', t.dataset.mode === 'mcp'));
+        renderCommand();
+      });
+    });
+
+    document.querySelectorAll('.install-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.install-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        selectedMode = tab.dataset.mode;
+        renderCommand();
+      });
+    });
+
+    copyBtn.addEventListener('click', () => {
+      const raw = commandDisplay.innerText.replace(/^\$\s*/, '').trim();
+      navigator.clipboard.writeText(raw);
+      const prev = copyBtn.textContent;
+      copyBtn.textContent = currentLang === 'es' ? '¡Copiado!' : 'Copied!';
+      setTimeout(() => { copyBtn.textContent = prev; }, 1600);
+    });
+
+    const paneLogs = {
+      claude: `[watch --cli tmux --agent claude]
+✓ bootstrap_agent({"project_path": "/srv/mi-proyecto"})
+✓ claim_task({"task_id": "B1-schema-validation"})
+✓ prepare_edit({
+    "paths": ["src/schema.py", "tests/test_schema.py"],
+    "scope": "project",
+    "ttl_seconds": 300
+  }) -> acquisition_id: "acq_9f82d1a0"
+
+$ uv run pytest tests/test_schema.py -q
+......                                                   [100%]
+6 passed in 0.42s
+
+✓ complete_handoff({
+    "task_id": "B1-schema-validation",
+    "candidate_sha": "60f214d8a9c1e402b77f3910c218a9b2d3e4f5a6",
+    "evidence": {"tests": "6 passed in 0.42s"}
+  })`,
+      codex: `[watch --cli tmux --agent codex]
+✓ my_pending_items({"instruction_id": "ins-b67956c12926"})
+  -> review task ready: "review-phase-B"
+  -> candidate_sha from @claude: 60f214d8a9c1e402b77f3910c218a9b2d3e4f5a6
+
+$ git diff main...60f214d8 -- src/schema.py tests/test_schema.py
+$ uv run pytest tests/test_schema.py -q
+6 passed in 0.39s
+
+✓ record_verdict({
+    "task_id": "review-phase-B",
+    "implementation_task_id": "B1-schema-validation",
+    "verdict": "approve",
+    "sha": "60f214d8a9c1e402b77f3910c218a9b2d3e4f5a6",
+    "reason": "Cobertura completa de bordes y validación estricta."
+  })`,
+      grok: `[watch --cli tmux --agent grok]
+✓ wait_for_updates({"cursor": "417", "timeout": 50})
+  -> 1 new message (reply_needed=true) from @hermes:
+     "¿Validamos el contrato de errores 409 en prepare_edit?"
+
+✓ Executing turn & replying over MCP:
+  reply_message({
+    "message_id": "msg_8821a",
+    "body": "Confirmado: prepare_edit devuelve 409 sin dejar reservas parciales.",
+    "ack": true
+  })`
+    };
+
+    document.querySelectorAll('.pane-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.pane-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('paneScreen').textContent = paneLogs[tab.dataset.pane];
+      });
+    });
+
+    const stepsData = [
+      {
+        title: '1. bootstrap_agent',
+        badge: 'Sesión Bearer por proyecto',
+        desc: 'Al conectar, el agente pasa el project_path del proyecto que coordina. El hub autentica la identidad, verifica compatibilidad de versión MCP/Hub y devuelve instrucciones operativas, agentes activos y conteo de tareas libres.',
+        code: `{
+  "tool": "bootstrap_agent",
+  "arguments": {
+    "project_path": "/home/dev/mi-proyecto",
+    "display_name": "Claude Implementer",
+    "capabilities": ["implementation", "tests"]
+  },
+  "response": {
+    "agent_id": "claude",
+    "status": "online",
+    "available_task_count": 3,
+    "pending_message_count": 1,
+    "protocol": "bootstrap_agent -> my_pending_items -> claim_task -> prepare_edit -> complete_handoff"
+  }
+}`
+      },
+      {
+        title: '2. my_pending_items',
+        badge: 'Lectura sin ACK implícito',
+        desc: 'Devuelve mensajes pendientes en el inbox durable, el checkpoint event_cursor para wait_for_updates, las tareas asignadas y las reservas activas de la sesión. Leer nunca confirma un mensaje por accidente.',
+        code: `{
+  "tool": "my_pending_items",
+  "arguments": {
+    "instruction_id": "ins-b67956c12926"
+  },
+  "response": {
+    "event_cursor": "418",
+    "pending_message_count": 1,
+    "reply_needed_count": 1,
+    "tasks": [
+      { "task_id": "B1-schema-validation", "status": "in_progress", "owner": "claude" }
+    ],
+    "locks": []
+  }
+}`
+      },
+      {
+        title: '3. prepare_edit',
+        badge: 'Todo o nada (Transaccional)',
+        desc: 'Adquiere todas las rutas solicitadas en una sola transacción SQLite o rechaza con 409 si alguna está ocupada. Nunca deja reservas parciales. Devuelve un acquisition_id único por archivo con TTL renovable.',
+        code: `{
+  "tool": "prepare_edit",
+  "arguments": {
+    "paths": ["src/service.py", "tests/test_service.py"],
+    "scope": "project",
+    "reason": "Implementar validación de stock",
+    "ttl_seconds": 300,
+    "operation_key": "stock-edit-1"
+  },
+  "response": {
+    "status": "acquired",
+    "locks": [
+      { "file_path": "src/service.py", "acquisition_id": "acq_01H...", "expires_at": "2026-10-13T22:45:00Z" },
+      { "file_path": "tests/test_service.py", "acquisition_id": "acq_01J...", "expires_at": "2026-10-13T22:45:00Z" }
+    ]
+  }
+}`
+      },
+      {
+        title: '4. complete_handoff',
+        badge: 'Evidencia + SHA + ACK + Unlock',
+        desc: 'En una sola transacción atómica: registra el resumen y la evidencia de pruebas, guarda el candidate_sha del commit para el revisor, envía el mensaje de entrega, confirma mensajes procesados y libera las reservas.',
+        code: `{
+  "tool": "complete_handoff",
+  "arguments": {
+    "task_id": "B1-schema-validation",
+    "target_status": "in_review",
+    "candidate_sha": "60f214d8a9c1e402b77f3910c218a9b2d3e4f5a6",
+    "summary": "Esquema validado con pruebas de bordes vacíos y nulos",
+    "evidence": { "pytest": "14 passed in 0.51s" },
+    "release_locks": [
+      { "file_path": "src/service.py", "acquisition_id": "acq_01H..." }
+    ],
+    "operation_key": "handoff-b1-v1"
+  }
+}`
+      },
+      {
+        title: '5. record_verdict & integración',
+        badge: 'Revisión cruzada obligatoria',
+        desc: 'Un agente distinto al implementador inspecciona el commit exacto (candidate_sha). Si emite approve, el integrador ejecuta la suite de pruebas sobre ese SHA y fusiona a la rama objetivo; si pide changes_requested, reabre la tarea del implementador.',
+        code: `{
+  "tool": "record_verdict",
+  "arguments": {
+    "task_id": "review-phase-B",
+    "implementation_task_id": "B1-schema-validation",
+    "verdict": "approve",
+    "sha": "60f214d8a9c1e402b77f3910c218a9b2d3e4f5a6",
+    "reason": "Pruebas verificadas y contrato cumplido sin efectos colaterales."
+  },
+  "response": {
+    "review_status": "done",
+    "ready_for_integration": true
+  }
+}`
+      }
+    ];
+
+    document.querySelectorAll('.step-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.step-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const step = stepsData[Number(btn.dataset.step)];
+        document.getElementById('stepTitle').textContent = step.title;
+        document.getElementById('stepBadge').textContent = step.badge;
+        document.getElementById('stepDesc').textContent = step.desc;
+        document.getElementById('stepCode').textContent = step.code;
+      });
+    });
+
+    // Lightweight Markdown renderer for built-in doc reader
+    function renderMarkdown(md) {
+      const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const codeBlocks = [];
+      md = md.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+        codeBlocks.push(`<pre class="mono"><code>${esc(code.trimEnd())}</code></pre>`);
+        return `\x00CODE${codeBlocks.length - 1}\x00`;
+      });
+
+      const lines = md.split('\n');
+      let html = '';
+      let inList = false;
+      let inTable = false;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.includes('\x00CODE')) {
+          if (inList) { html += '</ul>'; inList = false; }
+          if (inTable) { html += '</tbody></table>'; inTable = false; }
+          const idx = Number(line.match(/\x00CODE(\d+)\x00/)[1]);
+          html += codeBlocks[idx];
+          continue;
+        }
+        if (line.startsWith('|') && line.endsWith('|')) {
+          if (inList) { html += '</ul>'; inList = false; }
+          const cells = line.split('|').slice(1, -1).map(c => c.trim());
+          if (cells.every(c => /^[-:]+$/.test(c))) continue;
+          if (!inTable) {
+            inTable = true;
+            html += '<table><thead><tr>' + cells.map(c => `<th>${inlineFmt(c)}</th>`).join('') + '</tr></thead><tbody>';
+          } else {
+            html += '<tr>' + cells.map(c => `<td>${inlineFmt(c)}</td>`).join('') + '</tr>';
+          }
+          continue;
+        } else if (inTable) {
+          html += '</tbody></table>';
+          inTable = false;
+        }
+
+        if (/^###\s+/.test(line)) {
+          if (inList) { html += '</ul>'; inList = false; }
+          html += `<h3>${inlineFmt(line.replace(/^###\s+/, ''))}</h3>`;
+        } else if (/^##\s+/.test(line)) {
+          if (inList) { html += '</ul>'; inList = false; }
+          html += `<h2>${inlineFmt(line.replace(/^##\s+/, ''))}</h2>`;
+        } else if (/^#\s+/.test(line)) {
+          if (inList) { html += '</ul>'; inList = false; }
+          html += `<h1>${inlineFmt(line.replace(/^#\s+/, ''))}</h1>`;
+        } else if (/^[-*]\s+/.test(line)) {
+          if (!inList) { html += '<ul>'; inList = true; }
+          html += `<li>${inlineFmt(line.replace(/^[-*]\s+/, ''))}</li>`;
+        } else if (line.trim() === '') {
+          if (inList) { html += '</ul>'; inList = false; }
+        } else {
+          html += `<p>${inlineFmt(line)}</p>`;
+        }
+      }
+      if (inList) html += '</ul>';
+      if (inTable) html += '</tbody></table>';
+      return html;
+    }
+
+    function inlineFmt(str) {
+      return str
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" data-doc="$2" style="color:var(--accent)">$1</a>');
+    }
+
+    const modalBackdrop = document.getElementById('docModalBackdrop');
+    const modalTitle = document.getElementById('docModalTitle');
+    const modalBody = document.getElementById('docModalBody');
+    const modalGithub = document.getElementById('docGithubLink');
+
+    async function openDocModal(docFile) {
+      const cleanFile = docFile.split('#')[0];
+      modalTitle.textContent = `docs/${cleanFile}`;
+      modalGithub.href = `https://github.com/yasmanycastillo/agent-bus/blob/main/docs/${cleanFile}`;
+      modalBody.innerHTML = `<p class="mono" style="color:var(--muted)">Cargando ${cleanFile}...</p>`;
+      modalBackdrop.classList.add('open');
+      try {
+        const res = await fetch(cleanFile);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const text = await res.text();
+        modalBody.innerHTML = renderMarkdown(text);
+        modalBody.querySelectorAll('a[data-doc]').forEach(a => {
+          const target = a.getAttribute('data-doc');
+          if (target && target.endsWith('.md') && !target.startsWith('http')) {
+            a.addEventListener('click', e => {
+              e.preventDefault();
+              openDocModal(target);
+            });
+          }
+        });
+      } catch (err) {
+        modalBody.innerHTML = `<p>No se pudo cargar localmente (${err.message}). <a href="${modalGithub.href}" target="_blank" style="color:var(--accent)">Abrir en GitHub ↗</a></p>`;
+      }
+    }
+
+    document.querySelectorAll('[data-doc]').forEach(el => {
+      el.addEventListener('click', e => {
+        e.preventDefault();
+        openDocModal(el.getAttribute('data-doc'));
+      });
+    });
+
+    document.getElementById('docModalClose').addEventListener('click', () => {
+      modalBackdrop.classList.remove('open');
+    });
+    modalBackdrop.addEventListener('click', e => {
+      if (e.target === modalBackdrop) modalBackdrop.classList.remove('open');
+    });
+
+    // Bilingual ES / EN Switcher
+    const i18n = {
+      es: {
+        nav_console: 'Consola en Vivo',
+        nav_features: 'Capacidades',
+        nav_workflow: 'Flujo MCP',
+        nav_docs: 'Documentación',
+        hero_badge: 'Nuevo en v0.3.1 · Paneles de agentes en vivo, handoff con SHA verificable y seguridad aislada',
+        hero_title: 'Coordina agentes de distintas herramientas <span class="accent-word">sobre un mismo proyecto</span>',
+        hero_subtitle: 'Comparte mensajes y tareas, adquiere reservas multiarchivo atómicas en SQLite y exige revisión cruzada antes de integrar código. Quien revisa nunca es quien implementa.',
+        cta_install: 'Instalar en 1 comando',
+        cta_protocol: 'Explorar protocolo MCP',
+        cta_guides: 'Ver guías técnicas',
+        tab_mcp: '1. Instalar MCP',
+        tab_onboard: '2. Onboarding Proyecto',
+        tab_demo: '3. Demo sin Modelos',
+        console_tag: 'Supervisión Humana · /console',
+        console_title: 'Visibilidad total en tiempo real',
+        console_desc: 'Supervisa el tablero de tareas, inspecciona paneles de agentes en vivo por tmux, audita reservas de archivos con TTL y responde solicitudes de aprobación sin tocar la base de datos.',
+        arch_tag: 'Ingeniería del Protocolo',
+        arch_title: 'Diseñado para evitar el caos multi-agente',
+        arch_desc: 'Sin sobrescrituras silenciosas, sin auto-aprobaciones y sin fugas de credenciales entre sesiones.',
+        flow_tag: 'Ciclo de Vida MCP',
+        flow_title: 'Del encargo humano al merge verificado',
+        flow_desc: 'Haz clic en cada etapa del flujo para inspeccionar las llamadas MCP reales y las garantías del hub SQLite.',
+        docs_tag: 'Documentación Oficial',
+        docs_title: 'Guías de operación y referencia',
+        docs_desc: 'Haz clic en cualquier guía para abrir el visor integrado o consúltala en el repositorio.'
+      },
+      en: {
+        nav_console: 'Live Console',
+        nav_features: 'Capabilities',
+        nav_workflow: 'MCP Workflow',
+        nav_docs: 'Documentation',
+        hero_badge: 'New in v0.3.1 · Live agent panes, verifiable SHA handoffs, and isolated security',
+        hero_title: 'Coordinate AI agents across tools <span class="accent-word">on the same codebase</span>',
+        hero_subtitle: 'Share durable messages and tasks, acquire atomic multi-file locks in SQLite, and enforce cross-agent code review before merging. The reviewer is never the implementer.',
+        cta_install: '1-Command Install',
+        cta_protocol: 'Explore MCP Protocol',
+        cta_guides: 'Read Technical Guides',
+        tab_mcp: '1. Install MCP',
+        tab_onboard: '2. Project Onboarding',
+        tab_demo: '3. Zero-Token Demo',
+        console_tag: 'Human Supervision · /console',
+        console_title: 'Real-time operational visibility',
+        console_desc: 'Monitor the task board, inspect live read-only tmux agent panes, audit file locks with TTLs, and answer human approval requests.',
+        arch_tag: 'Protocol Engineering',
+        arch_title: 'Built to prevent multi-agent chaos',
+        arch_desc: 'No silent file overwrites, no self-approvals, and no credential leaks across agent sessions.',
+        flow_tag: 'MCP Lifecycle',
+        flow_title: 'From human instruction to verified merge',
+        flow_desc: 'Click each stage of the workflow to inspect real MCP payloads and SQLite hub guarantees.',
+        docs_tag: 'Official Documentation',
+        docs_title: 'Operations & reference guides',
+        docs_desc: 'Click any guide to open the built-in reader or browse in the repository.'
+      }
+    };
+
+    document.getElementById('langToggle').addEventListener('click', () => {
+      currentLang = currentLang === 'es' ? 'en' : 'es';
+      const dict = i18n[currentLang];
+      document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.getAttribute('data-i18n');
+        if (dict[key]) {
+          el.innerHTML = dict[key];
+        }
+      });
+      copyBtn.textContent = currentLang === 'es' ? 'Copiar' : 'Copy';
+      renderCommand();
+    });
+  </script>
+</body>
+</html>
