@@ -21,6 +21,12 @@ def git(path, *args):
     return result.stdout.strip()
 
 
+
+async def post_review(bus, client, review):
+    """Reviews need a principal: each reviewer posts with its own session."""
+    session = await bus.sessions.create(review["reviewer_agent_id"])
+    return await client.post("/reviews", json=review, headers={"Authorization": f"Bearer {session['token']}"})
+
 @pytest.mark.asyncio
 async def test_workflow_advances_until_integration(tmp_path):
     repo = tmp_path / "repo"
@@ -155,7 +161,7 @@ async def test_integration_uses_the_implementation_sha(tmp_path):
             ("analyst-01", "changes_requested", candidate, "independent review is not approved"),
             ("analyst-01", "approve", baseline, "independent review is not approved"),
         ):
-            posted = await client.post("/reviews", json={
+            posted = await post_review(bus, client, {
                 "task_id": review_task, "sha": sha, "verdict": verdict,
                 "reason": "independent review", "reviewer_agent_id": reviewer_id,
             })
@@ -168,7 +174,7 @@ async def test_integration_uses_the_implementation_sha(tmp_path):
             assert refused.json()["error"] == expected
             assert (await client.get("/tasks/feature-development-run-2-integration")).json()["status"] == "pending"
             assert git(repo, "rev-parse", "HEAD") == baseline
-        approved = await client.post("/reviews", json={
+        approved = await post_review(bus, client, {
             "task_id": review_task, "sha": candidate, "verdict": "approve",
             "reason": "independent review", "reviewer_agent_id": "analyst-01",
         })
@@ -320,7 +326,7 @@ async def test_failing_suite_blocks_integration(tmp_path):
         assert waiting.json()["error"] == "independent review is missing"
         assert (await client.get("/tasks/feature-development-run-4-integration")).json()["status"] == "pending"
         assert git(repo, "rev-parse", "HEAD") == sha
-        approved = await client.post("/reviews", json={
+        approved = await post_review(bus, client, {
             "task_id": "feature-development-run-4-review", "sha": sha, "verdict": "approve",
             "reason": "independent review", "reviewer_agent_id": "reviewer-01",
         })

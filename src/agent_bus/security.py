@@ -21,16 +21,7 @@ import httpx
 
 from agent_bus.config import get_bus_url, get_config_dir, load_config
 from agent_bus.reputation.database import Database
-
-
-class AuthenticationError(ValueError):
-    """Missing, invalid or unusable session credentials (never includes secrets)."""
-
-
-def validate_id(value: str) -> str:
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
-        raise AuthenticationError("Invalid identity: use 1-128 letters, digits, dots, underscores or hyphens")
-    return value
+from agent_bus.validation import AuthenticationError, validate_id
 
 
 @dataclass(frozen=True)

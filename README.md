@@ -132,6 +132,9 @@ administrativa. [Guía de la consola](docs/console.md).
 - [Workflow feature-development](docs/workflows.md)
 - [Conexión MCP](docs/mcp-setup.md)
 - [Desarrollo y pruebas](docs/development.md)
+- [Cómo contribuir](CONTRIBUTING.md)
+- [Política de seguridad](SECURITY.md)
+- [Proceso de releases](docs/releasing.md)
 - [Cambios del producto](CHANGELOG.md)
 
 Licencia [MIT](LICENSE).

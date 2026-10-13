@@ -104,49 +104,43 @@ class ReviewLog:
         )
 
         def transaction(conn):
-            conn.execute("SAVEPOINT review_add")
-            try:
-                conn.execute(
-                    """INSERT INTO reviews
-                    (review_id, task_id, reviewer_agent_id, reviewer_session_id,
-                     sha, verdict, reason, evidence, test_results, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        review.review_id,
-                        review.task_id,
-                        review.reviewer_agent_id,
-                        review.reviewer_session_id,
-                        review.sha,
-                        verdict_str,
-                        review.reason,
-                        evidence_json,
-                        test_results_json,
-                        created_at_iso,
-                    ),
-                )
-                conn.execute(
-                    """INSERT INTO audit_log
-                    (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        "gatekeeper_review",
-                        review.task_id,
-                        review.reviewer_agent_id,
-                        review.reviewer_session_id,
-                        None,
-                        None,
-                        created_at_iso,
-                    ),
-                )
-                if after is not None:
-                    after(conn)
-                conn.execute("RELEASE review_add")
-            except BaseException:
-                conn.execute("ROLLBACK TO review_add")
-                raise
+            conn.execute(
+                """INSERT INTO reviews
+                (review_id, task_id, reviewer_agent_id, reviewer_session_id,
+                 sha, verdict, reason, evidence, test_results, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    review.review_id,
+                    review.task_id,
+                    review.reviewer_agent_id,
+                    review.reviewer_session_id,
+                    review.sha,
+                    verdict_str,
+                    review.reason,
+                    evidence_json,
+                    test_results_json,
+                    created_at_iso,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO audit_log
+                (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "gatekeeper_review",
+                    review.task_id,
+                    review.reviewer_agent_id,
+                    review.reviewer_session_id,
+                    None,
+                    None,
+                    created_at_iso,
+                ),
+            )
+            # Same dedicated transaction: a failing hook rolls the review back too.
+            if after is not None:
+                after(conn)
 
-        await self._db.conn._execute(transaction, self._db.conn._conn)
-        await self._db.conn.commit()
+        await self._db.transaction(transaction)
         return review
 
     async def get(self, review_id: str) -> ReviewDecision | None:

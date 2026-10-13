@@ -43,10 +43,12 @@ async def test_strict_policy_blocks_when_the_author_claims_completion(tmp_path, 
     db = Database(str(tmp_path / "bus.db"))
     await db.initialize()
     bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+    admin = await bus.sessions.create("integrator", role="admin")
 
     @asynccontextmanager
     async def bus_client(*args, **kwargs):
-        async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=ASGITransport(app=bus.app), base_url="http://test",
+                                     headers={"Authorization": f"Bearer {admin['token']}"}) as client:
             yield client
 
     monkeypatch.setattr(integrator_module, "async_bus_client", bus_client)
@@ -59,7 +61,8 @@ async def test_strict_policy_blocks_when_the_author_claims_completion(tmp_path, 
     integrator.run_tests = AsyncMock(return_value=(True, "tests passed"))
     integrator._mark_task_completed = AsyncMock()
     blocked = await integrator.integrate_task("T-ev", "alice", work, "agent/alice")
-    assert blocked.status == "blocked"
+    # The author already closed the task, so it cannot be marked blocked: an error, never a merge.
+    assert blocked.status == "error"
     assert "required evidence is missing" in blocked.error
     assert git(repo, "rev-parse", "HEAD") == baseline
     integrator._mark_task_completed.assert_not_awaited()
@@ -113,10 +116,10 @@ async def test_unreachable_evidence_policy_does_not_merge(tmp_path):
     integrator = BranchIntegrator(repo_dir=repo, bus_url="http://127.0.0.1:9", require_approval=True)
     integrator.run_tests = AsyncMock(return_value=(True, "tests passed"))
     blocked = await integrator.integrate_task("T-down", "alice", work, "agent/alice")
+    # The hub is down, so the review cannot be persisted: fail closed before the policy check.
     assert blocked.success is False
     assert blocked.merged is False
-    assert blocked.status == "blocked"
-    assert "evidence policy unavailable" in blocked.error
+    assert blocked.status == "error"
     assert git(repo, "rev-parse", "HEAD") == baseline
 
 
@@ -129,6 +132,9 @@ async def test_evidence_policy_http_error_does_not_merge(tmp_path):
         def handler(request):
             if request.url.path.endswith("/evidence-policy"):
                 return httpx.Response(503)
+            if request.url.path == "/reviews":
+                import json
+                return httpx.Response(200, json={**json.loads(request.content), "review_id": "rev-1"})
             return httpx.Response(200, json={})
 
         @asynccontextmanager
@@ -156,12 +162,14 @@ async def test_pending_integration_is_done_after_merge_and_not_merged_twice(tmp_
     db = Database(str(tmp_path / "bus.db"))
     await db.initialize()
     bus = MessageBus(db, AgentRegistry(), InboxManager(db), project_id="alpha")
+    admin = await bus.sessions.create("integrator", role="admin")
 
     def factory(timeout):
         @asynccontextmanager
         async def opener():
             async with httpx.AsyncClient(
                 transport=ASGITransport(app=bus.app), base_url="http://bus.local", timeout=timeout,
+                headers={"Authorization": f"Bearer {admin['token']}"},
             ) as client:
                 yield client
         return opener()

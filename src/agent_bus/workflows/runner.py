@@ -161,11 +161,18 @@ async def _integrate(
         return {"status": "blocked", "task_id": task_id, "error": gap}
     from agent_bus.worker.integrator import BranchIntegrator
 
+    # The integrator persists its review before merging (fail closed), so it needs a
+    # principal; this runner already holds the hub in process, so an admin session
+    # grants nothing it does not have.
+    session = await bus.sessions.create("integrator", role="admin")
+    headers = {"Authorization": f"Bearer {session['token']}"}
+
     def client_factory(timeout: float):
         @asynccontextmanager
         async def opener():
             async with httpx.AsyncClient(
                 transport=ASGITransport(app=bus.app), base_url="http://bus.local", timeout=timeout,
+                headers=headers,
             ) as client:
                 yield client
         return opener()

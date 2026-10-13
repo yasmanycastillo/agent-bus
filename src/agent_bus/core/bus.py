@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import re
 import uuid
 from collections import defaultdict
@@ -252,7 +253,7 @@ class MessageBus:
                             actors.append("decided_by")
                         if path.startswith("/locks/") or (
                             len(parts) == 3 and parts[0] == "tasks"
-                            and parts[2] in ("claim", "done", "review", "lock-files")
+                            and parts[2] in ("claim", "done", "review", "lock-files", "block")
                         ):
                             actors.append("agent_id")
                         if path == "/register" and not principal.is_admin:
@@ -1107,10 +1108,12 @@ class MessageBus:
 
         @self.app.post("/tasks/{task_id}/block")
         async def block_task(task_id: str, request: Request):
+            principal = request.state.principal
+            if principal is None:
+                # Blocking is never attributed to a self-declared agent_id, even unsigned.
+                raise HTTPException(401, "Valid bearer session required", headers={"WWW-Authenticate": "Bearer"})
             body = await self._json_object(request)
-            actor, error = self._transition_actor(request, body)
-            if error is not None:
-                return error
+            actor = None if principal.is_admin else principal.agent_id
             reason = body.get("reason") if isinstance(body.get("reason"), str) else None
             task = await self.tasks.block(task_id, reason=reason, actor=actor)
             if not task:
@@ -1122,15 +1125,16 @@ class MessageBus:
         @self.app.post("/reviews")
         async def create_review(req: CreateReviewRequest, request: Request):
             principal = request.state.principal
-            reviewer_agent_id = req.reviewer_agent_id
-            if not reviewer_agent_id and principal:
-                reviewer_agent_id = principal.agent_id
-            reviewer_agent_id = reviewer_agent_id or "gatekeeper"
-
-            reviewer_session_id = req.reviewer_session_id
-            if not reviewer_session_id and principal:
-                reviewer_session_id = getattr(principal, "session_id", "") or ""
-            reviewer_session_id = reviewer_session_id or ""
+            if principal is None:
+                raise HTTPException(401, "Valid bearer session required", headers={"WWW-Authenticate": "Bearer"})
+            # Legacy identity fields are assertions, never authority. Empty
+            # values mean unspecified for clients serializing default fields.
+            if req.reviewer_agent_id and req.reviewer_agent_id != principal.agent_id:
+                return JSONResponse({"error": "Reviewer does not match authenticated session"}, status_code=403)
+            if req.reviewer_session_id and req.reviewer_session_id != principal.session_id:
+                return JSONResponse({"error": "Reviewer session does not match authenticated session"}, status_code=403)
+            reviewer_agent_id = principal.agent_id
+            reviewer_session_id = principal.session_id
 
             try:
                 verdict_enum = Verdict(req.verdict)
@@ -1139,7 +1143,8 @@ class MessageBus:
 
             import uuid
             decision = ReviewDecision(
-                review_id=req.review_id or f"rev-{uuid.uuid4().hex[:8]}",
+                # Accept serialized legacy decisions, but always allocate the persisted ID.
+                review_id=f"rev-{uuid.uuid4().hex}",
                 task_id=req.task_id,
                 sha=req.sha,
                 verdict=verdict_enum,
@@ -1148,9 +1153,16 @@ class MessageBus:
                 test_results=req.test_results,
                 reviewer_agent_id=reviewer_agent_id,
                 reviewer_session_id=reviewer_session_id,
-                created_at=req.created_at or datetime.now(timezone.utc),
+                created_at=datetime.now(timezone.utc),
             )
-            saved = await self.reviews.add(decision)
+            try:
+                saved = await self.reviews.add(decision)
+            except sqlite3.IntegrityError as exc:
+                if getattr(exc, "sqlite_errorcode", None) in (
+                    sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY, sqlite3.SQLITE_CONSTRAINT_UNIQUE,
+                ):
+                    raise HTTPException(409, "Review uniqueness conflict; retry the request") from exc
+                raise
             return saved.model_dump(mode="json")
 
         @self.app.post("/tasks/{task_id}/verdict")
@@ -1874,10 +1886,10 @@ class MessageBus:
             holder = await InstructionLog(self.db).holder(implementation_id)
             owner, status = (holder["agent_id"], "in_progress") if holder else ("free", "pending")
             if implementation.status.value != status or previous != owner:
-                await self.db.conn.execute(
+                await self.db.transaction(lambda connection: connection.execute(
                     "UPDATE tasks SET status = ?, owner = ?, updated_at = ? WHERE task_id = ?",
                     (status, owner, now, implementation_id),
-                )
+                ))
             previous = owner if holder else previous
             if previous not in (None, "free"):
                 await self.inbox.send(Envelope(
@@ -1895,13 +1907,13 @@ class MessageBus:
                         "sha": sha,
                     },
                 ), [previous])
-        for task in await self.tasks.list_all():
-            if review_task_id in task.depends_on and task.status == TaskStatus.BLOCKED:
-                await self.db.conn.execute(
-                    "UPDATE tasks SET status = 'pending', blocked_reason = NULL, updated_at = ? WHERE task_id = ?",
-                    (now, task.task_id),
-                )
-        await self.db.conn.commit()
+        unblocked = [task.task_id for task in await self.tasks.list_all()
+                     if review_task_id in task.depends_on and task.status == TaskStatus.BLOCKED]
+        if unblocked:
+            await self.db.transaction(lambda connection: connection.executemany(
+                "UPDATE tasks SET status = 'pending', blocked_reason = NULL, updated_at = ? WHERE task_id = ?",
+                [(now, task_id) for task_id in unblocked],
+            ))
         # Reviews from assign_work are released by handoffs (release_reviews); hold this one
         # again so it restarts when the reopened implementation is handed off anew.
         # Workflow reviews keep their own dispatch and are left alone.

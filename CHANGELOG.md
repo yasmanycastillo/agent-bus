@@ -23,6 +23,16 @@ agent-bus coordina agentes que ya saben trabajar. No inventa el encargo ni lo ej
 - Instalar el MCP es un comando. No crea credenciales en este repositorio: la sesión nace en el proyecto que se coordina.
 - Cada worker solo toma la tarea que tiene asignada. Un revisor no reclama implementación. Un mensaje agotado no bloquea la cola. El turno espera 1800 segundos.
 
+- Operaciones de inbox, tareas y revisiones ahora usan transacciones SQLite
+  independientes con rollback y cierre deterministas bajo cancelación.
+- Autorización reforzada para mutaciones de tareas y revisiones; la identidad
+  persistida del review es autoritativa durante la integración.
+- El integrador prueba y publica el SHA fijado, verifica movimientos de refs y
+  deja la rama objetivo intacta cuando falla el gate o la publicación.
+- Bases SQLite en disco se abren con permisos privados y descriptores anclados;
+  IDs usados en rutas se validan antes de cualquier acceso al filesystem.
+- CI con acciones fijadas por SHA, dependencias bloqueadas, Ruff global,
+  suite completa, build y gate incremental de deuda mypy.
 - Integración nativa de Grok en `watch`, selección del proveedor desde la
   credencial y lanzadores por identidad generados durante onboarding.
 - `watch --status` muestra el estado del ejecutor local. Las respuestas preparadas

@@ -8,6 +8,8 @@ import subprocess
 
 import yaml
 
+from agent_bus.validation import validate_id
+
 
 PROJECT_DIR = ".agent-bus"
 
@@ -169,6 +171,7 @@ def get_plan_path(cwd: Path | None = None) -> Path | None:
 
 
 def create_agent_config(agent_id: str, config: dict, cwd: Path | None = None) -> Path:
+    validate_id(agent_id)
     agents_dir = get_agents_dir(cwd)
     if not agents_dir:
         raise FileNotFoundError("Run 'agent-bus init' first")
@@ -244,6 +247,7 @@ Use `agent-bus work check` for a quick check. Use `agent-bus work inbox` for ful
 
 
 def generate_agent_protocol(agent_id: str, cwd: Path | None = None) -> Path | None:
+    validate_id(agent_id)
     project = find_project_dir(cwd)
     if not project:
         return None

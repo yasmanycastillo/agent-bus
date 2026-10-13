@@ -46,30 +46,7 @@ class InboxManager:
         self._db = db
 
     async def _transaction(self, operation, *, write=True):
-        """Queue the complete transaction so sibling coroutines cannot commit it.
-
-        The first write acquires SQLite's writer reservation before any reads;
-        independent connections cannot race between lookup and mutation.
-        """
-        def transaction(connection):
-            connection.execute("SAVEPOINT inbox_operation")
-            try:
-                if write:
-                    connection.execute("UPDATE message_state SET value = value WHERE name = 'cursor_secret'")
-                result = operation(connection)
-                connection.execute("RELEASE inbox_operation")
-                return result
-            except BaseException:
-                connection.execute("ROLLBACK TO inbox_operation")
-                connection.execute("RELEASE inbox_operation")
-                raise
-
-        # aiosqlite has no public multi-statement callback. This is the same
-        # confined transaction boundary used by task transfer + audit.
-        result = await self._db.conn._execute(transaction, self._db.conn._conn)
-        if write:
-            await self._db.conn.commit()
-        return result
+        return await self._db.transaction(operation, write=write)
 
     @staticmethod
     def _insert_delivery(connection, envelope: Envelope):

@@ -9,10 +9,17 @@ from rich.console import Console
 
 from agent_bus.cli.display import set_current_agent
 from agent_bus.config import get_config_dir
-from agent_bus.security import load_session, sync_bus_client
+from agent_bus.security import load_session, sync_bus_client, validate_id
 from agent_bus.project import create_agent_config, create_plan, find_project_dir, get_agents_dir
 
 console = Console()
+
+
+def _validated_agent_ids(raw: str) -> list[str]:
+    agent_ids = list(dict.fromkeys(item.strip() for item in raw.split(",") if item.strip()))
+    for agent_id in agent_ids:
+        validate_id(agent_id)
+    return agent_ids
 
 
 def _read_readme(base: Path) -> str:
@@ -115,7 +122,7 @@ def run_setup(client, cwd: Path | None = None) -> None:
         console.print("\n[bold]2. Agentes participantes[/bold]")
         agents_input = click.prompt("  IDs separados por coma", default="claude,codex")
 
-    agent_ids = [a.strip() for a in agents_input.split(",") if a.strip()]
+    agent_ids = _validated_agent_ids(agents_input)
 
     agent_info = []
     for agent_id in agent_ids:
