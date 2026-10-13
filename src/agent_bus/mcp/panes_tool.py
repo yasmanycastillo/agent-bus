@@ -21,7 +21,7 @@ ENABLED_ENV = "AGENT_BUS_PANES"
 TOOL = {
     "name": NAME,
     "description": (
-        "Paneles TUI de agentes (claude, agy) que el usuario ve en solo lectura. "
+        "Paneles TUI de agentes (claude, agy, codex, grok) que el usuario ve en solo lectura. "
         "action=list|spawn|send|screen|close. spawn abre name con preset en la raíz del proyecto; "
         "as_agent (solo sesiones de administrador) le da esa identidad y arranca su watcher, que le avisa del trabajo nuevo; close lo detiene. send escribe text y lo envía sólo si el panel está idle."
     ),

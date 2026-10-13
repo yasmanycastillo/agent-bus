@@ -57,6 +57,13 @@ PRESETS = {
                      r"Enter to confirm|Do you want to proceed\?"),
     # agy permission menus also show "esc to cancel", so blocked is checked first.
     "agy": Preset("agy", "-i", r"esc to cancel", r"enter Confirm|↑/↓ Navigate|^Run this command\?"),
+    # Measured 2026-10 (codex-cli 0.162, grok 1.0.50): codex draws "Working (4s • esc to
+    # interrupt)" only during a turn ("Worked for 34s" after it); grok adds "Ctrl+c:cancel" to
+    # its footer only during a turn. ponytail: blocked markers are not measured (both ran
+    # without asking in the probe): codex's approval and trust questions end in "Press enter to
+    # confirm|continue"; grok's are a guess. Capture a real prompt and tighten them.
+    "codex": Preset("codex", None, r"^\W*Working \(\d+s", r"Press enter to (confirm|continue)|Would you like to run"),
+    "grok": Preset("grok", None, r"Ctrl\+c:cancel", r"\(y/n\)|Allow once|Allow always|Approve\?"),
 }
 
 
