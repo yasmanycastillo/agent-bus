@@ -416,7 +416,8 @@ async def run_turn(
 
 
 ACTIVE_TASK_STATES = ("pending", "in_progress")
-REOPENED_REASON = "cambios solicitados; la implementación quedó libre, reclámala de nuevo"
+REOPENED_REASON = ("cambios solicitados; corrige y entrega de nuevo con complete_handoff "
+                   "(si la tarea quedó libre, reclámala antes)")
 
 
 def plan_task_nudges(seen: dict[str, str], owned: dict[str, str]) -> dict[str, str]:
@@ -464,6 +465,12 @@ def build_nudge(due: dict[str, str]) -> str:
 
 
 QUESTION_CHARS = 2000
+
+
+def build_unread(messages: dict[str, dict]) -> str:
+    senders = sorted({_quoted(m.get("from_agent", "?")) for m in messages.values()})
+    return (f"agent-bus: tienes {len(messages)} mensaje(s) nuevo(s) de {', '.join(senders)}; "
+            "léelos con read_messages.")
 
 
 def _quoted(value: object) -> str:
@@ -535,7 +542,8 @@ class PendingMessageWatcher:
 
     async def tick(self, *, limit: int = 10) -> None:
         """Reply turns first; nudge about tasks only when no reply_needed message is pending."""
-        if await self.poll_once(limit=limit) == 0 and (self.task_nudges or self.notices or self.questions):
+        if await self.poll_once(limit=limit) == 0 and (self.task_nudges or self.task_notices
+                                                       or self.notices or self.questions):
             await self.nudge_tasks()
 
     async def nudge_tasks(self) -> None:
@@ -557,6 +565,7 @@ class PendingMessageWatcher:
             state = {}
         seen, due = dict(state.get("seen") or {}), dict(state.get("due") or {})
         typed = set(state.get("typed") or [])
+        told = list(state.get("told") or [])  # plain messages already announced, oldest first
         raw_asked = state.get("asked") or {}
         # Before timestamps, "asked" was a list of ids: count them as typed now.
         asked: dict[str, float] = (dict.fromkeys(raw_asked, time.time()) if isinstance(raw_asked, list)
@@ -579,19 +588,23 @@ class PendingMessageWatcher:
                           if seen.get(task_id) in ACTIVE_TASK_STATES and task_id not in due}
             text = {**due, **{task_id: reason for message_id, (task_id, reason) in notices.items()
                               if message_id not in typed}}
-            current = {"seen": seen, "due": due, "typed": sorted(typed), "asked": asked}
+            unread = await self._unread_plain(client, set(told)) if self.task_notices else {}
+            current = {"seen": seen, "due": due, "typed": sorted(typed), "asked": asked, "told": told}
             if current != state:
                 write_private_json(path, current)
-            if text or questions:
-                parts = ([build_nudge(text)] if text else []) + [build_question(m) for m in questions.values()]
+            if text or questions or unread:
+                parts = (([build_nudge(text)] if text else []) + [build_question(m) for m in questions.values()]
+                         + ([build_unread(unread)] if unread else []))
                 if not await self._type_nudge("\n".join(parts)):
                     return
                 typed |= notices.keys()
+                told = (told + list(unread))[-ASKED_LIMIT:]
                 now = time.time()
                 asked = dict(sorted({**asked, **dict.fromkeys(questions, now)}.items(),
                                     key=lambda item: item[1])[-ASKED_LIMIT:])
-                write_private_json(path, {"seen": seen, "due": {}, "typed": sorted(typed), "asked": asked})
-                click.echo(f"Pane nudge sent: {', '.join(sorted(text) + sorted(questions))}")
+                write_private_json(path, {"seen": seen, "due": {}, "typed": sorted(typed), "asked": asked,
+                                          "told": told})
+                click.echo(f"Pane nudge sent: {', '.join(sorted(text) + sorted(questions) + list(unread))}")
             acknowledge = sorted(typed & notices.keys())
             if acknowledge:
                 try:
@@ -604,7 +617,18 @@ class PendingMessageWatcher:
                 for message_id in acknowledge:
                     self.notices.pop(message_id, None)
                 write_private_json(path, {"seen": seen, "due": {}, "typed": sorted(typed - set(acknowledge)),
-                                          "asked": asked})
+                                          "asked": asked, "told": told})
+
+    async def _unread_plain(self, client, told: set[str]) -> dict[str, dict]:
+        """Unacknowledged messages that expect no reply and were not announced yet.
+
+        The agent reads them itself with read_messages; the watcher only says they arrived.
+        """
+        response = await client.get(f"/inbox/{self.agent_id}/messages",
+                                    params={"limit": 20, "reply_needed": "false"})
+        response.raise_for_status()
+        return {m["message_id"]: m for m in response.json()["messages"]
+                if not m.get("reply_needed") and m["message_id"] not in told}
 
     async def _task_changes(self, client, seen: dict[str, str],
                             due: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
@@ -645,7 +669,7 @@ class PendingMessageWatcher:
             await _muxel_ctl(binary, ["send", self.muxel_agent, "-"], self.agent_id, self.bus_url,
                              input_text=text)
         except AgentBusy as exc:
-            logger.info("Deferred task nudge: %s", exc)
+            click.echo(f"Pane nudge deferred: {exc}")
             return False
         except Exception as exc:
             self.retry_after["task-nudge"] = time.monotonic() + 30

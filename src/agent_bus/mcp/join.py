@@ -65,13 +65,12 @@ def _bind_environment(root: Path) -> None:
 
 
 async def _create_credential(agent_id: str) -> None:
-    from agent_bus.config import get_config_dir, load_config
+    from agent_bus.config import load_config
     from agent_bus.reputation.database import Database
-    from agent_bus.security import SessionStore
+    from agent_bus.security import SessionStore, credentials_dir
 
     config = load_config()
-    target = get_config_dir() / "credentials" / f"{agent_id}.json"
-    target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    target = credentials_dir() / f"{agent_id}.json"
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     database = Database(config.database_path, project_id=config.bus.project_id)
     await database.initialize()
