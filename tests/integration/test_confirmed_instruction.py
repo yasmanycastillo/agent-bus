@@ -302,12 +302,12 @@ async def test_approved_review_closes_and_reopens_when_its_approval_goes_stale(t
         await verdict(codex_review, "codex-01", "changes_requested", frontend)
         assert await _status(client, codex_review) == "blocked"
         assert await _status(client, grok_review) == "done"
-        claimed = await client.post(f"/tasks/{frontend}/claim", json={"agent_id": "grok-01"})
-        assert claimed.status_code == 200, claimed.text
+        reopened = (await client.get(f"/tasks/{frontend}")).json()
+        assert (reopened["status"], reopened["owner"]) == ("in_progress", "grok-01")
 
         # A new candidate for an approved implementation reopens the closed review.
         await verdict(both, "agy-01", "changes_requested", backend)
-        assert (await client.post(f"/tasks/{backend}/claim", json={"agent_id": "codex-01"})).status_code == 200
+        assert (await client.get(f"/tasks/{backend}")).json()["owner"] == "codex-01"
         await deliver(backend, "b2")
         assert await _status(client, grok_review) == "done"
         assert (await client.post(f"/tasks/{backend}/review", json={"agent_id": "codex-01"})).status_code == 200

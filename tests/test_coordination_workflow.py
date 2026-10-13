@@ -312,11 +312,11 @@ async def test_review_of_two_mcp_handoffs_records_a_verdict_per_implementation(f
     assert rejected.status_code == 200, rejected.text
     assert (await bus.tasks.get(backend)).status.value == 'in_review'
     reopened = await bus.tasks.get(frontend)
-    assert reopened.status.value == 'pending' and reopened.owner == 'free'
+    # The assigned implementer gets the task back without claiming it again.
+    assert reopened.status.value == 'in_progress' and reopened.owner == 'carol'
     assert (await bus.tasks.get(review)).status.value == 'blocked'
     assert (await verdict('approve', implementation_task_id=frontend)).status_code == 409
 
-    assert await bus.tasks.claim(frontend, 'carol')
     redelivered = await handoff(client, carol, task_id=frontend, candidate_sha=revised, operation_key='again')
     assert redelivered.status_code == 200, redelivered.text
     assert (await bus.tasks.get(review)).status.value == 'in_progress'
@@ -339,3 +339,21 @@ async def test_only_the_coordinator_assigns_its_instruction(flow):
     for who, assignee in ((alice, 'bob'), (admin, 'carol')):
         given = await client.post(path, headers=headers(who), json={'agent_id': assignee, 'role': 'implement', 'title': 'A'})
         assert given.status_code == 200, given.text
+
+
+async def test_only_admin_or_coordinator_marks_a_task_integrated(flow):
+    bus, client, alice, bob = flow
+    admin = await bus.sessions.create('root', role='admin')
+    saved = await client.post('/instructions', headers=headers(alice), json={
+        'instruction': 'Integrar', 'confirmed': True, 'agents': [{'agent_id': 'bob', 'provider': 'claude'}],
+    })
+    path = f"/instructions/{saved.json()['instruction_id']}/assignments"
+    task_id = (await client.post(path, headers=headers(alice), json={
+        'agent_id': 'bob', 'role': 'implement', 'title': 'A'})).json()['task_id']
+    forged = await client.post(f'/tasks/{task_id}/integrated', headers=headers(bob), json={})
+    assert forged.status_code == 403
+    assert (await bus.tasks.get(task_id)).status.value != 'done'
+    for who in (alice, admin):
+        marked = await client.post(f'/tasks/{task_id}/integrated', headers=headers(who), json={})
+        assert marked.status_code == 200, marked.text
+        assert marked.json()['status'] == 'done'

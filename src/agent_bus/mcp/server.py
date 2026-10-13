@@ -362,8 +362,11 @@ class McpServer:
         self._event_cursors: dict[str, str] = {}
         self.session = None
         if os.environ.get("AGENT_BUS_ALLOW_UNSIGNED") != "1" or os.environ.get("AGENT_BUS_SESSION_FILE"):
+            # An explicit session file (set per pane by `panes spawn --agent`) is the credential;
+            # it outranks the --agent flag that a shared MCP config hard-codes.
+            selected = None if os.environ.get("AGENT_BUS_SESSION_FILE") else agent_id
             try:
-                self.session = load_session(agent_id)
+                self.session = load_session(selected)
             except AuthenticationError:
                 self.session = None
         self.agent_id = self.session["agent_id"] if self.session else agent_id
