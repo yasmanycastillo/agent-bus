@@ -68,6 +68,9 @@ def list_cmd(as_json: bool) -> None:
         return
     for item in items:
         click.echo(f"{item['name']}\t{item['preset']}\t{item['state']}\twatcher:{item['watcher']}")
+    if not items:
+        click.echo(f"No hay paneles en {backend.where()}. Ejecuta desde la raíz del proyecto "
+                   "o define AGENT_BUS_PROJECT_ID.")
 
 
 @panes.command("send")

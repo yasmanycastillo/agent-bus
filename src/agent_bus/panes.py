@@ -57,6 +57,13 @@ PRESETS = {
                      r"Enter to confirm|Do you want to proceed\?"),
     # agy permission menus also show "esc to cancel", so blocked is checked first.
     "agy": Preset("agy", "-i", r"esc to cancel", r"enter Confirm|↑/↓ Navigate|^Run this command\?"),
+    # Measured 2026-10 (codex-cli 0.162, grok 1.0.50): codex draws "Working (4s • esc to
+    # interrupt)" only during a turn ("Worked for 34s" after it); grok adds "Ctrl+c:cancel" to
+    # its footer only during a turn. ponytail: blocked markers are not measured (both ran
+    # without asking in the probe): codex's approval and trust questions end in "Press enter to
+    # confirm|continue"; grok's are a guess. Capture a real prompt and tighten them.
+    "codex": Preset("codex", None, r"^\W*Working \(\d+s", r"Press enter to (confirm|continue)|Would you like to run"),
+    "grok": Preset("grok", None, r"Ctrl\+c:cancel", r"\(y/n\)|Allow once|Allow always|Approve\?"),
 }
 
 
@@ -82,6 +89,13 @@ def _base() -> list[str]:
         from agent_bus.config import load_config
         project = load_config().bus.project_id
     return ["tmux", "-L", "agent-bus-" + re.sub(r"[^A-Za-z0-9_-]", "_", project)]
+
+
+def where() -> str:
+    """The tmux socket and project root this process uses; panes elsewhere are invisible."""
+    from agent_bus.config import load_config
+    root = load_config().project_root
+    return f"socket {_base()[-1]}, project root {root or 'none'}"
 
 
 def _tmux(*args: str, input_text: str | None = None) -> str:
@@ -213,7 +227,12 @@ def close(name: str) -> None:
 
 
 def screen(name: str, lines: int = SCREEN_LINES) -> str:
-    text = _tmux("capture-pane", "-p", "-t", _target(name)).rstrip("\n")
+    try:
+        text = _tmux("capture-pane", "-p", "-t", _target(name)).rstrip("\n")
+    except PaneError as exc:
+        if "not installed" in str(exc):
+            raise
+        raise PaneError(f"no pane '{name}' ({where()}): {exc}") from None
     return "\n".join(text.splitlines()[-lines:])
 
 
@@ -245,7 +264,7 @@ def send(name: str, text: str, *, force: bool = False) -> None:
         raise PaneError("nothing to send")
     pane = next((p for p in list_panes() if p["name"] == name), None)
     if pane is None:
-        raise PaneError(f"no pane '{name}'")
+        raise PaneError(f"no pane '{name}' ({where()})")
     if pane["state"] in ("working", "blocked") and not force:
         raise PaneBusy(f"pane '{name}' is {pane['state']}")
     if pane["state"] != "idle" and not force:
