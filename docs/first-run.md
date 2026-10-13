@@ -2,8 +2,9 @@
 
 Esta guía prepara un hub local y sesiones para dos aplicaciones. No arranca
 workers ni el integrador. La versión inicial se valida en Linux con Python 3.12+.
-El paquete aún no tiene una release pública verificada en PyPI: no asumir que
-`uvx agent-bus` descarga este proyecto.
+En PyPI el paquete se llama `agent-bus-coord` (`uv tool install agent-bus-coord`);
+el comando instalado sigue siendo `agent-bus`. `uvx agent-bus` no descarga este
+proyecto.
 
 ## Sistemas operativos
 

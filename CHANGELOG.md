@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 — 2026-10-13
+
+- Primera publicación en PyPI, como `agent-bus-coord`: PyPI no admite `agent-bus` por
+  parecerse a un proyecto existente. Se instala con `uv tool install agent-bus-coord`;
+  el comando `agent-bus` y el paquete `agent_bus` no cambian.
+
 ## 0.3.0 — 2026-10-13
 
 - Paneles de agente: `agent-bus panes spawn|send|screen|close|list|view` abre Claude,
