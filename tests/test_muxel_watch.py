@@ -392,3 +392,37 @@ async def test_plain_message_wakes_the_idle_pane_once(task_hub, monkeypatch, tmp
     await _watcher(tmp_path).tick()  # restarted watcher: already told
     assert [verb for verb, _ in muxel.calls].count('send') == 1
     assert not task_hub.acks  # the agent reads it itself
+
+
+# --- An in_progress task with no activity gets one handoff reminder ---
+
+async def test_stale_in_progress_task_gets_one_handoff_reminder(task_hub, monkeypatch, tmp_path):
+    task_hub.tasks = [{'task_id': 'T1', 'owner': 'bob', 'status': 'in_progress',
+                       'updated_at': '2026-01-01T00:00:00+00:00'}]
+    (tmp_path / 'task_nudges.json').write_text(json.dumps({'seen': {'T1': 'in_progress'}}))  # announced
+    muxel = FakeMuxel()
+    monkeypatch.setattr(watch, '_run_cli', muxel)
+    await _watcher(tmp_path).tick()
+    sent = [text for verb, text in muxel.calls if verb == 'send']
+    assert len(sent) == 1 and 'complete_handoff' in sent[0] and 'T1' in sent[0]
+    await _watcher(tmp_path).tick()
+    assert [verb for verb, _ in muxel.calls].count('send') == 1  # reminded once per update
+
+
+async def test_watcher_heartbeat_makes_the_agent_count_as_online(task_hub, monkeypatch, tmp_path):
+    import httpx
+    calls = []
+    original = task_hub.handle
+
+    def handle(request):
+        if request.url.path in ('/register', '/agents/bob/heartbeat'):
+            calls.append(request.url.path)
+            return httpx.Response(409 if request.url.path == '/register' and calls.count('/register') > 1
+                                  else 200, json={})
+        return original(request)
+    task_hub.handle = handle
+    watcher = _watcher(tmp_path)
+    await watcher.beat()
+    await watcher.beat()
+    assert calls[:2] == ['/register', '/agents/bob/heartbeat']
+    assert calls.count('/register') == 1  # registered once per watcher

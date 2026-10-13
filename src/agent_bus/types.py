@@ -100,6 +100,23 @@ class Task(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# An in_progress task untouched this long has probably been finished without a handoff.
+STALE_IN_PROGRESS_SECONDS = 900
+
+
+def is_stale(task: dict) -> bool:
+    """True for a serialized in_progress task with no update in STALE_IN_PROGRESS_SECONDS."""
+    if task.get("status") != "in_progress":
+        return False
+    try:
+        updated = datetime.fromisoformat(str(task.get("updated_at")))
+    except ValueError:
+        return False
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - updated).total_seconds() > STALE_IN_PROGRESS_SECONDS
+
+
 class Decision(BaseModel):
     decision_id: str
     title: str

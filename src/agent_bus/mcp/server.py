@@ -28,6 +28,7 @@ from agent_bus.security import AuthenticationError, async_bus_client, load_sessi
 from agent_bus.core.sse import iter_sse_frames
 from agent_bus.mcp.transport import cancellable_stdio
 from agent_bus.mcp import coordination, panes_tool
+from agent_bus.types import is_stale
 
 logger = logging.getLogger("agent_bus.mcp")
 
@@ -39,6 +40,9 @@ TASK_SUMMARY_CHARS = 200
 
 
 def _summarize_task(task: dict[str, Any]) -> dict[str, Any]:
+    if is_stale(task):
+        # Likely finished without complete_handoff; the coordinator checks the worktree.
+        task = {**task, "stale": True}
     description = task.get("description")
     if not isinstance(description, str) or len(description) <= TASK_SUMMARY_CHARS:
         return task

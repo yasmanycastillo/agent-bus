@@ -157,3 +157,10 @@ async def test_mcp_assign_work_forwards_the_review_scope(live_bus_url):
         **base, "instruction_id": "ins-nope", "assignee": "codex", "role": "plan", "title": "x",
     }, expected_error=True)
     assert "ins-nope" in missing["detail"]
+
+
+def test_project_status_flags_in_progress_tasks_without_recent_activity():
+    from agent_bus.mcp.server import _summarize_task
+    old = {'task_id': 'T1', 'status': 'in_progress', 'updated_at': '2026-01-01T00:00:00+00:00'}
+    assert _summarize_task(old)['stale'] is True
+    assert 'stale' not in _summarize_task({**old, 'status': 'in_review'})

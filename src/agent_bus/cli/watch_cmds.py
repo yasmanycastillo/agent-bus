@@ -29,6 +29,7 @@ from agent_bus.config import DEFAULT_CONFIG_DIR, get_config_dir, get_bus_url
 from agent_bus.worker.client import BusEventClient, worker_environment
 from agent_bus.worker.execution import ExecutionGuard
 from agent_bus.cli.watch_state import record_status, reply_file, watcher_status, write_private_json
+from agent_bus.types import STALE_IN_PROGRESS_SECONDS, is_stale
 
 logger = logging.getLogger("agent_bus.cli.watch")
 
@@ -416,6 +417,10 @@ async def run_turn(
 
 
 ACTIVE_TASK_STATES = ("pending", "in_progress")
+STALE_REASON = (f"sigue in_progress sin cambios desde hace más de {STALE_IN_PROGRESS_SECONDS // 60} min; "
+                "si ya terminaste, entrega con complete_handoff (candidate_sha)")
+# The watcher tells the hub the pane is alive at most this often.
+HEARTBEAT_SECONDS = 10
 REOPENED_REASON = ("cambios solicitados; corrige y entrega de nuevo con complete_handoff "
                    "(si la tarea quedó libre, reclámala antes)")
 
@@ -531,6 +536,23 @@ class PendingMessageWatcher:
         self.cursor: str | None = None
         self.retry_after: dict[str, float] = {}
         self.wake = asyncio.Event()
+        self.stale: dict[str, str] = {}  # owned stale task -> its updated_at, from the last poll
+        self.registered = False
+        self.last_beat = 0.0
+
+    async def beat(self) -> None:
+        """Presence for get_project_status: register once, then heartbeat while watching."""
+        if time.monotonic() - self.last_beat < HEARTBEAT_SECONDS:
+            return
+        self.last_beat = time.monotonic()
+        try:
+            async with async_bus_client(self.agent_id, base_url=self.bus_url, timeout=10) as client:
+                if not self.registered:
+                    await client.post("/register", json={"agent_id": self.agent_id, "display_name": self.agent_id})
+                    self.registered = True  # 409: already known to the hub
+                await client.post(f"/agents/{self.agent_id}/heartbeat")
+        except Exception as exc:
+            logger.warning("Heartbeat not sent: %s", exc)
 
     def status(self, state: str) -> None:
         if not self.dry_run:
@@ -566,6 +588,7 @@ class PendingMessageWatcher:
         seen, due = dict(state.get("seen") or {}), dict(state.get("due") or {})
         typed = set(state.get("typed") or [])
         told = list(state.get("told") or [])  # plain messages already announced, oldest first
+        reminded = dict(state.get("reminded") or {})  # stale task -> updated_at already reminded
         raw_asked = state.get("asked") or {}
         # Before timestamps, "asked" was a list of ids: count them as typed now.
         asked: dict[str, float] = (dict.fromkeys(raw_asked, time.time()) if isinstance(raw_asked, list)
@@ -588,8 +611,12 @@ class PendingMessageWatcher:
                           if seen.get(task_id) in ACTIVE_TASK_STATES and task_id not in due}
             text = {**due, **{task_id: reason for message_id, (task_id, reason) in notices.items()
                               if message_id not in typed}}
+            stale = {task_id: updated for task_id, updated in self.stale.items() if reminded.get(task_id) != updated}
+            text.update({task_id: STALE_REASON for task_id in stale if task_id not in text})
+            reminded = {**{t: u for t, u in reminded.items() if t in self.stale}, **stale}
             unread = await self._unread_plain(client, set(told)) if self.task_notices else {}
-            current = {"seen": seen, "due": due, "typed": sorted(typed), "asked": asked, "told": told}
+            current = {"seen": seen, "due": due, "typed": sorted(typed), "asked": asked, "told": told,
+                       "reminded": state.get("reminded") or {}}
             if current != state:
                 write_private_json(path, current)
             if text or questions or unread:
@@ -603,7 +630,7 @@ class PendingMessageWatcher:
                 asked = dict(sorted({**asked, **dict.fromkeys(questions, now)}.items(),
                                     key=lambda item: item[1])[-ASKED_LIMIT:])
                 write_private_json(path, {"seen": seen, "due": {}, "typed": sorted(typed), "asked": asked,
-                                          "told": told})
+                                          "told": told, "reminded": reminded})
                 click.echo(f"Pane nudge sent: {', '.join(sorted(text) + sorted(questions) + list(unread))}")
             acknowledge = sorted(typed & notices.keys())
             if acknowledge:
@@ -617,7 +644,7 @@ class PendingMessageWatcher:
                 for message_id in acknowledge:
                     self.notices.pop(message_id, None)
                 write_private_json(path, {"seen": seen, "due": {}, "typed": sorted(typed - set(acknowledge)),
-                                          "asked": asked, "told": told})
+                                          "asked": asked, "told": told, "reminded": reminded})
 
     async def _unread_plain(self, client, told: set[str]) -> dict[str, dict]:
         """Unacknowledged messages that expect no reply and were not announced yet.
@@ -636,6 +663,7 @@ class PendingMessageWatcher:
         response = await client.get("/tasks", params={"owner": self.agent_id})
         response.raise_for_status()
         owned = {task["task_id"]: task["status"] for task in response.json()}
+        self.stale = {task["task_id"]: str(task.get("updated_at")) for task in response.json() if is_stale(task)}
         for task_id, before in list(seen.items()):
             # A changes_requested verdict frees the implementation, so it leaves our list.
             if task_id in owned or before not in ("in_progress", "in_review"):
@@ -729,6 +757,8 @@ class PendingMessageWatcher:
         try:
             while True:
                 self.wake.clear()
+                if not self.dry_run:
+                    await self.beat()
                 try:
                     await self.tick(limit=1 if once else 10)
                 except Exception as exc:
