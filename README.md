@@ -1,5 +1,7 @@
 # agent-bus
 
+[![PyPI](https://img.shields.io/pypi/v/agent-bus-coord)](https://pypi.org/project/agent-bus-coord/)
+
 Coordina agentes de distintas herramientas sobre un mismo proyecto: comparte
 mensajes y tareas, reserva archivos y entrega resultados para revisión mediante MCP.
 
