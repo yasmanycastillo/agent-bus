@@ -124,13 +124,16 @@ class Coordination:
         return server_lock_path(value, scope, project_root=self.bus.project_root,
                                 base_dir=self.bus.lock_base_dir)
 
-    async def pending(self, principal, *, limit=20, cursor=None, task_offset=0):
+    async def pending(self, principal, *, limit=20, cursor=None, task_offset=0, instruction_id=None):
         # Checkpoint BEFORE reading the inbox to close the read/subscribe gap.
         event_cursor = await self.bus.events.checkpoint(principal.agent_id)
         messages = await self.bus.inbox.page(principal.agent_id, cursor=cursor, limit=limit)
+        # assign_work names tasks "<instruction_id>-<role>-<agent>"; a prefix match avoids LIKE wildcards.
+        prefix = f"{instruction_id}-" if instruction_id else ""
         rows = await self.bus.db.conn.execute_fetchall(
-            "SELECT * FROM tasks WHERE owner=? AND status!='done' ORDER BY task_id LIMIT ? OFFSET ?",
-            (principal.agent_id, limit + 1, task_offset),
+            "SELECT * FROM tasks WHERE owner=? AND status!='done' AND substr(task_id, 1, ?) = ?"
+            " ORDER BY task_id LIMIT ? OFFSET ?",
+            (principal.agent_id, len(prefix), prefix, limit + 1, task_offset),
         )
         tasks = [self.bus.tasks._row_to_task(row).model_dump(mode="json") for row in rows[:limit]]
         counts = await self.bus.db.conn.execute_fetchall(
@@ -169,7 +172,9 @@ class Coordination:
             ).fetchone()
             if row:
                 if row["fingerprint"] != fingerprint:
-                    raise IdempotencyConflict("Operation key already used with different content")
+                    raise IdempotencyConflict(
+                        "operation_key already used with different content; keep it only to retry the same "
+                        "request, and use a new operation_key for a new delivery or edit")
                 result = json.loads(row["result_json"])
                 if kind == "prepare_edit":
                     for lock in result["locks"]:
@@ -336,8 +341,10 @@ def setup_coordination_routes(bus):
 
     @bus.app.get("/coordination/pending")
     async def pending(request: Request, limit: int = Query(20, ge=1, le=100),
-                      cursor: str | None = None, task_offset: int = Query(0, ge=0)):
-        return await coordination.pending(principal(request), limit=limit, cursor=cursor, task_offset=task_offset)
+                      cursor: str | None = None, task_offset: int = Query(0, ge=0),
+                      instruction_id: str | None = Query(None, min_length=1, max_length=200)):
+        return await coordination.pending(principal(request), limit=limit, cursor=cursor, task_offset=task_offset,
+                                          instruction_id=instruction_id)
 
     @bus.app.post("/coordination/prepare-edit")
     async def prepare(req: PrepareEditRequest, request: Request):
