@@ -357,3 +357,24 @@ async def test_only_admin_or_coordinator_marks_a_task_integrated(flow):
         marked = await client.post(f'/tasks/{task_id}/integrated', headers=headers(who), json={})
         assert marked.status_code == 200, marked.text
         assert marked.json()['status'] == 'done'
+
+
+async def test_pending_items_filter_by_instruction(flow):
+    bus, client, alice, bob = flow
+    for task_id in ('ins-a-implement-alice', 'ins-a-review-alice', 'ins-b-implement-alice', 'ins-ab-x-alice'):
+        await make_task(bus, task_id=task_id)
+    page = await client.get('/coordination/pending', headers=headers(alice), params={'instruction_id': 'ins-a'})
+    assert page.status_code == 200, page.text
+    assert sorted(t['task_id'] for t in page.json()['tasks']) == ['ins-a-implement-alice', 'ins-a-review-alice']
+    everything = await client.get('/coordination/pending', headers=headers(alice))
+    assert len(everything.json()['tasks']) == 4
+
+
+async def test_reused_operation_key_with_new_content_suggests_a_new_key(flow):
+    bus, client, alice, bob = flow
+    await make_task(bus)
+    assert (await handoff(client, alice, summary='first')).status_code == 200
+    await bus.tasks.reassign('T1', 'alice')
+    conflict = await handoff(client, alice, summary='second delivery')
+    assert conflict.status_code == 409
+    assert 'new operation_key' in conflict.text

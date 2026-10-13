@@ -18,6 +18,8 @@ class PendingArguments(BaseModel):
     limit: int = Field(default=20, ge=1, le=100, strict=True)
     cursor: StrictStr | None = None
     task_offset: int = Field(default=0, ge=0, strict=True)
+    instruction_id: StrictStr | None = Field(default=None, min_length=1, max_length=200,
+                                             description="Solo las tareas de esta instrucción")
 
 
 class InstructionsArguments(BaseModel):
@@ -33,7 +35,7 @@ MODELS = {
 }
 DESCRIPTIONS = {
     "bootstrap_agent": "Entrar al proyecto. Pasa project_path del proyecto que coordinas. La credencial se crea allí. No la crees en el directorio de agent-bus.",
-    "my_pending_items": "Consultar mensajes y tareas propios sin confirmar. Pagina con next_cursor y next_task_offset.",
+    "my_pending_items": "Consultar mensajes y tareas propios sin confirmar. Pagina con next_cursor y next_task_offset; instruction_id filtra las tareas de un encargo.",
     "prepare_edit": "Reservar todos los archivos o ninguno. Conserva operation_key, acquisition_id y expires_at; reintentar no renueva locks.",
     "complete_handoff": "Entregar tarea, evidencia declarada, ACK y liberaciones en una transacción. in_review por defecto; conserva operation_key al reintentar. Si entregas código, pasa candidate_sha (SHA completo de tu commit): la revisión lo necesita.",
     "get_agent_instructions": "Obtener el protocolo de coordinación sin crear sesión ni cambiar estado.",
