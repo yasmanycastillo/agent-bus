@@ -1,3 +1,3 @@
 """agent-bus: Protocolo de comunicacion entre agentes IA sin tmux."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

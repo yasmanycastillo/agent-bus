@@ -27,12 +27,14 @@ un entorno que también requiere validación propia.
 Para usar modelos reales necesitas, además, el cliente del proveedor instalado
 y autenticado en el entorno donde se ejecutará. [Detalle por plataforma](docs/first-run.md#sistemas-operativos).
 
-Desde este repositorio:
+Desde PyPI (el paquete se llama `agent-bus-coord`; el comando sigue siendo `agent-bus`):
 
 ```sh
-uv tool install .
+uv tool install agent-bus-coord
 agent-bus --project /ruta/mi-proyecto onboard --mcp-only
 ```
+
+Desde este repositorio, usa `uv tool install .` en lugar de la primera línea.
 
 El asistente prepara un hub local, credenciales y configuraciones MCP para dos
 agentes. Copia la configuración indicada a cada cliente, reconecta y pide

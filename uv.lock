@@ -8,8 +8,8 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "agent-bus"
-version = "0.3.0"
+name = "agent-bus-coord"
+version = "0.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

@@ -14,7 +14,9 @@ def is_agent_bus_source(root: Path) -> bool:
     package = root / "src" / "agent_bus" / "__init__.py"
     if not project.is_file() or not package.is_file():
         return False
-    return 'name = "agent-bus"' in project.read_text(encoding="utf-8", errors="ignore")
+    text = project.read_text(encoding="utf-8", errors="ignore")
+    # agent-bus-coord is the PyPI name since 0.3.1; older checkouts still say agent-bus.
+    return 'name = "agent-bus-coord"' in text or 'name = "agent-bus"' in text
 
 
 def workspace_root(project_path: str | None) -> Path:
