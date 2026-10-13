@@ -362,3 +362,18 @@ def test_console_listing_captures_each_screen_once(monkeypatch):
 def test_codex_and_grok_states_from_their_footer(monkeypatch, preset, footer, expected):
     monkeypatch.setattr(panes, "screen", lambda name, lines=panes.SCREEN_LINES: footer)
     assert panes.state("x", preset) == expected
+
+
+def test_missing_pane_names_the_tmux_server_it_looked_in(tmux, monkeypatch):
+    """From the wrong directory the socket differs; the error must say which one was used."""
+    socket = panes.TMUX[-1]
+    for call in (lambda: panes.send("ghost", "hola"), lambda: panes.screen("ghost")):
+        with pytest.raises(panes.PaneError, match=f"no pane 'ghost'.*{socket}"):
+            call()
+
+
+def test_empty_list_says_where_it_looked(tmux):
+    from click.testing import CliRunner
+    from agent_bus.cli.panes_cmds import panes as panes_cli
+    result = CliRunner().invoke(panes_cli, ["list"])
+    assert result.exit_code == 0 and panes.TMUX[-1] in result.output

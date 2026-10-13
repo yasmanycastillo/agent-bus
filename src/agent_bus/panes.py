@@ -91,6 +91,13 @@ def _base() -> list[str]:
     return ["tmux", "-L", "agent-bus-" + re.sub(r"[^A-Za-z0-9_-]", "_", project)]
 
 
+def where() -> str:
+    """The tmux socket and project root this process uses; panes elsewhere are invisible."""
+    from agent_bus.config import load_config
+    root = load_config().project_root
+    return f"socket {_base()[-1]}, project root {root or 'none'}"
+
+
 def _tmux(*args: str, input_text: str | None = None) -> str:
     try:
         result = subprocess.run([*_base(), *args], input=input_text, capture_output=True, text=True)
@@ -220,7 +227,12 @@ def close(name: str) -> None:
 
 
 def screen(name: str, lines: int = SCREEN_LINES) -> str:
-    text = _tmux("capture-pane", "-p", "-t", _target(name)).rstrip("\n")
+    try:
+        text = _tmux("capture-pane", "-p", "-t", _target(name)).rstrip("\n")
+    except PaneError as exc:
+        if "not installed" in str(exc):
+            raise
+        raise PaneError(f"no pane '{name}' ({where()}): {exc}") from None
     return "\n".join(text.splitlines()[-lines:])
 
 
@@ -252,7 +264,7 @@ def send(name: str, text: str, *, force: bool = False) -> None:
         raise PaneError("nothing to send")
     pane = next((p for p in list_panes() if p["name"] == name), None)
     if pane is None:
-        raise PaneError(f"no pane '{name}'")
+        raise PaneError(f"no pane '{name}' ({where()})")
     if pane["state"] in ("working", "blocked") and not force:
         raise PaneBusy(f"pane '{name}' is {pane['state']}")
     if pane["state"] != "idle" and not force:
