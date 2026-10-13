@@ -183,7 +183,7 @@ async def test_mark_blocked_requires_blocked_response_and_readback(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_retry_limit_never_claims_blocked_when_durable_transition_fails(tmp_path):
+async def test_retry_limit_never_claims_blocked_when_durable_transition_fails(tmp_path, pinned_checkout):
     integrator = BranchIntegrator(
         repo_dir=tmp_path,
         bus_url="http://test",
@@ -221,14 +221,14 @@ async def test_retry_limit_never_claims_blocked_when_durable_transition_fails(tm
 
 
 @pytest.mark.asyncio
-async def test_integrator_test_failure_triggers_author_feedback(tmp_path):
+async def test_integrator_test_failure_triggers_author_feedback(tmp_path, pinned_checkout):
     integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", max_retries_per_task=2, require_approval=False)
 
     async def mock_fail_tests(worktree_dir, test_cmd=None):
         return (False, "Failing test: assertion error in test_foo")
 
     async def mock_candidate(sha, target_branch, worktree_dir, test_cmd, ref_box=None):
-        return sha, False, "Failing test: assertion error in test_foo", "diff --git a/x"
+        return "", "", False, "Failing test: assertion error in test_foo", "diff --git a/x"
 
     async def mock_record(decision):
         return decision
@@ -258,14 +258,14 @@ async def test_integrator_test_failure_triggers_author_feedback(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_integrator_exceeding_max_retries_blocks_task(tmp_path):
+async def test_integrator_exceeding_max_retries_blocks_task(tmp_path, pinned_checkout):
     integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", max_retries_per_task=2, require_approval=False)
 
     async def mock_fail_tests(worktree_dir, test_cmd=None):
         return (False, "Fatal syntax error")
 
     async def mock_candidate(sha, target_branch, worktree_dir, test_cmd, ref_box=None):
-        return sha, False, "Fatal syntax error", "diff --git a/x"
+        return "", "", False, "Fatal syntax error", "diff --git a/x"
 
     async def mock_record(decision):
         return decision
@@ -302,7 +302,7 @@ async def test_integrator_exceeding_max_retries_blocks_task(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_integrator_success_flow(tmp_path):
+async def test_integrator_success_flow(tmp_path, pinned_checkout):
     integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", require_approval=False)
 
     async def mock_pass_tests(worktree_dir, test_cmd=None):
@@ -507,12 +507,12 @@ async def test_integrator_refuses_merge_when_target_moved(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_integrator_fails_closed_when_review_persistence_fails(tmp_path):
+async def test_integrator_fails_closed_when_review_persistence_fails(tmp_path, pinned_checkout):
     """No integration and no success when POST /reviews fails."""
     integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
 
     async def mock_candidate(sha, target_branch, worktree_dir, test_cmd, ref_box=None):
-        return sha, True, "All tests passed", "diff --git a/x"
+        return "", "", True, "All tests passed", "diff --git a/x"
 
     async def mock_record(decision):
         return None
@@ -535,12 +535,12 @@ async def test_integrator_fails_closed_when_review_persistence_fails(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_integrator_no_success_when_task_completion_fails(tmp_path):
+async def test_integrator_no_success_when_task_completion_fails(tmp_path, pinned_checkout):
     """Integrated but success=False when completing the task on the bus fails."""
     integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test", require_approval=False)
 
     async def mock_candidate(sha, target_branch, worktree_dir, test_cmd, ref_box=None):
-        return sha, True, "All tests passed", "diff --git a/x"
+        return "", "", True, "All tests passed", "diff --git a/x"
 
     async def mock_pass_tests(worktree_dir, test_cmd=None):
         return (True, "All tests passed")
@@ -970,8 +970,11 @@ async def test_preflight_allows_operational_dirs_on_target(tmp_path):
     _init_repo(tmp_path)
     env = _git_env(tmp_path)
     wt = _author_worktree(tmp_path, env)
+    # Real content: git never lists empty directories, which would hide the check.
     (tmp_path / ".agent-bus").mkdir()
+    (tmp_path / ".agent-bus" / "config.yaml").write_text("project_id: x\n")
     (tmp_path / ".worktrees").mkdir()
+    (tmp_path / ".worktrees" / "note").write_text("operational\n")
 
     integrator = BranchIntegrator(repo_dir=tmp_path, bus_url="http://test")
     async def mock_record(decision):

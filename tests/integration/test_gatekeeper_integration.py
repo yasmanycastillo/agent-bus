@@ -11,6 +11,9 @@ from agent_bus.cli.main import app
 from agent_bus.security import async_bus_client, sync_bus_client
 from agent_bus.worker.integrator import BranchIntegrator
 
+# These tests drive review policy against a live hub; Git itself is simulated.
+pytestmark = pytest.mark.usefixtures("pinned_checkout")
+
 
 @pytest.fixture(autouse=True)
 def authenticated_gatekeeper_sessions(tmp_path, monkeypatch):

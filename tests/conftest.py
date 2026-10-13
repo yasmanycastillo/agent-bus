@@ -167,3 +167,38 @@ def unavailable_bus_url(allowed_test_ports):
             yield f"http://127.0.0.1:{port}"
         finally:
             allowed_test_ports.discard(port)
+
+
+@pytest.fixture
+def pinned_checkout(monkeypatch):
+    """A clean git checkout already pinned to fixed SHAs, for tests of review and retry policy.
+
+    Real Git races are covered in test_integrator_exact_sha.py and the pilot E2E test.
+    The candidate is tested in place (run_tests) and merged through _merge_branches.
+    """
+    from agent_bus.worker.integrator import BranchIntegrator
+
+    async def git_repo(self):
+        return True
+
+    async def nothing(self, *args):
+        return None
+
+    async def not_merged(self, *args):
+        return False
+
+    async def snapshot(self, worktree_dir, candidate_branch, target_branch):
+        # The candidate is whatever the (possibly stubbed) worktree reports as HEAD.
+        sha = await self._git_output("rev-parse", "HEAD", cwd=worktree_dir)
+        return {"sha": sha or "a" * 40, "target_sha": "b" * 40}
+
+    async def tested_in_place(self, sha, target_sha, worktree_dir, test_cmd, ref_box=None):
+        passed, output = await self.run_tests(worktree_dir, test_cmd)
+        diff = await self._git_output("diff", f"{target_sha}...{sha}", cwd=worktree_dir)
+        return "", "", passed, output, diff
+
+    monkeypatch.setattr(BranchIntegrator, "_is_git_repo", git_repo)
+    monkeypatch.setattr(BranchIntegrator, "_preflight", nothing)
+    monkeypatch.setattr(BranchIntegrator, "_snapshot", snapshot)
+    monkeypatch.setattr(BranchIntegrator, "_candidate_is_merged", not_merged)
+    monkeypatch.setattr(BranchIntegrator, "_test_candidate", tested_in_place)

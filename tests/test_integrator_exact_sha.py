@@ -130,10 +130,13 @@ async def test_dirty_candidate_after_tests_does_not_replace_pinned_candidate(can
 
 
 async def test_non_git_checkout_fails_closed(tmp_path):
-    integrator = BranchIntegrator(repo_dir=tmp_path)
+    # A reachable bus must not change the outcome: refuse before tests, reviews or merges.
+    integrator = BranchIntegrator(repo_dir=tmp_path, client_factory=policy_free_client)
+    integrator.run_tests = AsyncMock(return_value=(True, 'tests passed'))
     result = await integrate(integrator, tmp_path)
-    assert result.status == 'error'
+    assert result.status == 'rejected'
     assert not result.merged
+    integrator.run_tests.assert_not_awaited()
 
 
 async def test_gatekeeper_cannot_approve_another_sha(candidate):

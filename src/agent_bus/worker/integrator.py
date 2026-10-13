@@ -229,43 +229,33 @@ class BranchIntegrator:
         require_approval: bool | None = None,
         ref_box: dict[str, str] | None = None,
     ) -> IntegratorResult:
+        if not await self._is_git_repo():
+            # Refuse before running tests, recording reviews or touching the author's task.
+            return IntegratorResult(False, False, "rejected", error="Integrator requires a Git checkout.",
+                                    output="Integrator requires a Git checkout.")
         preflight_error = await self._preflight(worktree_dir, candidate_branch, target_branch)
         if preflight_error:
             return IntegratorResult(False, False, "rejected", error=preflight_error, output=preflight_error)
 
         # Pin the exact reviewed commit SHA: a movable branch ref could advance
         # between review and merge (TOCTOU), so everything downstream operates
-        # on this immutable SHA. (Mirrors _preflight: non-git dirs skip git checks.)
-        candidate_sha = candidate_branch
-        target_sha = ""
-        integration_sha = ""
-        if await self._is_git_repo():
-            try:
-                snapshot = await self._snapshot(worktree_dir, candidate_branch, target_branch)
-            except ValueError as exc:
-                return IntegratorResult(False, False, "rejected", error=str(exc), output=str(exc))
-            candidate_sha, target_sha = snapshot["sha"], snapshot["target_sha"]
-            if await self._candidate_is_merged(candidate_sha, target_branch):
-                return await self._finish_recorded_merge(task_id, "candidate already on target")
+        # on this immutable SHA.
+        try:
+            snapshot = await self._snapshot(worktree_dir, candidate_branch, target_branch)
+        except ValueError as exc:
+            return IntegratorResult(False, False, "rejected", error=str(exc), output=str(exc))
+        candidate_sha, target_sha = snapshot["sha"], snapshot["target_sha"]
+        if await self._candidate_is_merged(candidate_sha, target_branch):
+            return await self._finish_recorded_merge(task_id, "candidate already on target")
 
-            # Build and test a temporary candidate worktree that combines the
-            # pinned candidate SHA with the captured target SHA (never the
-            # movable branch name), so the tested state is the state that will
-            # actually be integrated. The combined commit is pinned under a
-            # private ref so it cannot be garbage-collected before publication.
-            integration_sha, integration_ref, tests_passed, test_output, diff = await self._test_candidate(
-                candidate_sha, target_sha, worktree_dir, test_cmd, ref_box=ref_box
-            )
-        else:
-            tests_passed, test_output = await self.run_tests(worktree_dir, test_cmd)
-            # Legacy non-git path (also exercised by tests that stub _git_output):
-            # resolve SHA and diff from the worktree like the pre-P0 flow did.
-            candidate_sha = (
-                await self._git_output("rev-parse", "HEAD", cwd=worktree_dir) or candidate_sha
-            )
-            diff = await self._git_output("diff", f"{target_branch}...{candidate_branch}", cwd=worktree_dir)
-            if not diff and worktree_dir.exists():
-                diff = await self._git_output("diff", f"{target_branch}...HEAD", cwd=worktree_dir)
+        # Build and test a temporary candidate worktree that combines the
+        # pinned candidate SHA with the captured target SHA (never the
+        # movable branch name), so the tested state is the state that will
+        # actually be integrated. The combined commit is pinned under a
+        # private ref so it cannot be garbage-collected before publication.
+        integration_sha, integration_ref, tests_passed, test_output, diff = await self._test_candidate(
+            candidate_sha, target_sha, worktree_dir, test_cmd, ref_box=ref_box
+        )
 
         # Retrieve acceptance criteria if not provided. A fetch failure (None)
         # is distinct from an empty list: fail closed rather than review with
@@ -1017,9 +1007,10 @@ class BranchIntegrator:
             raise ValueError("Candidate worktree HEAD must match the candidate branch.")
         if await self._git_output("symbolic-ref", "--short", "HEAD") != target_branch:
             raise ValueError("Integrator checkout must be on the target branch.")
-        for directory in (self.repo_dir, worktree_dir):
-            if await self._git_output("status", "--porcelain", cwd=directory):
-                raise ValueError("Git checkout changed or contains uncommitted files; validation rejected.")
+        # The target tolerates agent-bus operational dirs, exactly as _preflight and _publish do.
+        if (_blocking_target_status(await self._git_output("status", "--porcelain"))
+                or await self._git_output("status", "--porcelain", cwd=worktree_dir)):
+            raise ValueError("Git checkout changed or contains uncommitted files; validation rejected.")
         return {"sha": sha, "target_sha": target_sha}
 
     async def _evidence_gap(self, task_id: str, candidate_sha: str, target_sha: str, verdict: str) -> str | None:
