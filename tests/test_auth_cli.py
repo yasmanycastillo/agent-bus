@@ -102,3 +102,17 @@ def test_credentials_stay_out_of_git(tmp_path, monkeypatch):
     untracked = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
                                cwd=tmp_path, capture_output=True, text=True, check=True).stdout
     assert "alice.json" not in untracked
+
+
+def test_runtime_data_dir_is_private_under_permissive_umask(tmp_path, monkeypatch):
+    """With umask 002 a group-writable data dir fails the database parent-directory check."""
+    import os
+
+    from agent_bus.cli.main import _ensure_global_config
+    monkeypatch.setenv("AGENT_BUS_CONFIG_DIR", str(tmp_path / ".agent-bus/runtime"))
+    previous = os.umask(0o002)
+    try:
+        _ensure_global_config()
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((tmp_path / ".agent-bus/runtime/data").stat().st_mode) == 0o700
