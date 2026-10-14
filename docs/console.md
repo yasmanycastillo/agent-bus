@@ -7,7 +7,8 @@ Los datos y las acciones requieren una sesión administrativa.
 ## Recorrido
 
 1. Abrir `agent-bus ui` y entrar con la credencial administrativa del proyecto.
-   El token se conserva solo en memoria, nunca en almacenamiento del navegador.
+   El token se guarda en `sessionStorage`: sobrevive al refresco, se borra al
+   cerrar la pestaña o pulsar **Salir** y no se comparte con otras pestañas.
 2. Consultar el resumen de solicitudes, tareas bloqueadas y revisiones pendientes.
 3. Desplegar una solicitud para leer su contenido completo, elegir decisión y
    escribir una observación. Responder exige texto; cerrar el desplegable no envía nada.

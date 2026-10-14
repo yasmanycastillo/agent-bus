@@ -88,9 +88,9 @@ Las respuestas distinguen autenticación inválida (`401`), falta de permisos (`
 
 ## Panel humano
 
-La página `/room` puede cargarse sin credenciales, pero sus datos y acciones necesitan una sesión administrativa. Introducir el token del archivo de sesión administrativo en el formulario del panel. El navegador lo conserva en memoria y lo envía en `Authorization`, también al consumir SSE mediante `fetch`; no se coloca en la URL ni en almacenamiento persistente del navegador.
+La página `/room` puede cargarse sin credenciales, pero sus datos y acciones necesitan una sesión administrativa. Introducir el token del archivo de sesión administrativo en el formulario del panel. El navegador lo conserva en `sessionStorage` de la pestaña (sobrevive al refresco, se borra al cerrarla o al salir) y lo envía en `Authorization`, también al consumir SSE mediante `fetch`; no se coloca en la URL ni en `localStorage`.
 
-Cerrar la sesión del panel o recargar la página elimina la credencial de esa instancia. El panel no concede un rol administrativo por seleccionar un nombre de agente.
+Cerrar la sesión del panel o la pestaña elimina la credencial de esa instancia. El panel no concede un rol administrativo por seleccionar un nombre de agente.
 
 ## Revocar y renovar
 

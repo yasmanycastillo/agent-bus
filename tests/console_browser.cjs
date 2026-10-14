@@ -97,6 +97,8 @@ async function port() {
     await page.setViewportSize({ width: 390, height: 844 });
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'Mobile overflow');
     await page.screenshot({ path: '/tmp/agent-bus-console-mobile.png', fullPage: true });
+    await page.reload();
+    await page.locator('.task').first().waitFor();
     await page.getByRole('button', { name: 'Salir', exact: true }).click();
     await page.getByRole('button', { name: 'Entrar', exact: true }).waitFor();
     assert.equal(await page.locator('.task').count(), 0);
