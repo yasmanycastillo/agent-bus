@@ -1,10 +1,11 @@
-// Bearer únicamente en memoria; las respuestas de una sesión anterior se descartan.
+// Bearer en sessionStorage (sobrevive al refresco, muere con la pestaña); las respuestas de una sesión anterior se descartan.
 (function () {
   "use strict";
-  let token = null, generation = 0;
-  function setToken(t) { generation++; token = t; }
+  const KEY = "agent-bus-console-token";
+  let token = sessionStorage.getItem(KEY), generation = 0;
+  function setToken(t) { generation++; token = t; sessionStorage.setItem(KEY, t); }
   function clearToken() {
-    generation++; token = null;
+    generation++; token = null; sessionStorage.removeItem(KEY);
     window.dispatchEvent(new Event("console:signout"));
   }
   function hasToken() { return !!token; }

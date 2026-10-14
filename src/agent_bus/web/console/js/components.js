@@ -28,10 +28,10 @@
     function submit(e) { e.preventDefault(); signIn(input.trim()); }
 
     useEffect(() => {
-      const token = new URLSearchParams(location.hash.slice(1)).get("token");
-      if (!token) return;
-      history.replaceState(null, "", location.pathname + location.search);
-      signIn(token);
+      const fromHash = new URLSearchParams(location.hash.slice(1)).get("token");
+      if (fromHash) history.replaceState(null, "", location.pathname + location.search);
+      const token = fromHash || window.ConsoleAPI.getToken();
+      if (token) signIn(token);
     }, []);
 
     return html`
