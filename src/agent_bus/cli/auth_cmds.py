@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import uuid
+from typing import Any
 from pathlib import Path
 
 import click
@@ -52,7 +53,7 @@ def create(agent: str | None, provider: str | None, role: str, ttl: int, output:
 
 
 def write_session(agent: str, role: str, ttl: int, target: Path, *, provider: str | None = None,
-                  replace: bool = False) -> dict:
+                  replace: bool = False) -> dict[str, Any]:
     """Create a session and its 0600 credential file; replace=True swaps an existing file atomically."""
     try:
         target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -62,7 +63,7 @@ def write_session(agent: str, role: str, ttl: int, target: Path, *, provider: st
     except OSError as exc:
         raise click.ClickException(f"Cannot create credential file: {exc}") from None
 
-    async def provision():
+    async def provision() -> dict[str, Any]:
         config = load_config()
         db = Database(config.database_path, project_id=config.bus.project_id)
         await db.initialize()

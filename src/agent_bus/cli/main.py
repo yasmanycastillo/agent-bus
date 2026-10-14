@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -211,12 +212,13 @@ def serve(host: str, port: int, run_daemon: bool, do_stop: bool, do_status: bool
 CONSOLE_AGENT = "human"
 
 
-def _console_session(hub: str) -> dict:
+def _console_session(hub: str) -> dict[str, Any]:
     """The operator's admin session: the saved one while the hub accepts it, else a new one."""
     import httpx
 
     from agent_bus.cli.auth_cmds import write_session
-    from agent_bus.security import AuthenticationError, credentials_dir, load_session
+    from agent_bus.security import credentials_dir, load_session
+    from agent_bus.validation import AuthenticationError
 
     try:
         session = load_session(CONSOLE_AGENT)
