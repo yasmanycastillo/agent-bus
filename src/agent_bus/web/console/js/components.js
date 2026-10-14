@@ -1,4 +1,4 @@
-// Componentes React de la consola (React UMD + htm, sin build).
+// Componentes React de la consola (React UMD + htm, sin build) — Diseño Cyber-Ops Cockpit (Opción 3).
 (function () {
   "use strict";
   const { useState, useEffect, useRef, useCallback } = React;
@@ -27,8 +27,6 @@
     }
     function submit(e) { e.preventDefault(); signIn(input.trim()); }
 
-    // `agent-bus ui` opens #token=…: the fragment never reaches the server; drop it from the
-    // address bar and history at once.
     useEffect(() => {
       const token = new URLSearchParams(location.hash.slice(1)).get("token");
       if (!token) return;
@@ -38,7 +36,7 @@
 
     return html`
       <form className="login" onSubmit=${submit}>
-        <h1>⚡ agent-bus · Consola</h1>
+        <h1>⚡ AGENT-BUS // COCKPIT · Consola</h1>
         <p className="muted">Abre la consola con <code>agent-bus ui</code> para entrar sin token,<br />o introduce un token de sesión administrativa</p>
         <input
           type="password"
@@ -80,7 +78,6 @@
         </div>
       `;
     }
-    // Contrato USAGE_SCHEMA_V1: se activa solo cuando T-20 rellene data.
     const d = usage.data || {};
     const p = d.project || {};
     return html`
@@ -98,7 +95,7 @@
     `;
   }
 
-  // ---------- Kanban de tareas ----------
+  // ---------- Matriz / Kanban de tareas ----------
   const COLUMNS = ["pending", "in_progress", "in_review", "blocked", "done"];
   const COLUMN_LABEL = { pending: "Pendientes", in_progress: "En curso", in_review: "En revisión", blocked: "Bloqueadas", done: "Hechas" };
   const STATUS_ACTIONS = {
@@ -131,15 +128,17 @@
           ${task.owner && task.owner !== "free" ? `owner: ${task.owner}` : "sin asignar"}
           ${task.depends_on && task.depends_on.length ? ` · depende: ${task.depends_on.join(", ")}` : ""}
         </div>
-        <${TaskDetail} task=${task} />
+        <div className="task-actions">
+          <${TaskDetail} task=${task} />
+          <select aria-label=${`Reasignar ${task.task_id}`} value="" disabled=${busy || !others.length} onChange=${(e) => assign(e.target.value)}>
+            <option value="">Reasignar a…</option>
+            ${others.map((a) => html`<option key=${a.agent_id} value=${a.agent_id}>${a.agent_id}</option>`)}
+          </select>
+          ${(STATUS_ACTIONS[task.status] || []).map(([action, label]) => html`
+            <button key=${action} className=${action === "done" ? "ok" : ""} disabled=${busy} onClick=${() => setStatus(action)}>${label}</button>
+          `)}
+        </div>
         ${error && html`<p role="alert" className="error">${error}</p>`}
-        <select aria-label=${`Reasignar ${task.task_id}`} value="" disabled=${busy || !others.length} onChange=${(e) => assign(e.target.value)}>
-          <option value="">Reasignar a…</option>
-          ${others.map((a) => html`<option key=${a.agent_id} value=${a.agent_id}>${a.agent_id}</option>`)}
-        </select>
-        ${(STATUS_ACTIONS[task.status] || []).map(([action, label]) => html`
-          <button key=${action} disabled=${busy} onClick=${() => setStatus(action)}>${label}</button>
-        `)}
       </div>
     `;
   }
@@ -195,13 +194,20 @@
   }
 
   function TasksPanel({ overview, onChanged }) {
+    const [mode, setMode] = useState("matrix");
     const byCol = {};
     for (const col of COLUMNS) byCol[col] = [];
     for (const t of overview.tasks || []) (byCol[t.status] = byCol[t.status] || []).push(t);
     return html`
       <div className="card">
-        <h2>Tareas</h2>
-        <div className="kanban">
+        <div className="view-toolbar">
+          <h2 style=${{ margin: 0 }}>Tareas (${(overview.tasks || []).length})</h2>
+          <div className="view-switch">
+            <button type="button" className=${mode === "matrix" ? "active" : ""} onClick=${() => setMode("matrix")}>[TABLA COMPACTA]</button>
+            <button type="button" className=${mode === "board" ? "active" : ""} onClick=${() => setMode("board")}>[KANBAN 5-COL]</button>
+          </div>
+        </div>
+        <div className=${`kanban mode-${mode}`}>
           ${COLUMNS.map((col) => html`
             <div className="col" key=${col}>
               <h3>${COLUMN_LABEL[col]} (${(byCol[col] || []).length})</h3>
@@ -234,16 +240,20 @@
     }
     return html`
       <div className="card">
-        <h2>Nueva tarea</h2>
+        <h2>+ Nueva tarea</h2>
         <form onSubmit=${submit}>
-          <div className="row"><input placeholder="ID (ej. T-30)" value=${form.task_id} onChange=${upd("task_id")} required /></div>
-          <div className="row"><input placeholder="Título" value=${form.title} onChange=${upd("title")} required /></div>
-          <div className="row"><textarea placeholder="Descripción (opcional)" value=${form.description} onChange=${upd("description")}></textarea></div>
-          <div className="row">
-            <input placeholder="Owner (o 'free')" value=${form.owner} onChange=${upd("owner")} />
-            <button className="primary" type="submit" disabled=${busy || !form.task_id || !form.title}>Crear</button>
+          <div className="row" style=${{ marginBottom: "6px" }}>
+            <input placeholder="ID (ej. T-30)" value=${form.task_id} onChange=${upd("task_id")} required style=${{ width: "110px" }} />
+            <input className="grow" placeholder="Título" value=${form.title} onChange=${upd("title")} required />
           </div>
-          <div className="muted">${msg}</div>
+          <div className="row" style=${{ marginBottom: "6px" }}>
+            <textarea placeholder="Descripción (opcional)" value=${form.description} onChange=${upd("description")}></textarea>
+          </div>
+          <div className="row">
+            <input placeholder="Owner (o 'free')" value=${form.owner} onChange=${upd("owner")} style=${{ width: "140px" }} />
+            <button className="primary" type="submit" disabled=${busy || !form.task_id || !form.title}>Crear</button>
+            <span className="muted">${msg}</span>
+          </div>
         </form>
       </div>
     `;
@@ -263,7 +273,7 @@
       finally { setBusy(false); }
     }
     return html`<article className="approval"><details>
-      <summary><b>${m.from_agent}</b> ${m.related_task && html`<span className="badge">${m.related_task}</span>`} · Revisar solicitud</summary>
+      <summary><b style=${{ color: "var(--amber)" }}>[SOLICITUD]</b> <b>${m.from_agent}</b> ${m.related_task && html`<span className="badge warn">${m.related_task}</span>`} · Revisar solicitud</summary>
       <p className="full-text">${esc((m.body || {}).text || (m.body || {}).detail || (m.body || {}).summary || "Solicitud del agente")}</p>
       <details><summary>Contenido completo</summary><pre>${JSON.stringify(m.body, null, 2)}</pre></details>
       <form onSubmit=${submit}>
@@ -307,10 +317,10 @@
         ${((overview.agents || []).length === 0) && html`<p className="muted">Sin agentes registrados.</p>`}
         ${(overview.agents || []).map((a) => html`
           <div className="row" key=${a.agent_id} style=${{ marginBottom: "6px" }}>
-            <span className="grow">${a.agent_id} <span className="muted">(${a.status})</span></span>
+            <span className="grow"><b>${a.agent_id}</b> <span className="muted">(${a.status})</span></span>
             ${pausedSet.has(a.agent_id)
               ? html`<span className="badge off">pausado</span>`
-              : html`<span className="badge">sin pausa</span>`}
+              : html`<span className="badge live">sin pausa</span>`}
             <button className=${pausedSet.has(a.agent_id) ? "ok" : "danger"}
                     disabled=${busy}
                     onClick=${() => toggle(a.agent_id, pausedSet.has(a.agent_id))}>
@@ -322,11 +332,62 @@
     `;
   }
 
-  // ---------- Paneles de agentes (solo lectura) ----------
+  // ---------- Paneles de agentes TUI en vivo + envío directo por celda ----------
   const PANE_STATES = {
     idle: ["esperando", ""], working: ["trabajando", "live"],
     blocked: ["pregunta pendiente", "warn"], dead: ["terminó", "off"],
   };
+
+  function PaneCell({ pane: p }) {
+    const [quickText, setQuickText] = useState("");
+    const [sending, setSending] = useState(false);
+    const [sentNote, setSentNote] = useState("");
+    const [label, tone] = PANE_STATES[p.state] || [p.state, ""];
+    const stuck = p.state === "idle" && p.pending > 0;
+    const targetAgent = p.agent || p.name;
+
+    async function sendQuick(e) {
+      e.preventDefault();
+      if (!quickText.trim()) return;
+      setSending(true); setSentNote("");
+      try {
+        await api("/room/api/message", {
+          method: "POST",
+          body: { to_agent: targetAgent, text: quickText, reply_needed: false, idempotency_key: crypto.randomUUID() },
+        });
+        setQuickText(""); setSentNote("✓");
+      } catch (err) {
+        setSentNote(err.error || "err");
+      } finally {
+        setSending(false);
+      }
+    }
+
+    return html`
+      <article className=${`pane ${stuck || p.state === "blocked" ? "needs-attention" : ""}`}>
+        <div className="row">
+          <b className="grow">${p.name}</b>
+          <span className="muted">${p.preset}</span>
+          <span className=${`badge ${stuck ? "warn" : tone}`}>${stuck ? "inactivo con mensajes" : label}</span>
+          ${p.pending > 0 && html`<span className="badge warn">${p.pending} sin procesar</span>`}
+          ${p.watcher === "running" && html`<span className="badge live">watcher activo</span>`}
+          ${p.watcher === "stopped" && html`<span className="badge off">watcher detenido</span>`}
+        </div>
+        <pre className="screen" aria-label=${`Pantalla de ${p.name}`}>${p.screen}</pre>
+        <form className="pane-foot" onSubmit=${sendQuick}>
+          <input
+            placeholder=${`Enviar mensaje a ${targetAgent}…`}
+            value=${quickText}
+            disabled=${sending}
+            onChange=${(e) => setQuickText(e.target.value)}
+          />
+          <button type="submit" className="primary" disabled=${sending || !quickText.trim()}>Enviar</button>
+          ${sentNote && html`<span className="muted">${sentNote}</span>`}
+        </form>
+      </article>
+    `;
+  }
+
   function PanesPanel() {
     const [panes, setPanes] = useState(null);
     const [error, setError] = useState("");
@@ -336,30 +397,19 @@
         .then(data => { if (alive) { setPanes(data.panes); setError(""); } })
         .catch(err => { if (alive && err.name !== "AbortError") setError(err.error || "No se pudieron leer los paneles"); });
       load();
-      // A hidden tab stops asking: each request captures every pane's screen.
       const timer = setInterval(() => { if (!document.hidden) load(); }, 2000);
       const onVisible = () => { if (!document.hidden) load(); };
       document.addEventListener("visibilitychange", onVisible);
       return () => { alive = false; clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
     }, []);
     return html`
-      <section className="card"><h2>Agentes en vivo</h2>
-        <p className="muted">Lo que ven las TUIs que maneja el coordinador. Solo lectura; se actualiza cada 2 s.</p>
+      <section className="card">
+        <h2>Agentes en vivo</h2>
+        <p className="muted">Terminales TUI activas supervisadas por el coordinador (lectura cada 2 s + mensaje directo por celda).</p>
         ${error && html`<p role="alert" className="error">${error}</p>`}
         ${panes && !panes.length && html`<p className="muted">Sin paneles abiertos. El coordinador los abre con agent_panes o agent-bus panes spawn.</p>`}
         <div className="panes">
-          ${(panes || []).map(p => {
-            const [label, tone] = PANE_STATES[p.state] || [p.state, ""];
-            const stuck = p.state === "idle" && p.pending > 0;
-            return html`<article className="pane" key=${p.name}>
-              <div className="row"><b className="grow">${p.name}</b><span className="muted">${p.preset}</span>
-                <span className=${`badge ${stuck ? "warn" : tone}`}>${stuck ? "inactivo con mensajes" : label}</span>
-                ${p.pending > 0 && html`<span className="badge">${p.pending} sin procesar</span>`}
-                ${p.watcher === "running" && html`<span className="badge live">watcher activo</span>`}
-                ${p.watcher === "stopped" && html`<span className="badge off">watcher detenido</span>`}</div>
-              <pre className="screen" aria-label=${`Pantalla de ${p.name}`}>${p.screen}</pre>
-            </article>`;
-          })}
+          ${(panes || []).map(p => html`<${PaneCell} key=${p.name} pane=${p} />`)}
         </div>
       </section>
     `;
@@ -389,8 +439,8 @@
       <div className="card">
         <h2>Mensaje al equipo</h2>
         <form onSubmit=${send}>
-          <div className="row">
-            <select value=${to} onChange=${(e) => setTo(e.target.value)}>
+          <div className="row" style=${{ marginBottom: "6px" }}>
+            <select className="grow" value=${to} onChange=${(e) => setTo(e.target.value)}>
               <option value="">Broadcast (todos)</option>
               ${agents.map((a) => html`<option key=${a.agent_id} value=${a.agent_id}>${a.agent_id}</option>`)}
             </select>
