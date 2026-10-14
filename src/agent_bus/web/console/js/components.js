@@ -13,10 +13,9 @@
     const [error, setError] = useState("");
     const [busy, setBusy] = useState(false);
 
-    async function submit(e) {
-      e.preventDefault();
+    async function signIn(token) {
       setBusy(true); setError("");
-      window.ConsoleAPI.setToken(input.trim());
+      window.ConsoleAPI.setToken(token);
       try {
         const me = await api("/auth/me");
         if (me.role !== "admin") throw { error: "Esta consola requiere una sesión administrativa" };
@@ -26,11 +25,21 @@
         setError(err.status === 401 ? "Token inválido o expirado" : (err.error || "Error de conexión"));
       } finally { setBusy(false); }
     }
+    function submit(e) { e.preventDefault(); signIn(input.trim()); }
+
+    // `agent-bus ui` opens #token=…: the fragment never reaches the server; drop it from the
+    // address bar and history at once.
+    useEffect(() => {
+      const token = new URLSearchParams(location.hash.slice(1)).get("token");
+      if (!token) return;
+      history.replaceState(null, "", location.pathname + location.search);
+      signIn(token);
+    }, []);
 
     return html`
       <form className="login" onSubmit=${submit}>
         <h1>⚡ agent-bus · Consola</h1>
-        <p className="muted">Introduce el token de sesión administrativa<br />(provisto con <code>agent-bus auth create --agent human --role admin --show-token</code>)</p>
+        <p className="muted">Abre la consola con <code>agent-bus ui</code> para entrar sin token,<br />o introduce un token de sesión administrativa</p>
         <input
           type="password"
           aria-label="Token de sesión administrativa"

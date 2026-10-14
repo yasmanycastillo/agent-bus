@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -207,6 +209,52 @@ def serve(host: str, port: int, run_daemon: bool, do_stop: bool, do_status: bool
     uvicorn.run("agent_bus.core.bus:create_app", host=host, port=port, factory=True, reload=False)
 
 
+CONSOLE_AGENT = "human"
+
+
+def _console_session(hub: str) -> dict[str, Any]:
+    """The operator's admin session: the saved one while the hub accepts it, else a new one."""
+    import httpx
+
+    from agent_bus.cli.auth_cmds import write_session
+    from agent_bus.security import credentials_dir, load_session
+    from agent_bus.validation import AuthenticationError
+
+    try:
+        session = load_session(CONSOLE_AGENT)
+        me = httpx.get(f"{hub}/auth/me", timeout=2.0, headers={
+            "Authorization": f"Bearer {session['token']}", "X-Agent-Bus-Project": session["project_id"]})
+        if me.status_code == 200 and me.json().get("role") == "admin":
+            return session
+    except AuthenticationError:
+        pass  # missing, expired or for another project
+    return write_session(CONSOLE_AGENT, "admin", 86400, credentials_dir() / f"{CONSOLE_AGENT}.json",
+                         replace=True)
+
+
+def _console_launcher(url: str, hub: str) -> str | None:
+    """A 0600 page beside the credentials that opens the console signed in, or None to sign in by hand.
+
+    The token goes in the URL fragment, which the browser never sends to the server, and in a
+    file rather than the browser's argv, which other local users can read (as Jupyter does).
+    """
+    import httpx
+
+    from agent_bus.security import credentials_dir
+
+    try:
+        session = _console_session(hub)
+        page = credentials_dir() / "console.html"
+        target = json.dumps(f"{url}#token={session['token']}")
+        fd = os.open(page, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            stream.write(f"<!DOCTYPE html><meta charset=\"utf-8\"><script>location.replace({target})</script>\n")
+    except (OSError, ValueError, httpx.HTTPError, click.ClickException) as exc:
+        click.echo(f"No se pudo iniciar sesión automáticamente ({exc}); entra con un token admin.")
+        return None
+    return page.as_uri()
+
+
 @app.command()
 @click.option("--host", default=None, help="Bind host (configured URL by default)")
 @click.option("--port", default=None, type=click.IntRange(1, 65535), help="Bind port")
@@ -241,7 +289,7 @@ def ui(host: str, port: int, no_browser: bool):
     if not no_browser:
         import webbrowser
 
-        webbrowser.open(url)
+        webbrowser.open(_console_launcher(url, f"http://{host}:{port}") or url)
 
 
 def _runtime_environment():

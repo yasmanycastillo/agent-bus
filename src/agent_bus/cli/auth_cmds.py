@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import uuid
+from typing import Any
 from pathlib import Path
 
 import click
@@ -38,13 +39,31 @@ def create(agent: str | None, provider: str | None, role: str, ttl: int, output:
             agent = f"{provider[:115]}-{uuid.uuid4().hex[:12]}"
         validate_id(agent)
         target = output or credentials_dir() / f"{agent}.json"
-        target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        # Reserve without following symlinks or replacing another session.
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except (OSError, AuthenticationError) as exc:
         raise click.ClickException(f"Cannot create credential file: {exc}") from None
+    session = write_session(agent, role, ttl, target, provider=provider)
+    click.echo(f"Session {session['session_id']} created for {agent} ({role})")
+    if quiet or not show_token:
+        click.echo(f"Credentials: {target}; expires at UNIX {session['expires_at']:.0f}")
+    else:
+        # El token es el secreto de autenticación: se muestra para copiarlo
+        # (p. ej. al login de la consola). Usa --quiet si tu terminal registra historia.
+        click.echo(f"Token: {session['token']}")
+        click.echo(f"Credentials: {target}; expires at UNIX {session['expires_at']:.0f}")
 
-    async def provision():
+
+def write_session(agent: str, role: str, ttl: int, target: Path, *, provider: str | None = None,
+                  replace: bool = False) -> dict[str, Any]:
+    """Create a session and its 0600 credential file; replace=True swaps an existing file atomically."""
+    try:
+        target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path = target.with_name(f".{target.name}.{uuid.uuid4().hex}") if replace else target
+        # Reserve without following symlinks or replacing another session.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise click.ClickException(f"Cannot create credential file: {exc}") from None
+
+    async def provision() -> dict[str, Any]:
         config = load_config()
         db = Database(config.database_path, project_id=config.bus.project_id)
         await db.initialize()
@@ -73,18 +92,13 @@ def create(agent: str | None, provider: str | None, role: str, ttl: int, output:
             os.close(fd)
         except OSError:
             pass
-        target.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
         if isinstance(exc, (AuthenticationError, ProjectMismatchError)):
             raise click.ClickException(str(exc)) from None
         raise
-    click.echo(f"Session {session['session_id']} created for {agent} ({role})")
-    if quiet or not show_token:
-        click.echo(f"Credentials: {target}; expires at UNIX {session['expires_at']:.0f}")
-    else:
-        # El token es el secreto de autenticación: se muestra para copiarlo
-        # (p. ej. al login de la consola). Usa --quiet si tu terminal registra historia.
-        click.echo(f"Token: {session['token']}")
-        click.echo(f"Credentials: {target}; expires at UNIX {session['expires_at']:.0f}")
+    if replace:
+        os.replace(path, target)
+    return session
 
 
 @auth.command("revoke")
