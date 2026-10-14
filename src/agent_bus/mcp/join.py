@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 from agent_bus.project import init_project, resolve_project_root
@@ -31,9 +32,13 @@ def workspace_root(project_path: str | None) -> Path:
 
 
 async def join_workspace(server, project_path: str | None) -> None:
-    """Bind the MCP session to project_path. Never create a credential in this source checkout."""
-    if server.session is not None:
+    """Bind the MCP session to project_path. Never create a credential in this source checkout.
+
+    An expired session (in memory or on disk) is renewed; a revoked one is not, so revocation sticks.
+    """
+    if server.session is not None and server.session["expires_at"] > time.time():
         return
+    server.session = None
     if not server.agent_id:
         raise AuthenticationError(
             "El MCP arrancó sin --agent. Vuelve a instalarlo; no crees una credencial a mano."
@@ -48,7 +53,7 @@ async def join_workspace(server, project_path: str | None) -> None:
     if not credential.is_file():
         init_project(root)
     _bind_environment(root)
-    if not credential.is_file():
+    if not credential.is_file() or _expired(credential):
         await _create_credential(server.agent_id)
     await _ensure_hub(root)
     _adopt(server, root, credential)
@@ -66,6 +71,13 @@ def _bind_environment(root: Path) -> None:
         os.environ.pop(key, None)
 
 
+def _expired(credential: Path) -> bool:
+    try:
+        return float(json.loads(credential.read_text(encoding="utf-8"))["expires_at"]) <= time.time()
+    except (OSError, ValueError, KeyError, TypeError):
+        return False  # Malformed: let load_session report it instead of silently replacing it.
+
+
 async def _create_credential(agent_id: str) -> None:
     from agent_bus.config import load_config
     from agent_bus.reputation.database import Database
@@ -73,7 +85,10 @@ async def _create_credential(agent_id: str) -> None:
 
     config = load_config()
     target = credentials_dir() / f"{agent_id}.json"
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    # Write beside the target and swap in atomically, so renewing never leaves a half-written file.
+    staging = target.with_name(f".{target.name}.new")
+    staging.unlink(missing_ok=True)
+    fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     database = Database(config.database_path, project_id=config.bus.project_id)
     await database.initialize()
     try:
@@ -84,10 +99,11 @@ async def _create_credential(agent_id: str) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        os.replace(staging, target)
     except BaseException:
         if fd is not None:
             os.close(fd)
-        target.unlink(missing_ok=True)
+        staging.unlink(missing_ok=True)
         raise
     finally:
         await database.close()
