@@ -90,7 +90,7 @@ def _explain_error(resp) -> str:
 def _ensure_global_config() -> None:
     config_dir = get_config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "data").mkdir(exist_ok=True)
+    (config_dir / "data").mkdir(mode=0o700, exist_ok=True)
 
     config_file = config_dir / "config.yaml"
     if not config_file.exists():
