@@ -1472,7 +1472,10 @@ class MessageBus:
             panes.use_project(self.project_id)
 
             # One capture per pane gives both its screen and its state.
-            return {"panes": await asyncio.to_thread(panes.list_panes, 50)}
+            items = await asyncio.to_thread(panes.list_panes, 50)
+            # An idle pane with unread messages is stuck, not done: the console tells them apart.
+            return {"panes": [{**item, "pending": await self.inbox.pending_count(item["agent"])}
+                              for item in items]}
 
         @self.app.get("/room/api/usage")
         async def room_usage():

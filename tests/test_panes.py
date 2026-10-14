@@ -143,7 +143,7 @@ async def test_coordinator_drives_panes_through_mcp(tmux, tmp_path, monkeypatch)
         assert await call(action="send", name="a", text="pwd") == (False, {"status": "ok", "name": "a"})
         wait_for(lambda: str(tmp_path) in panes.screen("a"))
         assert (await call(action="list"))[1]["panes"] == [
-            {"name": "a", "preset": "claude", "state": "idle", "watcher": "none"}]
+            {"name": "a", "preset": "claude", "agent": "a", "state": "idle", "watcher": "none"}]
         error, body = await call(action="spawn", name="a", preset="claude")
         assert error and body["code"] == "pane_error" and "already exists" in body["error"]
         error, body = await call(action="send", name="a")
@@ -171,6 +171,7 @@ async def test_console_shows_each_pane_screen_read_only(tmux, tmp_path):
     from agent_bus.core.inbox import InboxManager
     from agent_bus.core.registry import AgentRegistry
     from agent_bus.reputation.database import Database
+    from agent_bus.types import Envelope, MessageType
 
     db = Database(str(tmp_path / "bus.db"))
     await db.initialize()
@@ -182,6 +183,12 @@ async def test_console_shows_each_pane_screen_read_only(tmux, tmp_path):
         wait_for(lambda: "VISIBLE-IN-CONSOLE\n" in panes.screen("a", 50) + "\n")
         [pane] = (await client.get("/room/api/panes")).json()["panes"]
         assert pane["name"] == "a" and pane["state"] == "idle" and "VISIBLE-IN-CONSOLE" in pane["screen"]
+        # Idle with an unread message: stuck, not done. A pane without an identity answers to its name.
+        assert pane["agent"] == "a" and pane["pending"] == 0
+        await bus.inbox.deliver(Envelope(from_agent="lead", to_agent="a", message_type=MessageType.INBOX,
+                                         body={"text": "next"}))
+        [pane] = (await client.get("/room/api/panes")).json()["panes"]
+        assert pane["pending"] == 1
     await db.close()
 
 
@@ -268,7 +275,8 @@ def test_identified_pane_runs_its_watcher_until_closed(tmux, tmp_path, monkeypat
     panes.spawn("a", "sh", cwd=str(tmp_path), env={"AGENT_BUS_AGENT_ID": "claude-01"}, watch=True)
     wait_for(lambda: (tmp_path / "watcher.txt").exists() and (tmp_path / "watcher.txt").read_text())
     assert (tmp_path / "watcher.txt").read_text() == "claude-01:--agent claude-01 --tmux-agent a\n"
-    assert panes.list_panes() == [{"name": "a", "preset": "sh", "state": "idle", "watcher": "running"}]
+    assert panes.list_panes() == [{"name": "a", "preset": "sh", "agent": "claude-01", "state": "idle",
+                                   "watcher": "running"}]
     # The user's view attaches to the agents only, never to the watchers.
     assert panes.view_command()[-1] == "=agents"
 

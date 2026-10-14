@@ -154,8 +154,11 @@ def list_panes(screen_lines: int | None = None) -> list[dict[str, str]]:
     watchers = {name: "stopped" if dead == "1" else "running"
                 for name, dead in _windows(WATCHERS, "#{window_name}\t#{pane_dead}")}
     items = []
-    for name, preset, dead in _windows(SESSION, "#{window_name}\t#{@agent_bus_preset}\t#{pane_dead}"):
-        item = {"name": name, "preset": preset, "watcher": watchers.get(name, "none")}
+    fields = "#{window_name}\t#{@agent_bus_preset}\t#{pane_dead}\t#{@agent_bus_agent}"
+    for name, preset, dead, *agent in _windows(SESSION, fields):
+        # Panes spawned before the agent option existed answer to their name.
+        item = {"name": name, "preset": preset, "agent": agent[0] if agent and agent[0] else name,
+                "watcher": watchers.get(name, "none")}
         try:
             text = screen(name, max(screen_lines or 0, SCREEN_LINES)) if screen_lines or dead != "1" else ""
         except PaneError:
@@ -213,7 +216,8 @@ def spawn(name: str, preset: str, *, cwd: str | None = None, model: str | None =
     if prompt:
         command += [f"{spec.prompt_flag}={prompt}"] if spec.prompt_flag else ["--", prompt]
     cwd = cwd or os.getcwd()
-    _open_window(SESSION, name, cwd, command, "@agent_bus_preset", preset)
+    options = ("@agent_bus_preset", preset) + (("@agent_bus_agent", str(agent_id)) if agent_id else ())
+    _open_window(SESSION, name, cwd, command, *options)
     if watch:
         _tmux_ok("kill-window", "-t", _target(name, WATCHERS))  # a stopped one left by an earlier pane
         watcher = ["env", *unset, *identity, *WATCH_COMMAND, "--agent", str(agent_id), "--tmux-agent", name]

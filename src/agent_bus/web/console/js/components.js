@@ -341,9 +341,11 @@
         <div className="panes">
           ${(panes || []).map(p => {
             const [label, tone] = PANE_STATES[p.state] || [p.state, ""];
+            const stuck = p.state === "idle" && p.pending > 0;
             return html`<article className="pane" key=${p.name}>
               <div className="row"><b className="grow">${p.name}</b><span className="muted">${p.preset}</span>
-                <span className=${`badge ${tone}`}>${label}</span>
+                <span className=${`badge ${stuck ? "warn" : tone}`}>${stuck ? "inactivo con mensajes" : label}</span>
+                ${p.pending > 0 && html`<span className="badge">${p.pending} sin procesar</span>`}
                 ${p.watcher === "running" && html`<span className="badge live">watcher activo</span>`}
                 ${p.watcher === "stopped" && html`<span className="badge off">watcher detenido</span>`}</div>
               <pre className="screen" aria-label=${`Pantalla de ${p.name}`}>${p.screen}</pre>
