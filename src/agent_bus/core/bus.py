@@ -156,6 +156,11 @@ class CreateReviewRequest(BaseModel):
     created_at: datetime | None = None
 
 
+# The console ships with the package: without this a browser keeps running the JS of an
+# earlier install after an upgrade. The ETag makes each check a cheap 304.
+CONSOLE_CACHE = {"Cache-Control": "no-cache"}
+
+
 class MessageBus:
     def __init__(self, db: Database, registry: AgentRegistry, inbox: InboxManager, project_id: str | None = None, context_path=None, project_root=None) -> None:
         from pathlib import Path
@@ -1330,7 +1335,7 @@ class MessageBus:
         async def console_ui():
             """Consola React local; los datos requieren sesión admin."""
             html_path = Path(__file__).parent.parent / "web" / "console" / "index.html"
-            return HTMLResponse(html_path.read_text())
+            return HTMLResponse(html_path.read_text(), headers=CONSOLE_CACHE)
 
         @self.app.get("/console/static/{rel_path:path}")
         async def console_static(rel_path: str):
@@ -1347,7 +1352,8 @@ class MessageBus:
                 ".html": "text/html",
                 ".map": "application/json",
             }
-            return FileResponse(target, media_type=media.get(target.suffix, "application/octet-stream"))
+            return FileResponse(target, media_type=media.get(target.suffix, "application/octet-stream"),
+                                headers=CONSOLE_CACHE)
 
         @self.app.get("/room/api/pending-approvals")
         async def room_pending_approvals():

@@ -124,6 +124,7 @@ async def test_console_sirve_html_sin_auth(client):
     r = await client.get("/console")
     assert r.status_code == 200
     assert "agent-bus · Consola" in r.text
+    assert r.headers["cache-control"] == "no-cache"  # an upgrade must not leave the old JS running
     # El HTML debe cargar todas las piezas de la app: vendor, api, components y app.
     for src in ("vendor/react.js", "vendor/react-dom.js", "vendor/htm.js",
                 "js/api.js", "js/events.js", "js/components.js", "js/app.js", "styles.css"):
@@ -136,6 +137,7 @@ async def test_console_estaticos_disponibles(client):
         r = await client.get(f"/console/static/{rel}")
         assert r.status_code == 200, rel
         assert len(r.content) > 100
+        assert r.headers["cache-control"] == "no-cache" and r.headers["etag"], rel
 
 
 async def test_console_estatico_rechaza_escape(client):
