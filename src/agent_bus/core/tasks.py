@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -505,6 +506,45 @@ class TaskManager:
             return False
         await self.release(task_id)
         return True
+
+    async def abandoned_claims(self, cutoff: datetime) -> list[tuple[str, str, str]]:
+        """(task_id, owner, updated_at) of claims untouched since cutoff whose owner holds no live lock."""
+        rows = await self._db.conn.execute_fetchall(
+            """SELECT task_id, owner, updated_at FROM tasks t
+               WHERE status = 'in_progress' AND owner != 'free' AND updated_at < ?
+               AND NOT EXISTS (SELECT 1 FROM locks l WHERE l.locked_by = t.owner AND l.expires_at > ?)""",
+            (cutoff.isoformat(), time.time()),
+        )
+        return [(row["task_id"], row["owner"], row["updated_at"]) for row in rows]
+
+    async def expire_claim(self, task_id: str, owner: str, updated_at: str) -> bool:
+        """Free an abandoned claim unless it changed meanwhile or an attempt is still running."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        def transaction(connection: sqlite3.Connection) -> bool:
+            latest = connection.execute(
+                "SELECT state FROM runtime_attempts WHERE task_id = ? ORDER BY updated_at DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if latest is not None and latest["state"] == "started":
+                return False
+            audit = connection.execute(
+                """INSERT INTO audit_log
+                   (action, task_id, actor_agent_id, actor_session_id, previous_owner, new_owner, created_at)
+                   SELECT 'claim_expired', task_id, 'hub', 'hub', owner, 'free', ? FROM tasks
+                   WHERE task_id = ? AND owner = ? AND status = 'in_progress' AND updated_at = ?""",
+                (now, task_id, owner, updated_at),
+            )
+            if audit.rowcount == 0:
+                return False
+            # A claim requires every dependency done, so the task is ready again.
+            connection.execute(
+                "UPDATE tasks SET owner = 'free', status = 'pending', updated_at = ? WHERE task_id = ?",
+                (now, task_id),
+            )
+            return True
+
+        return await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
 
     async def release(self, task_id: str) -> None:
         """Return an in-progress task to the free pool after a launch that did not finish."""
