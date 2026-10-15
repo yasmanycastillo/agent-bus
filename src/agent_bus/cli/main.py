@@ -934,6 +934,10 @@ from agent_bus.cli.watch_cmds import watch  # noqa: E402
 
 app.add_command(watch)
 
+from agent_bus.cli.watchdog_cmds import watchdog  # noqa: E402
+
+app.add_command(watchdog)
+
 from agent_bus.cli.panes_cmds import panes  # noqa: E402
 
 app.add_command(panes)
