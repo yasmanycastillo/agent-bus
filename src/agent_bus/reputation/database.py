@@ -371,6 +371,9 @@ class Database:
             if descriptor is not None:
                 os.close(descriptor)
         self._connection.row_factory = aiosqlite.Row
+        if self._file_path is not None:
+            # Readers (SSE, console) must not block the single writer.
+            await self._connection.execute_fetchall("PRAGMA journal_mode=WAL")
         # In-memory databases have nothing to restore after a failed migration.
         snapshot = Path(str(self._file_path) + ".migration-snapshot") if self._file_path else None
         try:
