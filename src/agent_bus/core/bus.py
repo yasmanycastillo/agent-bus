@@ -250,7 +250,8 @@ class MessageBus:
                     or (request.method not in ("GET", "HEAD", "OPTIONS") and (
                         path.startswith("/skills/") or path.startswith("/kickoff/")
                         or path == "/project/context"
-                        or (len(parts) == 3 and parts[0] == "tasks" and parts[2] == "reassign")
+                        or (len(parts) == 3 and parts[0] == "tasks"
+                            and parts[2] in ("reassign", "evidence-policy"))
                     ))
                 )
                 if admin_only and not principal.is_admin:
@@ -885,6 +886,7 @@ class MessageBus:
                     strict=bool(body.get("strict", True)),
                     require_review=bool(body.get("require_review", True)),
                     require_sha_match=bool(body.get("require_sha_match", True)),
+                    require_distinct_provider=bool(body.get("require_distinct_provider", False)),
                 )
             except EvidenceError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=exc.status_code)

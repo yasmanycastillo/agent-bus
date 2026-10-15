@@ -356,8 +356,10 @@ def _hub_rule_detail(response: httpx.Response) -> str | None:
 
 
 class McpServer:
-    def __init__(self, bus_url: str | None = None, agent_id: str | None = None) -> None:
+    def __init__(self, bus_url: str | None = None, agent_id: str | None = None,
+                 provider: str | None = None) -> None:
         from agent_bus.config import get_bus_url, load_config
+        self.provider = provider
         self.bus_url = get_bus_url(bus_url)
         config = load_config()
         self.project_id = config.bus.project_id
@@ -804,10 +806,12 @@ class McpServer:
             return error("protocol_error", str(exc))
 
 
-async def run_mcp_server(bus_url: str | None = None, agent_id: str | None = None) -> None:
+async def run_mcp_server(
+    bus_url: str | None = None, agent_id: str | None = None, provider: str | None = None,
+) -> None:
     """Run one SDK connection; EOF and cancellation release its in-flight requests."""
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
-    server = McpServer(bus_url=bus_url, agent_id=agent_id).sdk_server()
+    server = McpServer(bus_url=bus_url, agent_id=agent_id, provider=provider).sdk_server()
     try:
         async with cancellable_stdio() as (read_stream, write_stream):
             await server.run(read_stream, write_stream, server.create_initialization_options())

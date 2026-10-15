@@ -712,6 +712,16 @@ class Database:
                     target_sha TEXT NOT NULL
                 )"""
             )
+            # Reviewer diversity: the provider behind a session, and the policy demanding it.
+            policy_columns = {row["name"] for row in await self.conn.execute_fetchall(
+                "PRAGMA table_info(evidence_policies)")}
+            if "require_distinct_provider" not in policy_columns:
+                await self.conn.execute(
+                    "ALTER TABLE evidence_policies ADD COLUMN require_distinct_provider INTEGER NOT NULL DEFAULT 0"
+                )
+            session_columns = {row["name"] for row in await self.conn.execute_fetchall("PRAGMA table_info(sessions)")}
+            if "provider" not in session_columns:
+                await self.conn.execute("ALTER TABLE sessions ADD COLUMN provider TEXT")
             await self.conn.commit()
         except BaseException:
             await self.conn.rollback()
