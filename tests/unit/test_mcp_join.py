@@ -92,3 +92,51 @@ async def test_bootstrap_renews_an_expired_session_and_credential(tmp_path, monk
     assert server.session["token"] != stale["token"]
     assert json.loads(credential.read_text())["token"] == server.session["token"]
     assert credential.stat().st_mode & 0o777 == 0o600
+
+
+async def test_bootstrap_agent_reaches_renewal_with_an_expired_session_in_memory(monkeypatch):
+    import time
+
+    from agent_bus.mcp import coordination
+
+    class Renewed(Exception):
+        pass
+
+    async def join(server, project_path):
+        raise Renewed(project_path)
+
+    monkeypatch.setattr("agent_bus.mcp.join.join_workspace", join)
+    server = _Server("grok")
+    server.session = {"agent_id": "grok", "expires_at": time.time() - 1}
+    with pytest.raises(Renewed):
+        await coordination.execute(server, "bootstrap_agent", {})
+
+
+async def test_expired_session_renews_in_its_own_project_without_project_path(tmp_path, monkeypatch):
+    import json
+    import time
+
+    for key in ("AGENT_BUS_PROJECT_ROOT", "AGENT_BUS_CONFIG_DIR", "AGENT_BUS_DATABASE_PATH",
+                "AGENT_BUS_URL", "AGENT_BUS_SESSION_FILE", "AGENT_BUS_PROJECT_ID"):
+        monkeypatch.delenv(key, raising=False)
+    project = tmp_path / "praxia"
+    project.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    async def no_hub(_root):
+        return None
+
+    monkeypatch.setattr("agent_bus.mcp.join._ensure_hub", no_hub)
+    server = _Server("grok")
+    await join_workspace(server, str(project))
+    credential = project / ".agent-bus" / "runtime" / "credentials" / "grok.json"
+    stale = {**json.loads(credential.read_text()), "expires_at": time.time() - 1}
+    credential.write_text(json.dumps(stale))
+    server.session = stale
+    monkeypatch.chdir(elsewhere)
+
+    await join_workspace(server, None)
+
+    assert json.loads(credential.read_text())["token"] == server.session["token"] != stale["token"]
+    assert not (elsewhere / ".agent-bus").exists()

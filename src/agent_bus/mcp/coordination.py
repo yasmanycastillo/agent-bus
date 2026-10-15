@@ -1,5 +1,6 @@
 """Compact MCP facade over the authenticated hub coordination workflows."""
 import logging
+import time
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
@@ -121,7 +122,8 @@ def recovery_hint(name: str, code: str, http_status: int | None = None) -> str:
 
 async def execute(server, name, args):
     payload = MODELS[name].model_validate(args).model_dump(exclude_none=True)
-    if name == "bootstrap_agent" and server.session is None:
+    # An expired in-memory session must reach join_workspace too, or the agent can never renew it.
+    if name == "bootstrap_agent" and (server.session is None or server.session.get("expires_at", float("inf")) <= time.time()):
         from agent_bus.mcp.join import join_workspace
         await join_workspace(server, payload.get("project_path"))
     if server.session is None and name != "get_agent_instructions":

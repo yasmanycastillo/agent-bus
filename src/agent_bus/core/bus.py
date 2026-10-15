@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
 import re
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import os
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -325,7 +326,9 @@ class MessageBus:
         @self.app.get("/agents")
         async def list_agents():
             agents = await self.registry.list_all()
-            return [a.model_dump(mode="json") for a in agents]
+            credentials = await self._credential_states()
+            return [{**a.model_dump(mode="json"), **credentials.get(a.agent_id, {"credential": "none"})}
+                    for a in agents]
 
         @self.app.get("/project/provider-sessions")
         async def provider_sessions():
@@ -1987,6 +1990,18 @@ class MessageBus:
         if not isinstance(agent_id, str) or not agent_id.strip():
             return None, JSONResponse({"error": "agent_id is required"}, status_code=422)
         return agent_id, None
+
+    async def _credential_states(self) -> dict[str, dict[str, Any]]:
+        """Why an agent went quiet: its newest unrevoked session is valid, expired, or all were revoked."""
+        rows = await self.db.conn.execute_fetchall(
+            "SELECT agent_id, MAX(CASE WHEN revoked = 0 THEN expires_at END) AS expires_at "
+            "FROM sessions WHERE project_id = ? GROUP BY agent_id", (self.project_id,),
+        )
+        now = time.time()
+        return {row["agent_id"]: {
+            "credential": "revoked" if row["expires_at"] is None else "valid" if row["expires_at"] > now else "expired",
+            "credential_expires_at": row["expires_at"],
+        } for row in rows}
 
     @staticmethod
     def _actor(request: Request, legacy_actor: str | None) -> str:

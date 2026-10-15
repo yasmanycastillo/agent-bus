@@ -99,6 +99,58 @@ def write_session(agent: str, role: str, ttl: int, target: Path, *, provider: st
     return session
 
 
+RESUME_TEXT = ("Tu credencial de agent-bus fue renovada. Llama bootstrap_agent con project_path "
+               "del proyecto, revisa my_pending_items y retoma tu trabajo. Responde cuando sigas.")
+
+
+@auth.command("renew")
+@click.option("--agent", required=True, help="Agente cuya credencial venció o se perdió.")
+@click.option("--ttl", type=click.IntRange(1, 2592000), default=86400, show_default=True)
+@click.option("--notify", is_flag=True, help="Avisar al agente por el bus para que retome su trabajo.")
+def renew(agent: str, ttl: int, notify: bool):
+    """Reissue an agent credential in place; its watcher and bootstrap_agent pick it up."""
+    try:
+        validate_id(agent)
+        target = credentials_dir() / f"{agent}.json"
+    except (OSError, AuthenticationError) as exc:
+        raise click.ClickException(f"Cannot renew credential: {exc}") from None
+
+    async def previous_provider() -> list[Any]:
+        config = load_config()
+        db = Database(config.database_path, project_id=config.bus.project_id)
+        await db.initialize()
+        try:
+            return list(await db.conn.execute_fetchall(
+                "SELECT provider FROM sessions WHERE agent_id = ? AND project_id = ? AND role = 'agent' "
+                "ORDER BY expires_at DESC LIMIT 1", (agent, config.bus.project_id)))
+        finally:
+            await db.close()
+
+    try:
+        rows = asyncio.run(previous_provider())
+    except ProjectMismatchError as exc:
+        raise click.ClickException(str(exc)) from None
+    if not rows:
+        raise click.ClickException(f"{agent} never had an agent session here; use auth create")
+    # Provider comes from the hub, not the file: a credential file is not trusted to name its own provider.
+    session = write_session(agent, "agent", ttl, target, provider=rows[0]["provider"], replace=True)
+    click.echo(f"Session {session['session_id']} renewed for {agent}; expires at UNIX {session['expires_at']:.0f}")
+    if not notify:
+        return
+    from agent_bus.security import sync_bus_client
+
+    try:
+        with sync_bus_client() as client:
+            response = client.post("/messages", json={
+                "to_agent": agent, "message_type": "inbox", "body": {"text": RESUME_TEXT},
+                "reply_needed": True, "idempotency_key": f"renew-{session['session_id']}",
+            })
+            response.raise_for_status()
+    except Exception as exc:
+        raise click.ClickException(f"Credential renewed, but the notice failed: {exc}") from None
+    click.echo(f"Notified {agent} to resume")
+
+
 @auth.command("revoke")
 @click.option("--session", "session_id", required=True)
 def revoke(session_id: str):
