@@ -161,6 +161,14 @@ class CreateReviewRequest(BaseModel):
 CONSOLE_CACHE = {"Cache-Control": "no-cache"}
 
 
+def _require_admin_for_test_changes(principal: Principal | None, tasks: list[TaskRequest]) -> None:
+    """An agent could otherwise create a task for itself that lets it rewrite tests."""
+    from agent_bus.worker.gatekeeper import allows_test_changes
+
+    if principal and not principal.is_admin and any(allows_test_changes(t.acceptance_criteria) for t in tasks):
+        raise HTTPException(403, "Only an administrator can allow test changes")
+
+
 def _claim_ttl() -> float:
     """Seconds an in_progress claim survives without any sign of life from its owner."""
     raw = os.environ.get("AGENT_BUS_CLAIM_TTL", "1800")
@@ -242,7 +250,8 @@ class MessageBus:
                     or (request.method not in ("GET", "HEAD", "OPTIONS") and (
                         path.startswith("/skills/") or path.startswith("/kickoff/")
                         or path == "/project/context"
-                        or (len(parts) == 3 and parts[0] == "tasks" and parts[2] == "reassign")
+                        or (len(parts) == 3 and parts[0] == "tasks"
+                            and parts[2] in ("reassign", "evidence-policy"))
                     ))
                 )
                 if admin_only and not principal.is_admin:
@@ -504,6 +513,7 @@ class MessageBus:
             principal = request.state.principal
             if principal and not principal.is_admin and req.owner not in ("free", principal.agent_id):
                 raise HTTPException(403, "Cannot assign tasks to another agent")
+            _require_admin_for_test_changes(principal, [req])
             try:
                 task = await self.tasks.create(
                     task_id=req.task_id,
@@ -528,6 +538,7 @@ class MessageBus:
             for t in req.tasks:
                 if principal and not principal.is_admin and t.owner not in ("free", principal.agent_id):
                     raise HTTPException(403, f"Cannot assign task {t.task_id} to another agent")
+            _require_admin_for_test_changes(principal, req.tasks)
             try:
                 tasks_dicts = [t.model_dump() for t in req.tasks]
                 tasks = await self.tasks.create_batch(tasks_dicts, operation_key=req.operation_key)
@@ -875,6 +886,7 @@ class MessageBus:
                     strict=bool(body.get("strict", True)),
                     require_review=bool(body.get("require_review", True)),
                     require_sha_match=bool(body.get("require_sha_match", True)),
+                    require_distinct_provider=bool(body.get("require_distinct_provider", False)),
                 )
             except EvidenceError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=exc.status_code)

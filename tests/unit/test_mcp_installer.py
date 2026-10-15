@@ -78,11 +78,11 @@ def test_install_mcp_config_clean_and_merge(tmp_path):
     path, cfg, existed = install_mcp_config("cursor", agent_id="alice", project_root=root)
     assert path.exists()
     assert not existed
-    assert cfg["args"] == ["mcp-server", "--agent", "alice"]
+    assert cfg["args"] == ["mcp-server", "--agent", "alice", "--provider", "cursor"]
 
     data = json.loads(path.read_text())
     assert "agent-bus" in data["mcpServers"]
-    assert data["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "alice"]
+    assert data["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "alice", "--provider", "cursor"]
 
     # 2. Pre-existing other server is preserved
     data["mcpServers"]["other-tool"] = {"command": "other", "args": []}
@@ -94,14 +94,14 @@ def test_install_mcp_config_clean_and_merge(tmp_path):
     )
     assert path2 == path
     assert existed2 is True
-    assert cfg2["args"] == ["mcp-server", "--agent", "bob", "--bus-url", "http://127.0.0.1:8420"]
+    assert cfg2["args"] == ["mcp-server", "--agent", "bob", "--provider", "cursor", "--bus-url", "http://127.0.0.1:8420"]
 
     updated_data = json.loads(path.read_text())
     # other-tool must NOT be wiped out!
     assert "other-tool" in updated_data["mcpServers"]
     assert updated_data["mcpServers"]["other-tool"]["command"] == "other"
     assert updated_data["mcpServers"]["agent-bus"]["args"] == [
-        "mcp-server", "--agent", "bob", "--bus-url", "http://127.0.0.1:8420"
+        "mcp-server", "--agent", "bob", "--provider", "cursor", "--bus-url", "http://127.0.0.1:8420"
     ]
 
 
@@ -178,7 +178,7 @@ def test_codex_install_keeps_the_rest_of_the_config(tmp_path, monkeypatch):
     path, cfg, existed = install_mcp_config("codex", scope="global")
     text = path.read_text(encoding="utf-8")
     assert existed
-    assert cfg["args"] == ["mcp-server", "--agent", "codex"]
+    assert cfg["args"] == ["mcp-server", "--agent", "codex", "--provider", "codex"]
     assert "# keep this comment" in text
     assert "# between" in text
     assert "# tail comment" in text
@@ -207,9 +207,9 @@ def test_agy_install_merges_mcp_servers(tmp_path, monkeypatch):
     path, cfg, existed = install_mcp_config("agy", agent_id="agy", scope="global")
     data = json.loads(path.read_text(encoding="utf-8"))
     assert not existed
-    assert cfg["args"] == ["mcp-server", "--agent", "agy"]
+    assert cfg["args"] == ["mcp-server", "--agent", "agy", "--provider", "agy"]
     assert data["mcpServers"]["agent-comms"]["command"] == "agent-comms"
-    assert data["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "agy"]
+    assert data["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "agy", "--provider", "agy"]
 
 
 def test_install_mcp_config_dry_run(tmp_path):
@@ -254,14 +254,14 @@ def test_cli_mcp_commands(tmp_path, monkeypatch):
     res_show = runner.invoke(app, ["mcp", "show", "--client", "cursor", "--agent", "agentX"])
     assert res_show.exit_code == 0
     show_json = json.loads(res_show.output)
-    assert show_json["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "agentX"]
+    assert show_json["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "agentX", "--provider", "cursor"]
 
     # 2. Install single client
     res_inst_one = runner.invoke(app, ["mcp", "install", "--client", "gemini", "--agent", "my-gemini"])
     assert res_inst_one.exit_code == 0
     assert (tmp_path / ".gemini" / "mcp_config.json").exists()
     gemini_data = json.loads((tmp_path / ".gemini" / "mcp_config.json").read_text())
-    assert gemini_data["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "my-gemini"]
+    assert gemini_data["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "my-gemini", "--provider", "gemini"]
 
     # 3. Install all clients
     res_inst_all = runner.invoke(app, ["mcp", "install", "--client", "all"])
@@ -293,4 +293,4 @@ def test_cli_mcp_commands(tmp_path, monkeypatch):
     res_agy = runner.invoke(app, ["mcp", "install", "--client", "agy", "--agent", "agy"])
     assert res_agy.exit_code == 0, res_agy.output
     agy_data = json.loads((tmp_path / ".gemini" / "mcp_config.json").read_text(encoding="utf-8"))
-    assert agy_data["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "agy"]
+    assert agy_data["mcpServers"]["agent-bus"]["args"] == ["mcp-server", "--agent", "agy", "--provider", "agy"]

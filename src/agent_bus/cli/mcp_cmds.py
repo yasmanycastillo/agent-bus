@@ -158,6 +158,6 @@ def uninstall(client: str, scope: str, is_global: bool, dry_run: bool):
 def show(client: str, agent_id: str | None, command: str, bus_url: str | None):
     """Mostrar el JSON de configuración MCP para inspección o copia manual."""
     target_agent = agent_id or DEFAULT_CLIENT_AGENTS.get(client, client)
-    cfg = build_mcp_server_config(target_agent, command=command, bus_url=bus_url)
+    cfg = build_mcp_server_config(target_agent, command=command, bus_url=bus_url, provider=client)
     wrapper = {"mcpServers": {"agent-bus": cfg}}
     click.echo(json.dumps(wrapper, indent=2))

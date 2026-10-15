@@ -49,7 +49,7 @@ async def join_workspace(server, project_path: str | None) -> None:
         init_project(root)
     _bind_environment(root)
     if not credential.is_file():
-        await _create_credential(server.agent_id)
+        await _create_credential(server.agent_id, getattr(server, "provider", None))
     await _ensure_hub(root)
     _adopt(server, root, credential)
 
@@ -66,7 +66,7 @@ def _bind_environment(root: Path) -> None:
         os.environ.pop(key, None)
 
 
-async def _create_credential(agent_id: str) -> None:
+async def _create_credential(agent_id: str, provider: str | None = None) -> None:
     from agent_bus.config import load_config
     from agent_bus.reputation.database import Database
     from agent_bus.security import SessionStore, credentials_dir
@@ -77,7 +77,7 @@ async def _create_credential(agent_id: str) -> None:
     database = Database(config.database_path, project_id=config.bus.project_id)
     await database.initialize()
     try:
-        session = await SessionStore(database, config.bus.project_id).create(agent_id, "agent", 86400)
+        session = await SessionStore(database, config.bus.project_id).create(agent_id, "agent", 86400, provider=provider)
         with os.fdopen(fd, "w") as stream:
             fd = None
             json.dump(session, stream)

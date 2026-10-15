@@ -20,15 +20,20 @@ class EvidenceLog:
         self._db = db
         self._store = ArtifactStore(db, project_id)
 
-    async def set_policy(self, task_id: str, *, strict: bool, require_review: bool, require_sha_match: bool) -> dict:
+    async def set_policy(
+        self, task_id: str, *, strict: bool, require_review: bool, require_sha_match: bool,
+        require_distinct_provider: bool = False,
+    ) -> dict:
         await self._require_task(task_id)
         await self._db.conn.execute(
-            """INSERT INTO evidence_policies (task_id, strict, require_review, require_sha_match)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO evidence_policies
+               (task_id, strict, require_review, require_sha_match, require_distinct_provider)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(task_id) DO UPDATE SET
                  strict=excluded.strict, require_review=excluded.require_review,
-                 require_sha_match=excluded.require_sha_match""",
-            (task_id, int(strict), int(require_review), int(require_sha_match)),
+                 require_sha_match=excluded.require_sha_match,
+                 require_distinct_provider=excluded.require_distinct_provider""",
+            (task_id, int(strict), int(require_review), int(require_sha_match), int(require_distinct_provider)),
         )
         await self._db.conn.commit()
         return await self.policy(task_id)
@@ -45,6 +50,7 @@ class EvidenceLog:
             "strict": bool(row["strict"]),
             "require_review": bool(row["require_review"]),
             "require_sha_match": bool(row["require_sha_match"]),
+            "require_distinct_provider": bool(row["require_distinct_provider"]),
         }
 
     async def add(

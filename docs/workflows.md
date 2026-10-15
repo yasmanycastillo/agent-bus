@@ -96,6 +96,8 @@ Antes de fusionar corre el `test_cmd` de implementation. Si ese paso no tiene co
 
 Si el checkout no es el SHA del intento, o la política de evidencia no se puede leer, tampoco hay merge. Un 404 de la política significa que la tarea no tiene política estricta; integration sí la tiene, porque el compilador la marcó `review: approved`.
 
+Solo un administrador puede cambiar la política (`POST /tasks/{id}/evidence-policy`). Con `"require_distinct_provider": true` en la política de una implementación, `record_verdict` rechaza al revisor si comparte proveedor con el implementador o si alguno de los dos no lo tiene registrado. El proveedor queda en la sesión: lo fija `mcp install --client`, que pasa `--provider` al MCP y a la credencial de `bootstrap_agent`, o `auth create --provider`. Las instalaciones anteriores tienen que reinstalar el MCP y volver a crear la credencial.
+
 Con suite verde y `approve` vigente, el merge usa ese SHA como segundo padre. La tarea de integration queda `done` aunque estuviera `pending`. Si el bus no puede guardar el `done`, el resultado no es éxito y una segunda llamada no vuelve a fusionar el mismo candidato.
 
 `GET /tasks/feature-development-run-1-integration` muestra `status` y, si quedó bloqueada, `blocked_reason`.

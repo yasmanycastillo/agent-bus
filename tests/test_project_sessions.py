@@ -67,7 +67,7 @@ async def test_legacy_sessions_limit_first_adoption(tmp_path, legacy_projects):
     try:
         for index, project in enumerate(legacy_projects):
             await db.conn.execute(
-                "INSERT INTO sessions VALUES (?, ?, 'alice', ?, 'agent', ?, 0)",
+                "INSERT INTO sessions (session_id, token_hash, agent_id, project_id, role, expires_at, revoked) VALUES (?, ?, 'alice', ?, 'agent', ?, 0)",
                 (str(index), str(index), project, time.time() + 3600),
             )
         await db.conn.commit()
