@@ -53,4 +53,6 @@ historial sin ACK, respuesta, corte/replay, filtros, pantalla de 390 px, salida 
 respuesta tardía de una sesión anterior. Los actores son de prueba, no modelos IA.
 
 La consola todavía no muestra worktrees ni commits integrados, y no dispone de
-métricas completas de consumo.
+métricas completas de consumo. El worker registra en `/usage` los tokens de cada
+turno de Claude y Codex, el costo que informa Claude y la duración. Es solo
+informativo: ningún tope detiene una tarea. Los demás proveedores quedan sin datos.
