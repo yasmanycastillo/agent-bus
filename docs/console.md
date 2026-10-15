@@ -1,21 +1,33 @@
 # Consola local de supervisión
 
-`/console` y `/room` sirven la misma aplicación. Se conserva `/room` para enlaces
-existentes y `/room/api/*` para compatibilidad; el HTML antiguo del Room se retiró.
-Los datos y las acciones requieren una sesión administrativa.
+`/console` y `/room` sirven la misma aplicación con diseño **Cyber-Ops Terminal Cockpit**
+en tres zonas operativas (`01 // TERMINALES DE AGENTES EN VIVO`, `02 // COLA DE INTERVENCIÓN & MATRIZ DE TAREAS`,
+`03 // STREAM SSE, RESERVAS & BROADCAST`). Se conserva `/room` para enlaces existentes y
+`/room/api/*` para compatibilidad; el HTML antiguo del Room se retiró. Los datos y las
+acciones requieren una sesión administrativa.
 
 ## Recorrido
 
 1. Abrir `agent-bus ui` y entrar con la credencial administrativa del proyecto.
    El token se guarda en `sessionStorage`: sobrevive al refresco, se borra al
    cerrar la pestaña o pulsar **Salir** y no se comparte con otras pestañas.
-2. Consultar el resumen de solicitudes, tareas bloqueadas y revisiones pendientes.
-3. Desplegar una solicitud para leer su contenido completo, elegir decisión y
+2. En la **Zona 01 (Terminales en vivo)**, inspeccionar la salida TUI de cada agente
+   cada 2 s, su estado (`trabajando`, `esperando`, `inactivo con mensajes`, `watcher activo`)
+   y enviarle mensajes directos desde el pie de cada celda. El panel de **Agentes y ejecución**
+   muestra el estado de su credencial (`credencial ok`, `credencial vencida`, `credencial revocada`)
+   para detectar de inmediato si un agente quedó en silencio por vencimiento de sesión
+   (renovable con `agent-bus auth renew --agent <id> --notify`).
+3. En la **Zona 02 (Intervención y Matriz de tareas)**, desplegar solicitudes pendientes
+   para leer su contenido completo, elegir decisión (`Aprobar`, `Rechazar`, `Responder`) y
    escribir una observación. Responder exige texto; cerrar el desplegable no envía nada.
-4. Crear o reasignar tareas. **Ver detalle** abre un panel con descripción,
-   criterios, dependencias, comando configurado y mensajes conservados.
-5. Consultar actividad por agente, tarea o texto; las reservas muestran propietario
-   y vencimiento. La pausa afecta a nuevas ejecuciones de workers.
+4. Alternar entre **`[TABLA COMPACTA]`** (por defecto, sin truncar títulos ni identificadores)
+   y **`[KANBAN 5-COL]`**, crear o reasignar tareas y detectar alertas de motivo de bloqueo
+   (`blocked_reason`), revisión detenida ($\ge 30\text{ min}$) o reclamo lento ($\ge 60\text{ min}$).
+   **Ver detalle** abre un diálogo con descripción, criterios, dependencias, comando configurado
+   y mensajes conservados.
+5. En la **Zona 03 (Stream SSE, Reservas & Broadcast)**, filtrar actividad en tiempo real por
+   agente, tarea o texto; auditar reservas activas con propietario y vencimiento; y consultar
+   el resumen de turnos CLI registrados en `/usage/summary`.
 
 El historial de una tarea incluye entregas ya confirmadas mientras los mensajes
 sigan conservados. Se pagina en grupos de 50; leerlo no envía ACK. La evidencia
@@ -52,7 +64,8 @@ Cubre rol admin, más de cinco solicitudes completas, creación y reasignación,
 historial sin ACK, respuesta, corte/replay, filtros, pantalla de 390 px, salida y
 respuesta tardía de una sesión anterior. Los actores son de prueba, no modelos IA.
 
-La consola todavía no muestra worktrees ni commits integrados, y no dispone de
-métricas completas de consumo. El worker registra en `/usage` los tokens de cada
-turno de Claude y Codex, el costo que informa Claude y la duración. Es solo
-informativo: ningún tope detiene una tarea. Los demás proveedores quedan sin datos.
+La consola todavía no muestra worktrees ni commits integrados, y el contrato
+`/room/api/usage` permanece congelado mientras se consolida el presupuesto por proyecto.
+Cuando el worker registra turnos CLI en `/usage`, el panel **Presupuesto y consumo**
+muestra el resumen acumulado de `/usage/summary` (turnos registrados, costo estimado USD,
+tokens cacheados y agente con mayor consumo). Es solo informativo: ningún tope detiene una tarea.

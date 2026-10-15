@@ -53,14 +53,30 @@
     `;
   }
 
-  // ---------- Métricas (contrato T-20) ----------
+  // ---------- Métricas (contrato T-20 + resumen de turnos CLI /usage/summary) ----------
   function UsagePanel() {
     const [usage, setUsage] = useState(null);
+    const [summary, setSummary] = useState(null);
     const [error, setError] = useState("");
 
     const load = useCallback(async () => {
-      try { setUsage(await api("/room/api/usage")); setError(""); }
-      catch (err) { setError(err.error || "sin datos"); }
+      try {
+        const [uRes, sRes] = await Promise.allSettled([
+          api("/room/api/usage"),
+          api("/usage/summary"),
+        ]);
+        if (uRes.status === "fulfilled") {
+          setUsage(uRes.value);
+          setError("");
+        } else {
+          setError((uRes.reason && uRes.reason.error) || "sin datos");
+        }
+        if (sRes.status === "fulfilled") {
+          setSummary(sRes.value);
+        }
+      } catch (err) {
+        setError(err.error || "sin datos");
+      }
     }, []);
     useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 
@@ -71,10 +87,19 @@
       return html`
         <div className="card">
           <h2>Presupuesto y consumo</h2>
-          <div className="unavailable">
-            Métricas no disponibles
-            <small>La medición de consumo aún no está disponible en este proyecto.</small>
-          </div>
+          ${summary && summary.records > 0 ? html`
+            <div className="row"><span className="grow">Turnos CLI registrados</span><b>${summary.records}</b></div>
+            <div className="row"><span className="grow">Costo estimado (USD)</span><b>$${Number(summary.estimated_cost_usd || 0).toFixed(4)}</b></div>
+            <div className="row"><span className="grow">Tokens cacheados (input)</span><span>${summary.cached_input_tokens || 0}</span></div>
+            ${summary.top_agent && html`
+              <div className="row"><span className="grow">Mayor consumo (${summary.top_agent.agent_id})</span><span>$${Number(summary.top_agent.estimated_cost_usd || 0).toFixed(4)}</span></div>
+            `}
+          ` : html`
+            <div className="unavailable">
+              Métricas no disponibles
+              <small>La medición de consumo aún no está disponible en este proyecto.</small>
+            </div>
+          `}
         </div>
       `;
     }
@@ -103,6 +128,20 @@
     in_review: [["done", "Completar"]], blocked: [["unblock", "Desbloquear"]], done: [],
   };
 
+  function taskStallInfo(task) {
+    if (!task || !task.updated_at) return null;
+    const ts = Date.parse(task.updated_at);
+    if (!Number.isFinite(ts)) return null;
+    const mins = (Date.now() - ts) / 60000;
+    if (task.status === "in_review" && mins >= 30) {
+      return `revisión detenida (${Math.floor(mins)}m)`;
+    }
+    if (task.status === "in_progress" && mins >= 60) {
+      return `reclamo lento (${Math.floor(mins)}m)`;
+    }
+    return null;
+  }
+
   function TaskCard({ task, agents, onChanged }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
@@ -121,6 +160,7 @@
       finally { setBusy(false); }
     }
     const others = agents.filter((a) => a.agent_id !== task.owner);
+    const stallLabel = taskStallInfo(task);
     return html`
       <div className="task">
         <div className="title">${esc(task.task_id)}: ${esc(task.title)}</div>
@@ -128,6 +168,12 @@
           ${task.owner && task.owner !== "free" ? `owner: ${task.owner}` : "sin asignar"}
           ${task.depends_on && task.depends_on.length ? ` · depende: ${task.depends_on.join(", ")}` : ""}
         </div>
+        ${(task.blocked_reason || stallLabel) && html`
+          <div className="meta" style=${{ display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" }}>
+            ${task.blocked_reason && html`<span className="badge warn">motivo: ${esc(task.blocked_reason)}</span>`}
+            ${stallLabel && html`<span className="badge warn">${stallLabel}</span>`}
+          </div>
+        `}
         <div className="task-actions">
           <${TaskDetail} task=${task} />
           <select aria-label=${`Reasignar ${task.task_id}`} value="" disabled=${busy || !others.length} onChange=${(e) => assign(e.target.value)}>
@@ -173,6 +219,7 @@
       <dialog className="task-detail" ref=${dialog} onClose=${() => setOpen(false)} aria-label=${`Detalle de ${task.task_id}`}>
       <header className="detail-header"><h3>${task.task_id}: ${task.title}</h3><button onClick=${() => setOpen(false)}>Cerrar detalle</button></header>
       <p className="full-text">${task.description || "Sin descripción."}</p>
+      ${task.blocked_reason && html`<p><b>Motivo de bloqueo:</b> ${esc(task.blocked_reason)}</p>`}
       <h4>Criterios de aceptación</h4><ul>${(task.acceptance_criteria || []).map((c, i) => html`<li key=${i}>${c}</li>`)}</ul>
       ${!(task.acceptance_criteria || []).length && html`<p className="muted">No especificados.</p>`}
       <p>Dependencias: ${(task.depends_on || []).join(", ") || "Ninguna"}</p>
@@ -294,6 +341,12 @@
   }
 
   // ---------- Workers ----------
+  const CRED_BADGES = {
+    valid: ["credencial ok", "live"],
+    expired: ["credencial vencida", "off"],
+    revoked: ["credencial revocada", "off"],
+  };
+
   function WorkersPanel({ overview, onChanged }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
@@ -315,19 +368,28 @@
         <h2>Agentes y ejecución</h2>
         ${error && html`<p role="alert" className="error">${error}</p>`}
         ${((overview.agents || []).length === 0) && html`<p className="muted">Sin agentes registrados.</p>`}
-        ${(overview.agents || []).map((a) => html`
-          <div className="row" key=${a.agent_id} style=${{ marginBottom: "6px" }}>
-            <span className="grow"><b>${a.agent_id}</b> <span className="muted">(${a.status})</span></span>
-            ${pausedSet.has(a.agent_id)
-              ? html`<span className="badge off">pausado</span>`
-              : html`<span className="badge live">sin pausa</span>`}
-            <button className=${pausedSet.has(a.agent_id) ? "ok" : "danger"}
-                    disabled=${busy}
-                    onClick=${() => toggle(a.agent_id, pausedSet.has(a.agent_id))}>
-              ${pausedSet.has(a.agent_id) ? "Reanudar" : "Pausar"}
-            </button>
-          </div>
-        `)}
+        ${(overview.agents || []).map((a) => {
+          const credInfo = CRED_BADGES[a.credential];
+          return html`
+            <div className="row" key=${a.agent_id} style=${{ marginBottom: "6px" }}>
+              <span className="grow"><b>${a.agent_id}</b> <span className="muted">(${a.status})</span></span>
+              ${credInfo && html`
+                <span className=${`badge ${credInfo[1]}`}
+                      title=${a.credential === "expired" ? `Renovar con: agent-bus auth renew --agent ${a.agent_id} --notify` : ""}>
+                  ${credInfo[0]}
+                </span>
+              `}
+              ${pausedSet.has(a.agent_id)
+                ? html`<span className="badge off">pausado</span>`
+                : html`<span className="badge live">sin pausa</span>`}
+              <button className=${pausedSet.has(a.agent_id) ? "ok" : "danger"}
+                      disabled=${busy}
+                      onClick=${() => toggle(a.agent_id, pausedSet.has(a.agent_id))}>
+                ${pausedSet.has(a.agent_id) ? "Reanudar" : "Pausar"}
+              </button>
+            </div>
+          `;
+        })}
       </div>
     `;
   }

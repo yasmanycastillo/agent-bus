@@ -447,185 +447,239 @@
       font-size: 1.02rem;
     }
 
-    /* Interactive Console Showcase */
+    /* Interactive Console Showcase — Cyber-Ops Terminal Cockpit */
     .console-frame {
-      background: #0f1419;
-      border: 1px solid #2d3742;
-      border-radius: 14px;
-      box-shadow: 0 28px 70px rgba(0, 0, 0, 0.65);
+      background: #05070a;
+      border: 1px solid #1a2433;
+      border-radius: 6px;
+      box-shadow: 0 28px 70px rgba(0, 0, 0, 0.78), 0 0 0 1px rgba(16, 185, 129, 0.12);
       overflow: hidden;
+      font-family: var(--mono);
     }
 
     .console-topbar {
       display: flex;
       align-items: center;
-      gap: 12px;
-      padding: 12px 18px;
-      background: #1a2129;
-      border-bottom: 1px solid #2d3742;
+      gap: 10px;
+      padding: 10px 16px;
+      background: linear-gradient(90deg, rgba(16, 185, 129, 0.1) 0%, #0a0e14 45%);
+      border-bottom: 1px solid #1a2433;
       flex-wrap: wrap;
     }
 
     .console-title {
       font-weight: 700;
-      font-size: 0.95rem;
+      font-size: 0.86rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #10b981;
       display: flex;
       align-items: center;
       gap: 8px;
     }
 
     .c-badge {
-      padding: 3px 9px;
-      border-radius: 10px;
-      font-size: 0.74rem;
+      padding: 2px 8px;
+      border-radius: 2px;
+      font-size: 0.68rem;
       font-weight: 600;
-      background: #2d3742;
-      color: #9fb0c2;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      background: rgba(148, 163, 184, 0.1);
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      color: #cbd5e1;
     }
 
-    .c-badge.live { background: #14352a; color: #66bb6a; }
-    .c-badge.warn { background: #3a3020; color: #ffb74d; }
-    .c-badge.info { background: rgba(79, 195, 247, 0.15); color: #4fc3f7; }
+    .c-badge.live {
+      background: rgba(16, 185, 129, 0.12);
+      border-color: rgba(16, 185, 129, 0.45);
+      color: #34d399;
+    }
+    .c-badge.warn {
+      background: rgba(245, 158, 11, 0.14);
+      border-color: rgba(245, 158, 11, 0.45);
+      color: #fbbf24;
+    }
+    .c-badge.info {
+      background: rgba(6, 182, 212, 0.14);
+      border-color: rgba(6, 182, 212, 0.4);
+      color: #22d3ee;
+    }
 
     .console-body {
-      padding: 18px;
+      padding: 14px;
+      background-image:
+        linear-gradient(rgba(16, 185, 129, 0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(16, 185, 129, 0.025) 1px, transparent 1px);
+      background-size: 24px 24px;
     }
 
     .console-summary {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
-      margin-bottom: 16px;
+      gap: 10px;
+      margin-bottom: 14px;
     }
 
     .stat-box {
-      background: #1a2129;
-      border: 1px solid #2d3742;
-      border-radius: 8px;
-      padding: 14px 16px;
+      background: #0a0e14;
+      border: 1px solid #1a2433;
+      border-left: 3px solid #10b981;
+      border-radius: 3px;
+      padding: 10px 14px;
     }
 
     .stat-box strong {
       display: block;
-      font-size: 1.6rem;
-      color: var(--accent);
-      line-height: 1.2;
+      font-size: 1.35rem;
+      color: #f8fafc;
+      line-height: 1.15;
     }
 
     .stat-box span {
-      font-size: 0.8rem;
-      color: var(--text-secondary);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #8b9bb4;
     }
 
     .console-grid {
       display: grid;
-      grid-template-columns: 1.35fr 1fr;
-      gap: 14px;
+      grid-template-columns: 1.05fr 1.25fr 0.9fr;
+      gap: 12px;
+      align-items: start;
     }
 
-    @media (max-width: 960px) {
+    @media (max-width: 1024px) {
       .console-grid { grid-template-columns: 1fr; }
       .console-summary { grid-template-columns: repeat(2, 1fr); }
     }
 
+    .c-zone {
+      background: rgba(10, 14, 20, 0.85);
+      border: 1px solid #1a2433;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .c-zone-head {
+      padding: 7px 11px;
+      background: rgba(15, 22, 32, 0.95);
+      border-bottom: 1px solid #1a2433;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      color: #10b981;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
     .c-card {
-      background: #1a2129;
-      border: 1px solid #2d3742;
-      border-radius: 8px;
-      padding: 14px;
+      background: #0a0e14;
+      border-bottom: 1px solid #1a2433;
+      padding: 11px;
+    }
+
+    .c-card:last-child {
+      border-bottom: none;
     }
 
     .c-card h3 {
-      font-size: 0.85rem;
+      font-size: 0.74rem;
       text-transform: uppercase;
       letter-spacing: 0.06em;
-      color: var(--accent);
-      margin-bottom: 12px;
+      color: #06b6d4;
+      margin-bottom: 9px;
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
 
-    .kanban-mini {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 10px;
-    }
-
-    @media (max-width: 680px) {
-      .kanban-mini { grid-template-columns: 1fr; }
-    }
-
-    .k-col h4 {
-      font-size: 0.72rem;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 8px;
-    }
-
-    .k-task {
-      background: #0f1419;
-      border: 1px solid #2d3742;
-      border-radius: 6px;
-      padding: 9px 10px;
-      margin-bottom: 8px;
-      font-size: 0.8rem;
-      transition: border-color 0.2s;
-    }
-
-    .k-task:hover {
-      border-color: var(--accent);
-    }
-
-    .k-task .t-title {
-      font-weight: 600;
-      margin-bottom: 4px;
-      color: var(--text);
-    }
-
-    .k-task .t-meta {
-      font-size: 0.72rem;
-      color: var(--muted);
+    .matrix-row {
+      background: #0f1620;
+      border: 1px solid #1a2433;
+      border-left: 2px solid #06b6d4;
+      border-radius: 2px;
+      padding: 7px 9px;
+      margin-bottom: 6px;
+      font-size: 0.74rem;
       display: flex;
       justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .matrix-row .t-title {
+      font-weight: 600;
+      color: #e2e8f0;
+    }
+
+    .matrix-row .t-meta {
+      font-size: 0.68rem;
+      color: #8b9bb4;
+      display: flex;
+      gap: 8px;
       align-items: center;
     }
 
     .pane-screen {
-      background: #070a0d;
-      border: 1px solid #2d3742;
-      border-radius: 6px;
-      padding: 12px;
-      font-size: 0.76rem;
-      line-height: 1.45;
-      color: #d7e0e8;
-      height: 225px;
+      background: #030508;
+      border: 1px solid #1a2433;
+      border-radius: 2px;
+      padding: 10px;
+      font-size: 0.71rem;
+      line-height: 1.42;
+      color: #a7f3d0;
+      height: 190px;
       overflow-y: auto;
       white-space: pre-wrap;
     }
 
     .pane-tabs {
       display: flex;
-      gap: 6px;
-      margin-bottom: 10px;
+      gap: 5px;
+      margin-bottom: 8px;
       flex-wrap: wrap;
     }
 
     .pane-tab {
-      background: #0f1419;
-      border: 1px solid #2d3742;
-      color: var(--text-secondary);
-      padding: 4px 10px;
-      border-radius: 6px;
-      font-size: 0.75rem;
+      background: #05070a;
+      border: 1px solid #1a2433;
+      color: #8b9bb4;
+      padding: 3px 8px;
+      border-radius: 2px;
+      font-size: 0.68rem;
+      font-family: var(--mono);
       font-weight: 600;
       cursor: pointer;
     }
 
     .pane-tab.active {
-      border-color: var(--accent);
-      color: var(--accent);
-      background: rgba(79, 195, 247, 0.1);
+      border-color: #10b981;
+      color: #10b981;
+      background: rgba(16, 185, 129, 0.12);
+    }
+
+    .pane-quickbar {
+      display: flex;
+      gap: 6px;
+      margin-top: 7px;
+      padding-top: 7px;
+      border-top: 1px dashed #1a2433;
+      font-size: 0.68rem;
+      color: #8b9bb4;
+      align-items: center;
+    }
+
+    .pane-quickbar span {
+      flex: 1;
+      background: #05070a;
+      border: 1px solid #1a2433;
+      padding: 3px 7px;
+      border-radius: 2px;
     }
 
     /* Feature Bento Grid */
@@ -1086,112 +1140,65 @@
     <section id="consola">
       <div class="container">
         <div class="section-header">
-          <span class="section-tag" data-i18n="console_tag">Supervisión Humana · /console</span>
-          <h2 class="section-title" data-i18n="console_title">Visibilidad total en tiempo real</h2>
+          <span class="section-tag" data-i18n="console_tag">Supervisión Humana · /console (Cyber-Ops Cockpit)</span>
+          <h2 class="section-title" data-i18n="console_title">Cabina de mando en 3 zonas sin puntos ciegos</h2>
           <p class="section-desc" data-i18n="console_desc">
-            Supervisa el tablero de tareas, inspecciona paneles de agentes en vivo por tmux, audita reservas de archivos con TTL y responde solicitudes de aprobación sin tocar la base de datos.
+            Inspecciona terminales TUI en vivo con envío rápido por celda, alterna entre matriz compacta y Kanban, verifica el estado de credenciales por agente, audita reservas activas y consulta el consumo de turnos CLI.
           </p>
         </div>
 
         <div class="console-frame">
           <div class="console-topbar">
             <div class="console-title">
-              <span>agent-bus · Consola</span>
-              <span class="c-badge live">● SSE Conectado</span>
+              <span>⚡ AGENT-BUS // COCKPIT · Consola</span>
+              <span class="c-badge live">Conectado</span>
+              <span class="c-badge warn">1 solicitud</span>
               <span class="c-badge info mono">cursor #418</span>
             </div>
             <div style="flex:1"></div>
-            <span class="c-badge warn">1 decisión humana pendiente</span>
-            <span class="c-badge mono">admin@mi-proyecto</span>
+            <span class="c-badge mono">admin (admin)</span>
+            <span class="c-badge mono">[RECARGAR]</span>
+            <span class="c-badge mono">[SALIR]</span>
           </div>
 
           <div class="console-body">
             <div class="console-summary">
               <div class="stat-box">
-                <strong>4</strong>
-                <span data-i18n="stat_agents">Agentes activos (Hermes, Claude, Codex, Grok)</span>
+                <strong style="color:#f59e0b">1</strong>
+                <span data-i18n="stat_agents">Solicitudes pendientes</span>
               </div>
               <div class="stat-box">
-                <strong style="color:var(--ok)">3</strong>
-                <span data-i18n="stat_locks">Reservas atómicas vigentes (TTL 300s)</span>
+                <strong style="color:#10b981">3</strong>
+                <span data-i18n="stat_locks">En curso / revisión</span>
               </div>
               <div class="stat-box">
-                <strong style="color:var(--warn)">2</strong>
-                <span data-i18n="stat_reviews">Entregas en revisión cruzada (SHA fijado)</span>
+                <strong>0</strong>
+                <span data-i18n="stat_reviews">Tareas bloqueadas</span>
               </div>
               <div class="stat-box">
-                <strong style="color:var(--purple)">100%</strong>
-                <span data-i18n="stat_gate">Gate de pruebas antes de integrar a main</span>
+                <strong style="color:#06b6d4">3</strong>
+                <span data-i18n="stat_gate">Reservas activas (TTL 300s)</span>
               </div>
             </div>
 
             <div class="console-grid">
-              <!-- Kanban Column Preview -->
-              <div class="c-card">
-                <h3>
-                  <span data-i18n="kanban_title">Tablero de Coordinación</span>
-                  <span class="mono" style="font-size:0.72rem; color:var(--muted)">ins-b67956c12926</span>
-                </h3>
-                <div class="kanban-mini">
-                  <div class="k-col">
-                    <h4>In Progress (2)</h4>
-                    <div class="k-task">
-                      <div class="t-title">B1 · Validación de esquema</div>
-                      <div class="t-meta">
-                        <span class="mono" style="color:var(--accent)">@claude</span>
-                        <span>🔒 2 archivos</span>
-                      </div>
-                    </div>
-                    <div class="k-task">
-                      <div class="t-title">B2 · Índices SQLite WAL</div>
-                      <div class="t-meta">
-                        <span class="mono" style="color:var(--accent)">@agy</span>
-                        <span>🔒 1 archivo</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="k-col">
-                    <h4>In Review (1)</h4>
-                    <div class="k-task" style="border-color: rgba(255,183,77,0.45)">
-                      <div class="t-title">B3 · Endpoint de Handoff</div>
-                      <div class="t-meta">
-                        <span class="mono" style="color:var(--warn)">rev: @grok</span>
-                        <span class="mono">971e9bc</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="k-col">
-                    <h4>Done / Integrated (2)</h4>
-                    <div class="k-task" style="border-color: rgba(102,187,106,0.4)">
-                      <div class="t-title">A1 · Diseño de Contratos</div>
-                      <div class="t-meta">
-                        <span class="mono" style="color:var(--ok)">✓ approved</span>
-                        <span class="mono">60f214d</span>
-                      </div>
-                    </div>
-                    <div class="k-task" style="border-color: rgba(102,187,106,0.4)">
-                      <div class="t-title">A2 · Suite de Aceptación</div>
-                      <div class="t-meta">
-                        <span class="mono" style="color:var(--ok)">✓ merged</span>
-                        <span class="mono">31a04f2</span>
-                      </div>
-                    </div>
-                  </div>
+              <!-- ZONA 01: Terminales de Agentes en Vivo + Estado de Credenciales -->
+              <div class="c-zone">
+                <div class="c-zone-head">
+                  <span>01 // TERMINALES DE AGENTES EN VIVO</span>
+                  <span style="color:#34d399">POLL 2S</span>
                 </div>
-              </div>
-
-              <!-- Live Agent Panes Preview -->
-              <div class="c-card">
-                <h3>
-                  <span data-i18n="panes_title">Agentes en Vivo (tmux aislado)</span>
-                  <span class="c-badge live">Solo lectura</span>
-                </h3>
-                <div class="pane-tabs">
-                  <button class="pane-tab active" data-pane="claude">@claude (implementer)</button>
-                  <button class="pane-tab" data-pane="codex">@codex (reviewer)</button>
-                  <button class="pane-tab" data-pane="grok">@grok (watcher)</button>
-                </div>
-                <pre class="pane-screen mono" id="paneScreen">[watch --cli tmux --agent claude]
+                <div class="c-card">
+                  <h3>
+                    <span data-i18n="panes_title">Agentes en Vivo (tmux aislado)</span>
+                    <span class="c-badge live">watcher activo</span>
+                  </h3>
+                  <div class="pane-tabs">
+                    <button class="pane-tab active" data-pane="claude">@claude (working)</button>
+                    <button class="pane-tab" data-pane="codex">@codex (review)</button>
+                    <button class="pane-tab" data-pane="grok">@grok (watch)</button>
+                  </div>
+                  <pre class="pane-screen mono" id="paneScreen">[watch --cli tmux --agent claude]
 ✓ bootstrap_agent({"project_path": "/srv/mi-proyecto"})
 ✓ claim_task({"task_id": "B1-schema-validation"})
 ✓ prepare_edit({
@@ -1209,6 +1216,140 @@ $ uv run pytest tests/test_schema.py -q
     "candidate_sha": "60f214d8a9c1e402b77f3910c218a9b2d3e4f5a6",
     "evidence": {"tests": "6 passed in 0.42s"}
   })</pre>
+                  <div class="pane-quickbar">
+                    <span>Enviar mensaje a claude…</span>
+                    <strong style="color:#10b981">[ENVIAR]</strong>
+                  </div>
+                </div>
+                <div class="c-card">
+                  <h3>
+                    <span>Agentes y ejecución</span>
+                    <span class="c-badge info">4 registrados</span>
+                  </h3>
+                  <div class="matrix-row" style="border-left-color:#10b981">
+                    <span class="t-title">claude <small style="color:#8b9bb4">(online)</small></span>
+                    <div class="t-meta">
+                      <span class="c-badge live">credencial ok</span>
+                      <span class="c-badge live">sin pausa</span>
+                    </div>
+                  </div>
+                  <div class="matrix-row" style="border-left-color:#10b981">
+                    <span class="t-title">codex <small style="color:#8b9bb4">(online)</small></span>
+                    <div class="t-meta">
+                      <span class="c-badge live">credencial ok</span>
+                      <span class="c-badge live">sin pausa</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ZONA 02: Cola de Intervención & Matriz de Tareas -->
+              <div class="c-zone">
+                <div class="c-zone-head">
+                  <span>02 // COLA DE INTERVENCIÓN &amp; MATRIZ DE TAREAS</span>
+                  <span style="color:#fbbf24">PRIORIDAD</span>
+                </div>
+                <div class="c-card">
+                  <h3>
+                    <span>Solicitudes pendientes (1)</span>
+                    <span class="c-badge warn">requiere respuesta</span>
+                  </h3>
+                  <div class="matrix-row" style="border-left-color:#f59e0b; background:rgba(245,158,11,0.06)">
+                    <div>
+                      <div class="t-title" style="color:#fbbf24">[SOLICITUD] hermes · ins-b67956c12926</div>
+                      <div style="font-size:0.7rem; color:#cbd5e1; margin-top:2px;">¿Autorizas exigir proveedor distinto (require_distinct_provider) en fase B?</div>
+                    </div>
+                    <span class="c-badge warn">Aprobar / Responder</span>
+                  </div>
+                </div>
+                <div class="c-card">
+                  <h3>
+                    <span data-i18n="kanban_title">Tareas (5)</span>
+                    <span class="c-badge live">[TABLA COMPACTA] · [KANBAN 5-COL]</span>
+                  </h3>
+                  <div class="matrix-row">
+                    <div>
+                      <div class="t-title">B1: Validación de esquema y bordes</div>
+                      <div class="t-meta">owner: claude · depende: A1</div>
+                    </div>
+                    <span class="c-badge info">En curso</span>
+                  </div>
+                  <div class="matrix-row">
+                    <div>
+                      <div class="t-title">B2: Índices SQLite WAL y expiración de reclamos</div>
+                      <div class="t-meta">owner: agy · depende: A1</div>
+                    </div>
+                    <span class="c-badge info">En curso</span>
+                  </div>
+                  <div class="matrix-row" style="border-left-color:#f59e0b">
+                    <div>
+                      <div class="t-title">B3: Endpoint transaccional de Handoff</div>
+                      <div class="t-meta">owner: grok · SHA: 971e9bc</div>
+                    </div>
+                    <span class="c-badge warn">En revisión</span>
+                  </div>
+                  <div class="matrix-row" style="border-left-color:#10b981">
+                    <div>
+                      <div class="t-title">A1: Diseño de Contratos y Suite Base</div>
+                      <div class="t-meta">owner: codex · SHA: 60f214d</div>
+                    </div>
+                    <span class="c-badge live">Hechas ✓</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ZONA 03: Stream SSE, Reservas & Consumo CLI -->
+              <div class="c-zone">
+                <div class="c-zone-head">
+                  <span>03 // STREAM SSE, RESERVAS &amp; BROADCAST</span>
+                  <span style="color:#22d3ee">LIVE</span>
+                </div>
+                <div class="c-card">
+                  <h3>
+                    <span>Actividad en vivo</span>
+                    <span class="c-badge info">SSE #418</span>
+                  </h3>
+                  <div class="matrix-row" style="border-left-color:#10b981">
+                    <span class="t-title">[HANDOFF] claude → grok</span>
+                    <span class="t-meta">B1 · 60f214d</span>
+                  </div>
+                  <div class="matrix-row" style="border-left-color:#06b6d4">
+                    <span class="t-title">[VERDICT] codex → approve</span>
+                    <span class="t-meta">A1 · merged</span>
+                  </div>
+                  <div class="matrix-row" style="border-left-color:#f59e0b">
+                    <span class="t-title">[WATCHDOG] ok (0 anomalías)</span>
+                    <span class="t-meta">sin costo IA</span>
+                  </div>
+                </div>
+                <div class="c-card">
+                  <h3>
+                    <span>Reservas de archivos (3)</span>
+                    <span class="c-badge live">project scope</span>
+                  </h3>
+                  <div class="matrix-row">
+                    <span class="t-title">src/schema.py</span>
+                    <span class="t-meta">claude · TTL 248s</span>
+                  </div>
+                  <div class="matrix-row">
+                    <span class="t-title">src/db.py</span>
+                    <span class="t-meta">agy · TTL 280s</span>
+                  </div>
+                </div>
+                <div class="c-card">
+                  <h3>
+                    <span>Presupuesto y consumo (/usage/summary)</span>
+                    <span class="c-badge info">18 turnos</span>
+                  </h3>
+                  <div class="matrix-row">
+                    <span class="t-title">Costo estimado CLI</span>
+                    <span class="t-meta" style="color:#34d399">$0.1420 USD</span>
+                  </div>
+                  <div class="matrix-row">
+                    <span class="t-title">Tokens cacheados (input)</span>
+                    <span class="t-meta">42,810 tok</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -1223,63 +1364,63 @@ $ uv run pytest tests/test_schema.py -q
           <span class="section-tag" data-i18n="arch_tag">Ingeniería del Protocolo</span>
           <h2 class="section-title" data-i18n="arch_title">Diseñado para evitar el caos multi-agente</h2>
           <p class="section-desc" data-i18n="arch_desc">
-            Sin sobrescrituras silenciosas, sin auto-aprobaciones y sin fugas de credenciales entre sesiones.
+            Sin sobrescrituras silenciosas, sin auto-aprobaciones, sin tests trucados y sin tareas huérfanas.
           </p>
         </div>
 
         <div class="bento-grid">
           <div class="bento-card">
             <div class="bento-icon">🔒</div>
-            <h3 data-i18n="feat1_title">Reservas Multiarchivo Atómicas</h3>
+            <h3 data-i18n="feat1_title">Reservas Atómicas y Expiración de Reclamos</h3>
             <p data-i18n="feat1_desc">
-              <code>prepare_edit</code> adquiere todos los archivos solicitados o ninguno. Si hay conflicto (409), no deja reservas parciales colgadas.
+              <code>prepare_edit</code> adquiere todos los archivos o ninguno (409). Además, si un agente cae en silencio sin latido ni lock activo, su reclamo expira automáticamente tras <code>AGENT_BUS_CLAIM_TTL</code>.
             </p>
-            <code class="bento-code mono">scope: "project" | "checkout" · TTL 300s</code>
+            <code class="bento-code mono">scope: "project" | "checkout" · Claim TTL 1800s</code>
           </div>
 
           <div class="bento-card">
             <div class="bento-icon">⚖️</div>
-            <h3 data-i18n="feat2_title">Separación Estricta de Roles</h3>
+            <h3 data-i18n="feat2_title">Revisión Cruzada y Proveedor Distinto</h3>
             <p data-i18n="feat2_desc">
-              Quien implementa nunca puede aprobar su propio código. El coordinador asigna revisiones cruzadas atadas al SHA exacto del commit candidato.
+              Quien implementa nunca aprueba su propio código. El veredicto valida el SHA exacto y opcionalmente exige que revisor e implementador pertenezcan a proveedores distintos (<code>require_distinct_provider</code>).
             </p>
-            <code class="bento-code mono">record_verdict(approve | changes_requested)</code>
+            <code class="bento-code mono">record_verdict · require_distinct_provider</code>
           </div>
 
           <div class="bento-card">
             <div class="bento-icon">🖥️</div>
-            <h3 data-i18n="feat3_title">Paneles en Vivo (<code class="mono" style="font-size:0.9em; color:var(--accent)">agent-bus panes</code>)</h3>
+            <h3 data-i18n="feat3_title">Paneles Aislados y Renovación en Caliente</h3>
             <p data-i18n="feat3_desc">
-              Abre Claude, AGY, Codex o Grok en un servidor tmux privado por proyecto sin heredar claves ajenas ni <code>SSH_AUTH_SOCK</code>.
+              Abre agentes en un servidor tmux privado sin filtrar claves ajenas. Si una credencial vence a mitad de corrida, renuévala en el acto con <code>auth renew --agent X --notify</code> o vía <code>bootstrap_agent</code>.
             </p>
-            <code class="bento-code mono">agent-bus panes spawn|view|answer</code>
+            <code class="bento-code mono">agent-bus auth renew --agent claude --notify</code>
           </div>
 
           <div class="bento-card">
             <div class="bento-icon">📦</div>
-            <h3 data-i18n="feat4_title">Handoff Transaccional con ACK</h3>
+            <h3 data-i18n="feat4_title">Handoff Transaccional y Ledger CLI</h3>
             <p data-i18n="feat4_desc">
-              <code>complete_handoff</code> guarda resumen, evidencia declarada, candidato SHA, publica avisos, confirma mensajes y libera reservas en una sola transacción.
+              <code>complete_handoff</code> guarda resumen, evidencia, SHA candidato, envía avisos, confirma mensajes y libera locks en una transacción. El worker registra tokens, caché y costo USD en <code>/usage/summary</code>.
             </p>
-            <code class="bento-code mono">Idempotencia por operation_key</code>
+            <code class="bento-code mono">Idempotencia por operation_key · /usage/summary</code>
           </div>
 
           <div class="bento-card">
-            <div class="bento-icon">⚡</div>
-            <h3 data-i18n="feat5_title">Listeners y Despertar en Vivo</h3>
+            <div class="bento-icon">🐕</div>
+            <h3 data-i18n="feat5_title">Watchdog Determinista sin Tokens IA</h3>
             <p data-i18n="feat5_desc">
-              <code>watch</code> atiende mensajes con <code>reply_needed=true</code> mediante turnos headless o escribiendo directamente en paneles vivos de tmux o muxel.
+              <code>agent-bus watchdog</code> inspecciona SQLite sin llamar modelos y alerta una sola vez por episodio ante revisiones detenidas (<code>review_stalled</code>), integrador caído, preguntas humanas o reclamos lentos.
             </p>
-            <code class="bento-code mono">agent-bus watch --agent grok --cli tmux</code>
+            <code class="bento-code mono">agent-bus watchdog --interval 60</code>
           </div>
 
           <div class="bento-card">
-            <div class="bento-icon">🧪</div>
-            <h3 data-i18n="feat6_title">Integrador Git Determinista</h3>
+            <div class="bento-icon">🛡️</div>
+            <h3 data-i18n="feat6_title">Integrador Anti-Reward-Hacking</h3>
             <p data-i18n="feat6_desc">
-              Verifica el SHA aprobado, ejecuta <code>uv run pytest -q</code> en el worktree candidato y fusiona a <code>main</code> solo si el gate pasa limpio.
+              Antes de correr <code>pytest</code>, el integrador restaura cualquier test preexistente modificado por el candidato, verifica que no existan leases activos sobre los archivos tocados y solo entonces fusiona a <code>main</code>.
             </p>
-            <code class="bento-code mono">agent-bus demo --report evidence.json</code>
+            <code class="bento-code mono">Test-rewrite guard + lease check en merge</code>
           </div>
         </div>
       </div>
@@ -1338,10 +1479,10 @@ $ uv run pytest tests/test_schema.py -q
           <div class="step-detail-panel">
             <div class="step-detail-header">
               <h3 class="mono" id="stepTitle">1. bootstrap_agent</h3>
-              <span class="c-badge info mono" id="stepBadge">Sesión Bearer por proyecto</span>
+              <span class="c-badge info mono" id="stepBadge">Sesión Bearer + auto-renew</span>
             </div>
             <p class="step-detail-desc" id="stepDesc">
-              Al conectar, el agente pasa el <code>project_path</code> del proyecto que coordina. El hub autentica la identidad, verifica compatibilidad de versión MCP/Hub y devuelve instrucciones operativas, agentes activos y conteo de tareas libres.
+              Al conectar, el agente pasa el <code>project_path</code> del proyecto que coordina. El hub autentica la identidad (o renueva su credencial local si expiró sin ser revocada), verifica compatibilidad MCP/Hub y devuelve instrucciones operativas, agentes activos y conteo de tareas libres.
             </p>
             <pre class="code-block mono" id="stepCode">{
   "tool": "bootstrap_agent",
@@ -1378,7 +1519,7 @@ $ uv run pytest tests/test_schema.py -q
           <a class="doc-link-card" href="first-run.md" data-doc="first-run.md">
             <div>
               <h4><span>Primer Uso y Operación</span> <span>→</span></h4>
-              <p>Instalación con uv, onboarding por proyecto, credenciales, listeners y despertar en muxel/tmux.</p>
+              <p>Instalación con uv, onboarding por proyecto, credenciales, listeners, watchdog y despertar en muxel/tmux.</p>
             </div>
             <span class="doc-path mono">docs/first-run.md</span>
           </a>
@@ -1386,7 +1527,7 @@ $ uv run pytest tests/test_schema.py -q
           <a class="doc-link-card" href="coordination-workflow.md" data-doc="coordination-workflow.md">
             <div>
               <h4><span>Coordinación MCP</span> <span>→</span></h4>
-              <p>Flujo compacto: pendientes, reservas multiarchivo con prepare_edit y entrega transaccional.</p>
+              <p>Flujo compacto: pendientes, reservas con prepare_edit, expiración de reclamos (AGENT_BUS_CLAIM_TTL) y handoff.</p>
             </div>
             <span class="doc-path mono">docs/coordination-workflow.md</span>
           </a>
@@ -1394,7 +1535,7 @@ $ uv run pytest tests/test_schema.py -q
           <a class="doc-link-card" href="workflows.md" data-doc="workflows.md">
             <div>
               <h4><span>Workflow Feature-Development</span> <span>→</span></h4>
-              <p>Compilar pasos, avanzar por capacidades, registrar veredictos sobre SHA e integrar con pytest.</p>
+              <p>Veredictos sobre SHA, require_distinct_provider, protección anti-reescritura de tests y merge con leases verificados.</p>
             </div>
             <span class="doc-path mono">docs/workflows.md</span>
           </a>
@@ -1409,8 +1550,8 @@ $ uv run pytest tests/test_schema.py -q
 
           <a class="doc-link-card" href="console.md" data-doc="console.md">
             <div>
-              <h4><span>Consola de Supervisión</span> <span>→</span></h4>
-              <p>Recorrido por /console, decisiones humanas, filtros de actividad, reservas y paneles en vivo.</p>
+              <h4><span>Consola Cyber-Ops Cockpit</span> <span>→</span></h4>
+              <p>Cabina en 3 zonas (/console), terminales en vivo, matriz/Kanban, estado de credenciales y resumen /usage/summary.</p>
             </div>
             <span class="doc-path mono">docs/console.md</span>
           </a>
@@ -1426,7 +1567,7 @@ $ uv run pytest tests/test_schema.py -q
           <a class="doc-link-card" href="locks.md" data-doc="locks.md">
             <div>
               <h4><span>Reservas de Archivos</span> <span>→</span></h4>
-              <p>Alcance project vs checkout, tokens de adquisición, renovación antes de vencer y liberación segura.</p>
+              <p>Alcance project vs checkout, tokens de adquisición, renovación antes de vencer y bloqueo de integración con leases activos.</p>
             </div>
             <span class="doc-path mono">docs/locks.md</span>
           </a>
@@ -1442,7 +1583,7 @@ $ uv run pytest tests/test_schema.py -q
           <a class="doc-link-card" href="authentication.md" data-doc="authentication.md">
             <div>
               <h4><span>Autenticación y Permisos</span> <span>→</span></h4>
-              <p>Provisionar, renovar y revocar sesiones Bearer por agente y aislamiento criptográfico.</p>
+              <p>Provisionar, renovar en caliente (auth renew --agent X --notify) y revocar sesiones Bearer por agente.</p>
             </div>
             <span class="doc-path mono">docs/authentication.md</span>
           </a>
@@ -1622,8 +1763,8 @@ $ uv run pytest tests/test_schema.py -q
     const stepsData = [
       {
         title: '1. bootstrap_agent',
-        badge: 'Sesión Bearer por proyecto',
-        desc: 'Al conectar, el agente pasa el project_path del proyecto que coordina. El hub autentica la identidad, verifica compatibilidad de versión MCP/Hub y devuelve instrucciones operativas, agentes activos y conteo de tareas libres.',
+        badge: 'Sesión Bearer + auto-renew',
+        desc: 'Al conectar, el agente pasa el project_path del proyecto que coordina. El hub autentica la identidad (o renueva su credencial local si expiró sin haber sido revocada), verifica compatibilidad MCP/Hub y devuelve instrucciones operativas, agentes activos y tareas libres.',
         code: `{
   "tool": "bootstrap_agent",
   "arguments": {
@@ -1642,8 +1783,8 @@ $ uv run pytest tests/test_schema.py -q
       },
       {
         title: '2. my_pending_items',
-        badge: 'Lectura sin ACK implícito',
-        desc: 'Devuelve mensajes pendientes en el inbox durable, el checkpoint event_cursor para wait_for_updates, las tareas asignadas y las reservas activas de la sesión. Leer nunca confirma un mensaje por accidente.',
+        badge: 'Lectura sin ACK + reaper de reclamos',
+        desc: 'Devuelve mensajes pendientes en el inbox durable, el checkpoint event_cursor para wait_for_updates, las tareas asignadas y las reservas activas. Además, el hub libera automáticamente reclamos abandonados sin latido tras AGENT_BUS_CLAIM_TTL.',
         code: `{
   "tool": "my_pending_items",
   "arguments": {
@@ -1702,9 +1843,9 @@ $ uv run pytest tests/test_schema.py -q
 }`
       },
       {
-        title: '5. record_verdict & integración',
-        badge: 'Revisión cruzada obligatoria',
-        desc: 'Un agente distinto al implementador inspecciona el commit exacto (candidate_sha). Si emite approve, el integrador ejecuta la suite de pruebas sobre ese SHA y fusiona a la rama objetivo; si pide changes_requested, reabre la tarea del implementador.',
+        title: '5. record_verdict & integración segura',
+        badge: 'Anti-reward-hacking + lease check',
+        desc: 'Un agente distinto (y opcionalmente de proveedor distinto con require_distinct_provider) revisa el candidate_sha. Si aprueba, el integrador restaura tests existentes que hayan sido alterados, verifica que no existan leases activos y corre pytest antes de fusionar.',
         code: `{
   "tool": "record_verdict",
   "arguments": {
@@ -1855,7 +1996,7 @@ $ uv run pytest tests/test_schema.py -q
         nav_features: 'Capacidades',
         nav_workflow: 'Flujo MCP',
         nav_docs: 'Documentación',
-        hero_badge: 'Nuevo en v0.3.1 · Paneles de agentes en vivo, handoff con SHA verificable y seguridad aislada',
+        hero_badge: 'Nuevo en v0.3.1 · Cabina Cyber-Ops, watchdog determinista, protección anti-reescritura de tests y renovación en caliente',
         hero_title: 'Coordina agentes de distintas herramientas <span class="accent-word">sobre un mismo proyecto</span>',
         hero_subtitle: 'Comparte mensajes y tareas, adquiere reservas multiarchivo atómicas en SQLite y exige revisión cruzada antes de integrar código. Quien revisa nunca es quien implementa.',
         cta_install: 'Instalar en 1 comando',
@@ -1864,12 +2005,12 @@ $ uv run pytest tests/test_schema.py -q
         tab_mcp: '1. Instalar MCP',
         tab_onboard: '2. Onboarding Proyecto',
         tab_demo: '3. Demo sin Modelos',
-        console_tag: 'Supervisión Humana · /console',
-        console_title: 'Visibilidad total en tiempo real',
-        console_desc: 'Supervisa el tablero de tareas, inspecciona paneles de agentes en vivo por tmux, audita reservas de archivos con TTL y responde solicitudes de aprobación sin tocar la base de datos.',
+        console_tag: 'Supervisión Humana · /console (Cyber-Ops Cockpit)',
+        console_title: 'Cabina de mando en 3 zonas sin puntos ciegos',
+        console_desc: 'Inspecciona terminales TUI en vivo con envío rápido por celda, alterna entre matriz compacta y Kanban, verifica el estado de credenciales por agente, audita reservas activas y consulta el consumo de turnos CLI.',
         arch_tag: 'Ingeniería del Protocolo',
         arch_title: 'Diseñado para evitar el caos multi-agente',
-        arch_desc: 'Sin sobrescrituras silenciosas, sin auto-aprobaciones y sin fugas de credenciales entre sesiones.',
+        arch_desc: 'Sin sobrescrituras silenciosas, sin auto-aprobaciones, sin tests trucados y sin tareas huérfanas.',
         flow_tag: 'Ciclo de Vida MCP',
         flow_title: 'Del encargo humano al merge verificado',
         flow_desc: 'Haz clic en cada etapa del flujo para inspeccionar las llamadas MCP reales y las garantías del hub SQLite.',
@@ -1882,7 +2023,7 @@ $ uv run pytest tests/test_schema.py -q
         nav_features: 'Capabilities',
         nav_workflow: 'MCP Workflow',
         nav_docs: 'Documentation',
-        hero_badge: 'New in v0.3.1 · Live agent panes, verifiable SHA handoffs, and isolated security',
+        hero_badge: 'New in v0.3.1 · Cyber-Ops Cockpit, deterministic watchdog, test-rewrite guard, and hot credential renewal',
         hero_title: 'Coordinate AI agents across tools <span class="accent-word">on the same codebase</span>',
         hero_subtitle: 'Share durable messages and tasks, acquire atomic multi-file locks in SQLite, and enforce cross-agent code review before merging. The reviewer is never the implementer.',
         cta_install: '1-Command Install',
@@ -1891,12 +2032,12 @@ $ uv run pytest tests/test_schema.py -q
         tab_mcp: '1. Install MCP',
         tab_onboard: '2. Project Onboarding',
         tab_demo: '3. Zero-Token Demo',
-        console_tag: 'Human Supervision · /console',
-        console_title: 'Real-time operational visibility',
-        console_desc: 'Monitor the task board, inspect live read-only tmux agent panes, audit file locks with TTLs, and answer human approval requests.',
+        console_tag: 'Human Supervision · /console (Cyber-Ops Cockpit)',
+        console_title: '3-Zone command cockpit with zero blind spots',
+        console_desc: 'Inspect live TUI panes with inline messaging, switch between compact matrix and 5-column Kanban, check per-agent credential state, audit file leases, and track CLI turn usage.',
         arch_tag: 'Protocol Engineering',
         arch_title: 'Built to prevent multi-agent chaos',
-        arch_desc: 'No silent file overwrites, no self-approvals, and no credential leaks across agent sessions.',
+        arch_desc: 'No silent file overwrites, no self-approvals, no rewritten existing tests, and no orphaned tasks.',
         flow_tag: 'MCP Lifecycle',
         flow_title: 'From human instruction to verified merge',
         flow_desc: 'Click each stage of the workflow to inspect real MCP payloads and SQLite hub guarantees.',

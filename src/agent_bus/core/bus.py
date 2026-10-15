@@ -1481,6 +1481,7 @@ class MessageBus:
             """Snapshot completo para el dashboard del War Room."""
             tasks = await self.tasks.list_all()
             agents = await self.registry.list_all()
+            credentials = await self._credential_states()
             locks = await self.locks.list_locks()
             decisions = await self.decisions.list_all()
             paused = set(await self.db.list_paused_workers())
@@ -1490,7 +1491,10 @@ class MessageBus:
                 human_inbox = []
             return {
                 "tasks": [t.model_dump(mode="json") for t in tasks],
-                "agents": [a.model_dump(mode="json") for a in agents],
+                "agents": [
+                    {**a.model_dump(mode="json"), **credentials.get(a.agent_id, {"credential": "none"})}
+                    for a in agents
+                ],
                 "locks": [lk.model_dump(mode="json", exclude={"acquisition_id"}) for lk in locks],
                 "decisions": [d.model_dump(mode="json") for d in decisions],
                 "paused_workers": sorted(paused),
