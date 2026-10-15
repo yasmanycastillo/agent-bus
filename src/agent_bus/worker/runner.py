@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
+from agent_bus.types import UNTRUSTED_NOTE, message_text, quote_untrusted
+
 _STDERR_TAIL_CHARS = 4000
 _STDERR_LINE_CHARS = 400
 
@@ -143,15 +145,11 @@ class AgentRunner:
 
         if message:
             parts.append("\n## High Priority Incoming Message (Reply Needed):")
-            parts.append(f"- From: {message.get('from_agent')}")
-            parts.append(f"- Type: {message.get('message_type')}")
-            body = message.get("body", {})
-            if isinstance(body, dict):
-                parts.append(f"- Content: {body.get('text', json.dumps(body))}")
-            else:
-                parts.append(f"- Content: {body}")
+            parts.append(f"- From: ⟦{quote_untrusted(message.get('from_agent'))}⟧")
+            parts.append(f"- Type: {quote_untrusted(message.get('message_type'))}")
+            parts.append(f"- Content ({UNTRUSTED_NOTE}): ⟦{message_text(message)}⟧")
             if message.get("related_task"):
-                parts.append(f"- Related Task: {message.get('related_task')}")
+                parts.append(f"- Related Task: {quote_untrusted(message.get('related_task'))}")
 
         if decisions:
             parts.append("\n## Recent Architecture Decisions (ADRs):")

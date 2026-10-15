@@ -276,6 +276,14 @@ class BranchIntegrator:
         if await self._candidate_is_merged(candidate_sha, target_branch):
             return await self._finish_recorded_merge(task_id, "candidate already on target")
 
+        # Leases are advisory while agents edit; publishing is the one point that
+        # must honor them. Checked before the tests: a deferral costs nothing.
+        leased = await self._foreign_leases(candidate_sha, target_sha, author_agent)
+        if leased:
+            error = f"Deferred: candidate changes files leased by another agent: {leased}"
+            return IntegratorResult(False, False, "deferred", output=error, error=error,
+                                    metadata={"candidate_sha": candidate_sha})
+
         # Build and test a temporary candidate worktree that combines the
         # pinned candidate SHA with the captured target SHA (never the
         # movable branch name), so the tested state is the state that will
@@ -1090,6 +1098,35 @@ class BranchIntegrator:
                 or await self._git_output("status", "--porcelain", cwd=worktree_dir)):
             raise ValueError("Git checkout changed or contains uncommitted files; validation rejected.")
         return {"sha": sha, "target_sha": target_sha}
+
+    async def _foreign_leases(self, candidate_sha: str, target_sha: str, author: str) -> str | None:
+        """Changed files another agent holds a live lease on in this checkout; fails closed."""
+        listed = await self._git_output("diff", "--name-only", f"{target_sha}...{candidate_sha}")
+        changed = set(listed.splitlines())
+        if not changed:
+            return None
+        try:
+            async with self._open_bus(5.0) as client:
+                response = await client.get("/locks")
+                response.raise_for_status()
+                locks = response.json()
+        except Exception as exc:
+            return f"lock list unavailable ({type(exc).__name__})"
+        if not isinstance(locks, list):
+            return "lock list unavailable (unexpected response)"
+        root = self.repo_dir.resolve()
+        # A lease inside another agent's worktree protects its own copy, not the target.
+        worktrees = root / ".worktrees"
+        held = []
+        for lock in locks:
+            path = Path(str(lock.get("file_path") or ""))
+            if (lock.get("locked_by") == author or not path.is_absolute()
+                    or not path.is_relative_to(root) or path.is_relative_to(worktrees)):
+                continue
+            relative = path.relative_to(root).as_posix()
+            if relative in changed:
+                held.append(f"{relative} ({lock.get('locked_by')} until {lock.get('expires_at')})")
+        return ", ".join(sorted(held)) or None
 
     async def _evidence_gap(self, task_id: str, candidate_sha: str, target_sha: str, verdict: str) -> str | None:
         try:

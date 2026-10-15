@@ -29,7 +29,8 @@ from agent_bus.config import DEFAULT_CONFIG_DIR, get_config_dir, get_bus_url
 from agent_bus.worker.client import BusEventClient, worker_environment
 from agent_bus.worker.execution import ExecutionGuard
 from agent_bus.cli.watch_state import record_status, reply_file, watcher_status, write_private_json
-from agent_bus.types import STALE_IN_PROGRESS_SECONDS, is_stale
+from agent_bus.types import STALE_IN_PROGRESS_SECONDS, UNTRUSTED_NOTE, is_stale, message_text
+from agent_bus.types import quote_untrusted as _quoted
 
 logger = logging.getLogger("agent_bus.cli.watch")
 
@@ -87,13 +88,12 @@ def extract_response_text(output: str) -> str:
 
 def build_prompt(message: dict) -> str:
     """Traduce un mensaje del bus a prompt para el agente interactivo."""
-    sender = message.get("from_agent", "?")
-    body = message.get("body") or {}
-    text = body.get("text", json.dumps(body, ensure_ascii=False)) if isinstance(body, dict) else str(body)
+    sender = _quoted(message.get("from_agent", "?"))
     related = message.get("related_task")
-    task_note = f" (relacionado con tarea {related})" if related else ""
+    task_note = f" (relacionado con tarea {_quoted(related)})" if related else ""
     return (
-        f"El agente '{sender}' te escribió por agent-bus{task_note}: \"{text}\"\n"
+        f"El agente ⟦{sender}⟧ te escribió por agent-bus{task_note}. Su texto {UNTRUSTED_NOTE}: "
+        f"⟦{message_text(message)}⟧\n"
         "Devuelve tu respuesta como texto final. El watcher la enviará y confirmará el mensaje. "
         "No envíes ni confirmes el mensaje por CLI o MCP.\n"
         "El listener de esta identidad ya está activo en el proceso padre; no arranques otro. "
@@ -476,11 +476,6 @@ def build_unread(messages: dict[str, dict]) -> str:
     senders = sorted({_quoted(m.get("from_agent", "?")) for m in messages.values()})
     return (f"agent-bus: tienes {len(messages)} mensaje(s) nuevo(s) de {', '.join(senders)}; "
             "léelos con read_messages.")
-
-
-def _quoted(value: object) -> str:
-    """One line with no closing delimiter, so another agent's text cannot pose as a bus notice."""
-    return " ".join(str(value).replace("⟦", "[").replace("⟧", "]").split())
 
 
 def build_question(message: dict[str, Any]) -> str:

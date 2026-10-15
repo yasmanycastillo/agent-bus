@@ -169,6 +169,17 @@ def unavailable_bus_url(allowed_test_ports):
             allowed_test_ports.discard(port)
 
 
+@pytest.fixture(autouse=True)
+def no_lease_check(monkeypatch):
+    """Integrator tests use stub buses without /locks; tests/test_integrator_leases.py restores the check."""
+    from agent_bus.worker.integrator import BranchIntegrator
+
+    async def no_leases(self, *args):
+        return None
+
+    monkeypatch.setattr(BranchIntegrator, "_foreign_leases", no_leases)
+
+
 @pytest.fixture
 def pinned_checkout(monkeypatch):
     """A clean git checkout already pinned to fixed SHAs, for tests of review and retry policy.
