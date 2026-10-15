@@ -297,12 +297,8 @@ async def _implementation_attempt(bus: MessageBus, task_id: str) -> dict | None:
 
 
 async def _run_tests(cmd: list[str], cwd: str) -> tuple[bool, str]:
-    process = await asyncio.create_subprocess_exec(
-        *cmd, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    out, err = await process.communicate()
-    output = out.decode(errors="replace") + err.decode(errors="replace")
-    return process.returncode == 0, output
+    from agent_bus.worker.integrator import run_test_command
+    return await run_test_command(cmd, cwd)
 
 
 async def _rev_parse(cwd: str, *args: str) -> str:

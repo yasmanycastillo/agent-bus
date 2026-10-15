@@ -700,6 +700,9 @@ async def test_entire_attempt_retries_real_contention(db, monkeypatch, direction
     await anchor.commit()
     write = direction == 'reader_writer'
     memory = not (await anchor.execute_fetchall('PRAGMA database_list'))[0][2]
+    if not memory:
+        # WAL removes reader/writer contention; rollback journal recreates it.
+        await anchor.execute_fetchall('PRAGMA journal_mode=DELETE')
     if write:
         await anchor.execute('BEGIN')
         await anchor.execute_fetchall('SELECT * FROM reputation')

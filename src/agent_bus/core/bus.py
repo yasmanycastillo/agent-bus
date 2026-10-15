@@ -6,7 +6,7 @@ import sqlite3
 import re
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Annotated, Literal
@@ -161,6 +161,16 @@ class CreateReviewRequest(BaseModel):
 CONSOLE_CACHE = {"Cache-Control": "no-cache"}
 
 
+def _claim_ttl() -> float:
+    """Seconds an in_progress claim survives without any sign of life from its owner."""
+    raw = os.environ.get("AGENT_BUS_CLAIM_TTL", "1800")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 1800.0
+    return value if value > 0 else 1800.0
+
+
 class MessageBus:
     def __init__(self, db: Database, registry: AgentRegistry, inbox: InboxManager, project_id: str | None = None, context_path=None, project_root=None) -> None:
         from pathlib import Path
@@ -182,6 +192,7 @@ class MessageBus:
         self.locks = LockManager(db)
         self.skills = SkillRegistry(db)
         self.kickoff = KickoffManager(db)
+        self._started_at = datetime.now(timezone.utc)
         self.app = FastAPI(title="agent-bus", version=__version__)
         self._sse_subscribers: dict[str, set[asyncio.Event]] = defaultdict(set)
         self._global_sse_subscribers: set[asyncio.Event] = set()
@@ -535,6 +546,7 @@ class MessageBus:
             from agent_bus.types import TaskStatus
 
             ts = TaskStatus(status) if status else None
+            await self._reap_abandoned_claims()
             task_list = await self.tasks.list_all(status=ts, owner=owner, ready_only=ready_only)
             return [t.model_dump(mode="json") for t in task_list]
 
@@ -559,6 +571,7 @@ class MessageBus:
         @self.app.post("/tasks/{task_id}/claim")
         async def claim_task(task_id: str, req: ClaimRequest, request: Request):
             req.agent_id = self._actor(request, req.agent_id)
+            await self._reap_abandoned_claims()
             refusal = await self._claim_refusal(task_id, req.agent_id)
             if refusal is not None:
                 return refusal
@@ -1755,6 +1768,20 @@ class MessageBus:
         if scheme.lower() != "bearer" or not token or " " in token:
             raise AuthenticationError("Valid bearer session required")
         return await self.sessions.authenticate(token), token
+
+    async def _reap_abandoned_claims(self) -> None:
+        """Return to pending the claims of owners with no heartbeat, live lock or running attempt.
+
+        Runs lazily where agents look for work, like the registry's heartbeat check.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=_claim_ttl())
+        if self._started_at > cutoff:
+            return  # Presence is rebuilt from heartbeats after a restart.
+        for task_id, owner, updated_at in await self.tasks.abandoned_claims(cutoff):
+            agent = await self.registry.get(owner)
+            if agent is not None and agent.last_heartbeat > cutoff:
+                continue
+            await self.tasks.expire_claim(task_id, owner, updated_at)
 
     async def _claim_refusal(self, task_id: str, agent_id: str) -> JSONResponse | None:
         task = await self.tasks.get(task_id)

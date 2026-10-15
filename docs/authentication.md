@@ -82,7 +82,7 @@ Para conectar un cliente y consultar las herramientas disponibles, sigue [config
 | Panel humano y eventos globales | No | Sí |
 | Registrar presencia o heartbeat | Como su propia identidad | Sin conferir confianza a terceros |
 
-Al crear una tarea, `owner=free` deja el estado `pending`; asignarla a un agente establece `in_progress`. Claim solo admite tareas libres y pendientes. Finalizar requiere propiedad actual y `in_progress`; repetir la finalización o reasignar una tarea terminada produce conflicto. Handoff entrega trabajo no terminado a otro agente; devolverlo al pool `free` requiere reasignación administrativa y restablece `pending`.
+Al crear una tarea, `owner=free` deja el estado `pending`; asignarla a un agente establece `in_progress`. Claim solo admite tareas libres y pendientes. Finalizar requiere propiedad actual y `in_progress`; repetir la finalización o reasignar una tarea terminada produce conflicto. Handoff entrega trabajo no terminado a otro agente; devolverlo al pool `free` requiere reasignación administrativa y restablece `pending`. El hub también lo devuelve solo si el claim queda abandonado: sin cambios en la tarea durante `AGENT_BUS_CLAIM_TTL` segundos (1800 por defecto), el titular sin heartbeat ni lock vigente en ese plazo y ningún intento de runtime en curso. Lo comprueba al listar o reclamar tareas y lo audita como `claim_expired`.
 
 Las respuestas distinguen autenticación inválida (`401`), falta de permisos (`403`) y conflicto de estado (`409`). La autorización de propiedad se comprueba dentro de la operación SQL para que una reasignación invalide al antiguo propietario.
 

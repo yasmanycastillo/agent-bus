@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
+import signal
 import tempfile
 import uuid
 from dataclasses import dataclass, field
@@ -30,6 +32,38 @@ logger = logging.getLogger("agent_bus.worker.integrator")
 # explicitly allowed by the dirty-target safety gate. Any other untracked path
 # or any tracked modification still blocks integration.
 ALLOWED_UNTRACKED_OPERATIONAL_DIRS = frozenset({".agent-bus/", ".worktrees/"})
+
+
+def _test_timeout() -> float:
+    raw = os.environ.get("AGENT_BUS_TEST_TIMEOUT", "1800")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 1800.0
+    return value if value > 0 else 1800.0
+
+
+async def run_test_command(cmd: list[str], cwd: str, timeout: float | None = None) -> tuple[bool, str]:
+    """Run a test command; a hung suite fails instead of stalling the serialized queue."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=cwd,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,  # Own process group: kill pytest workers too.
+    )
+    limit = timeout if timeout is not None else _test_timeout()
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=limit)
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        return (False, f"Test command timed out after {limit:g}s: {' '.join(cmd)}")
+    output = out.decode("utf-8", errors="replace") + err.decode("utf-8", errors="replace")
+    return (proc.returncode == 0, output)
 
 
 def _blocking_target_status(porcelain_status: str) -> str:
@@ -172,15 +206,7 @@ class BranchIntegrator:
         """Runs test suite inside candidate worktree directory."""
         cmd = test_cmd or ["uv", "run", "pytest", "-q"]
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(worktree_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout_bytes, stderr_bytes = await proc.communicate()
-            output = stdout_bytes.decode("utf-8", errors="replace") + stderr_bytes.decode("utf-8", errors="replace")
-            return (proc.returncode == 0, output)
+            return await run_test_command(cmd, str(worktree_dir))
         except Exception as exc:
             return (False, str(exc))
 
