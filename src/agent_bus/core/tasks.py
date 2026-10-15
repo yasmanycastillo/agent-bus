@@ -544,7 +544,7 @@ class TaskManager:
             )
             return True
 
-        return await self._db.transaction(transaction)  # type: ignore[no-untyped-call]
+        return bool(await self._db.transaction(transaction))  # type: ignore[no-untyped-call]
 
     async def release(self, task_id: str) -> None:
         """Return an in-progress task to the free pool after a launch that did not finish."""
