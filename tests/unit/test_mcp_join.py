@@ -63,3 +63,32 @@ async def test_bootstrap_creates_the_credential_in_the_named_project(tmp_path, m
     pid_file = project / ".agent-bus" / "runtime" / "bus.pid"
     if pid_file.exists():
         os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
+
+
+async def test_bootstrap_renews_an_expired_session_and_credential(tmp_path, monkeypatch):
+    import json
+    import time
+
+    for key in ("AGENT_BUS_PROJECT_ROOT", "AGENT_BUS_CONFIG_DIR", "AGENT_BUS_DATABASE_PATH",
+                "AGENT_BUS_URL", "AGENT_BUS_SESSION_FILE", "AGENT_BUS_PROJECT_ID"):
+        monkeypatch.delenv(key, raising=False)
+    project = tmp_path / "praxia"
+    project.mkdir()
+
+    async def no_hub(_root):
+        return None
+
+    monkeypatch.setattr("agent_bus.mcp.join._ensure_hub", no_hub)
+    server = _Server("agy")
+    await join_workspace(server, str(project))
+    credential = project / ".agent-bus" / "runtime" / "credentials" / "agy.json"
+    stale = {**json.loads(credential.read_text()), "expires_at": time.time() - 1}
+    credential.write_text(json.dumps(stale))
+    server.session = stale
+
+    await join_workspace(server, str(project))
+
+    assert server.session["expires_at"] > time.time()
+    assert server.session["token"] != stale["token"]
+    assert json.loads(credential.read_text())["token"] == server.session["token"]
+    assert credential.stat().st_mode & 0o777 == 0o600
