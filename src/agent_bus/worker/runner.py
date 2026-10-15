@@ -29,6 +29,34 @@ def _agy_error(base: str, payload: dict[str, Any], stderr: str | None) -> str:
     return "; ".join(parts)
 
 
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def claude_usage(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Usage from Claude's JSON envelope; input_tokens counts cache reads and writes too."""
+    raw = envelope.get("usage")
+    usage: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    parts = [_count(usage.get(key)) for key in
+             ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
+    models = envelope.get("modelUsage")
+    cost = envelope.get("total_cost_usd")
+    return {
+        "input_tokens": sum(part for part in parts if part is not None) if parts[0] is not None else None,
+        "cached_input_tokens": parts[2],
+        "output_tokens": _count(usage.get("output_tokens")),
+        "estimated_cost_usd": float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
+        "model": next(iter(models)) if isinstance(models, dict) and len(models) == 1 else None,
+    }
+
+
+def codex_usage(event: dict[str, Any]) -> dict[str, Any]:
+    """Usage from Codex's turn.completed event; it reports no cost."""
+    raw = event.get("usage")
+    usage: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    return {key: _count(usage.get(key)) for key in ("input_tokens", "cached_input_tokens", "output_tokens")}
+
+
 @dataclass
 class RunnerResult:
     success: bool
@@ -227,6 +255,9 @@ class AgentRunner:
             envelope = json.loads(result.output)
         except (ValueError, TypeError):
             envelope = None
+        if isinstance(envelope, dict):
+            # A failed turn still spent tokens.
+            result.metadata["usage"] = claude_usage(envelope)
         text = envelope.get("result") if isinstance(envelope, dict) else None
         if not isinstance(envelope, dict) or envelope.get("is_error") or not isinstance(text, str) or not text.strip():
             result.success = False
@@ -405,6 +436,7 @@ class AgentRunner:
         completed = False
         final_text = None
         new_session = None
+        usage: dict[str, Any] | None = None
         try:
             for line in result.output.splitlines():
                 if not line.strip():
@@ -421,6 +453,7 @@ class AgentRunner:
                         final_text = item.get("text")
                 elif kind == "turn.completed":
                     completed = True
+                    usage = codex_usage(event)
             if not completed or not isinstance(final_text, str) or not final_text.strip():
                 raise ValueError("Codex returned no completed text response")
             if not isinstance(new_session, str) or not new_session.strip():
@@ -429,6 +462,8 @@ class AgentRunner:
             return RunnerResult(False, "", error=str(exc), exit_code=1)
         result.output = final_text.strip()
         result.session_id = new_session
+        if usage is not None:
+            result.metadata["usage"] = usage
         if thread_id and result.session_id:
             self.session_map[thread_id] = result.session_id
             self._save_sessions()

@@ -334,9 +334,7 @@ class WorkerDaemon:
                 ),
             )
             thread_id = message.get("conversation_id") or message.get("correlation_id") or message_id
-            result = await self.runner.execute_turn(
-                prompt, thread_id=thread_id, timeout_seconds=self.turn_timeout_seconds,
-            )
+            result = await self._run_turn(prompt, task_id=None, thread_id=thread_id)
             if not result.success:
                 await self._record_message_failure(message_id, result.error or "Runner failed")
                 return result
@@ -395,7 +393,7 @@ class WorkerDaemon:
             extra_instructions=review_instructions(reviewed) if reviewed else None,
         )
 
-        result = await self.runner.execute_turn(prompt, timeout_seconds=self.turn_timeout_seconds)
+        result = await self._run_turn(prompt, task_id=task_id)
         if result.success and reviewed:
             result = await self._record_verdicts(task_id, reviewed, result)
         await self._finish_attempt(task_id, "completed" if result.success else "failed")
@@ -476,6 +474,28 @@ class WorkerDaemon:
         except Exception as exc:
             logger.debug("Runtime gate skipped: %s", exc)
             return True
+
+    async def _run_turn(self, prompt: str, *, task_id: str | None, thread_id: str | None = None) -> RunnerResult:
+        """Run one turn and record its usage; usage is informative and never changes the outcome."""
+        started = time.monotonic()
+        result = await self.runner.execute_turn(
+            prompt, thread_id=thread_id, timeout_seconds=self.turn_timeout_seconds,
+        )
+        usage = result.metadata.get("usage")
+        if isinstance(usage, dict) and self._client:
+            provider = getattr(self.runner, "provider", None)
+            body = {
+                **usage,
+                "model": usage.get("model") or getattr(self.runner, "model", None),
+                "agent_id": self.agent_id, "runtime": "worker", "provider": provider, "task_id": task_id,
+                "wall_seconds": round(time.monotonic() - started, 3),
+                "source": f"{provider}-cli", "confidence": "high",
+            }
+            try:
+                (await self._client.post("/usage", json=body)).raise_for_status()
+            except Exception as exc:
+                logger.warning("Could not record usage for %s: %s", task_id or "a reply", exc)
+        return result
 
     async def _finish_attempt(self, task_id: str, outcome: str) -> None:
         if not self._client:
