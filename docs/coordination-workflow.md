@@ -148,6 +148,12 @@ de la rama. Rechaza un destino que cambió después de revisar. Las carpetas de
 runtime y artefactos de tests deben estar ignoradas en Git. Los procesos externos
 que modifiquen simultáneamente el checkout siguen requiriendo coordinación.
 
+Si el candidato modifica o borra tests que ya existían en el destino, el integrador
+restaura sus versiones originales y vuelve a correr la suite contra el código del
+candidato. Si fallan, pide cambios: pasar solo con tests reescritos parece reward
+hacking. Un administrador puede permitirlo al crear la tarea con el criterio de
+aceptación `allow_test_changes`; a un agente se le responde 403. La revisión registra esos archivos en `evidence.changed_tests`.
+
 Si el coordinador integra una implementación aprobada sin el integrador, la cierra
 con `complete_task` (o `agent-bus work done <task_id> --merged-sha <sha>`;
 `POST /tasks/{task_id}/done` con `merged_sha` opcional). Sólo el coordinador de la

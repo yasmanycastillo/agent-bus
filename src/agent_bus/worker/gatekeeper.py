@@ -54,6 +54,22 @@ SECRET_PATTERNS = [
 ]
 
 
+TEST_PATH = re.compile(
+    r"(?:^|/)(?:tests?|__tests__)/"
+    r"|(?:^|/)(?:test_[^/]*\.py|[^/]*_test\.(?:py|go)|conftest\.py|[^/]*\.(?:test|spec)\.[cm]?[jt]sx?)$"
+)
+# Acceptance criterion with which a task's creator lets it rewrite existing tests.
+ALLOW_TEST_CHANGES = "allow_test_changes"
+
+
+def is_test_path(path: str) -> bool:
+    return bool(TEST_PATH.search(path))
+
+
+def allows_test_changes(criteria: list[str]) -> bool:
+    return any(criterion.strip().lower() == ALLOW_TEST_CHANGES for criterion in criteria)
+
+
 class ReviewRequest(BaseModel):
     task_id: str
     sha: str = ""
@@ -62,6 +78,10 @@ class ReviewRequest(BaseModel):
     test_output: str = ""
     test_results: dict[str, Any] = Field(default_factory=dict)
     acceptance_criteria: list[str] = Field(default_factory=list)
+    # Existing tests the candidate modified or deleted, and the failing output of
+    # their target-branch versions run against the candidate (None: they passed).
+    changed_tests: list[str] = Field(default_factory=list)
+    original_tests_output: str | None = None
     verdict: Verdict | None = None
     reason: str | None = None
     evidence: dict[str, Any] = Field(default_factory=dict)
@@ -120,6 +140,7 @@ class CodeReviewGatekeeper(Gatekeeper):
             "test_results": test_results,
             "security_checklist": security_checklist,
             "acceptance_criteria_checks": criteria_checks,
+            "changed_tests": request.changed_tests,
         }
 
         # 1. Security violations always trigger BLOCKED
@@ -144,6 +165,23 @@ class CodeReviewGatekeeper(Gatekeeper):
                 sha=request.sha,
                 verdict=Verdict.CHANGES_REQUESTED,
                 reason=f"Automated test suite failed: {snippet[:200].strip() or 'tests did not pass'}",
+                evidence=evidence,
+                test_results=test_results,
+                reviewer_agent_id=request.reviewer_agent_id,
+                reviewer_session_id=request.reviewer_session_id,
+            )
+
+        # 2b. Passing only with rewritten tests is how reward hacking looks.
+        if request.original_tests_output is not None and not allows_test_changes(request.acceptance_criteria):
+            return ReviewDecision(
+                task_id=request.task_id,
+                sha=request.sha,
+                verdict=Verdict.CHANGES_REQUESTED,
+                reason=(
+                    f"Candidate changes existing tests ({', '.join(request.changed_tests)}) and fails "
+                    f"their original versions; keep them or ask the task creator for "
+                    f"'{ALLOW_TEST_CHANGES}': {request.original_tests_output[:200].strip()}"
+                ),
                 evidence=evidence,
                 test_results=test_results,
                 reviewer_agent_id=request.reviewer_agent_id,
