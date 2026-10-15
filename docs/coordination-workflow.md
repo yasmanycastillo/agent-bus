@@ -166,6 +166,24 @@ contenga el candidato aprobado. Un administrador sigue pudiendo cerrar cualquier
 `auth create` guarda el secreto sin imprimirlo por defecto. Usa `--show-token`
 explícitamente si necesitas copiarlo a la consola; `--quiet` prevalece.
 
+## Vigilancia
+
+`agent-bus watchdog` revisa el hub cada minuto (`--once` para una sola pasada) y avisa
+de lo que está atascado, sin modelo ni coste de inferencia:
+
+- `review_stalled`: una tarea lleva más de `--review-minutes` (30) en `in_review`.
+- `integrator_down`: hay tareas en `in_review` y el integrador que se arrancó aquí ya
+  no corre. Sin PID del integrador no se informa: cerrar revisiones sin él es válido.
+- `needs_human`: una tarea está `blocked` con una razón. La espera por dependencias o
+  por la nueva entrega de una implementación revisada no cuenta.
+- `claim_stuck`: una tarea lleva más de `--stuck-minutes` (60) sin cambios en
+  `in_progress`. El hub ya libera los claims de dueños sin señales de vida; este aviso
+  cubre a un agente vivo que no avanza.
+
+Cada hallazgo se avisa una vez hasta que desaparece. Los avisos van a la salida, al
+escritorio (`--no-desktop` lo desactiva), a cada `--webhook`, a Telegram con
+`TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`, y a tmux con `AGENT_BUS_TMUX_TARGET`.
+
 ## API y validación
 
 | Tool | Endpoint |
