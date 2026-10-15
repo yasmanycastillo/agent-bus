@@ -499,3 +499,17 @@ async def test_internal_review_id_collision_returns_clean_conflict(secured, monk
     assert len(await bus.reviews.list_all()) == 1
     assert len(await bus.db.conn.execute_fetchall("SELECT * FROM audit_log")) == 1
     assert (await bus.reviews.get(first.json()["review_id"])).model_dump(mode="json") == first.json()
+
+
+async def test_agents_list_tells_why_an_agent_went_quiet(secured):
+    from agent_bus.types import AgentInfo
+
+    bus, client, sessions = secured
+    for agent in ("alice", "bob", "all", "ghost"):
+        await bus.registry.register(AgentInfo(agent_id=agent, display_name=agent))
+    await bus.db.conn.execute("UPDATE sessions SET expires_at = 1 WHERE agent_id = 'bob'")
+    await bus.db.conn.execute("UPDATE sessions SET revoked = 1 WHERE agent_id = 'all'")
+    await bus.db.conn.commit()
+    response = await client.get("/agents", headers=bearer(sessions))
+    states = {agent["agent_id"]: agent["credential"] for agent in response.json()}
+    assert states == {"alice": "valid", "bob": "expired", "all": "revoked", "ghost": "none"}

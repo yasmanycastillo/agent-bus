@@ -116,3 +116,26 @@ def test_runtime_data_dir_is_private_under_permissive_umask(tmp_path, monkeypatc
     finally:
         os.umask(previous)
     assert stat.S_IMODE((tmp_path / ".agent-bus/runtime/data").stat().st_mode) == 0o700
+
+
+def test_renew_reissues_an_expired_agent_credential_in_place(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_BUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_BUS_DATABASE_PATH", str(tmp_path / "bus.db"))
+    monkeypatch.setenv("AGENT_BUS_PROJECT_ID", "renew-project")
+    runner = CliRunner()
+    assert runner.invoke(auth, ["create", "--agent", "grok", "--provider", "grok", "--ttl", "1"]).exit_code == 0
+    path = tmp_path / "credentials/grok.json"
+    old = json.loads(path.read_text())
+    # A tampered file must not choose the role or provider of the renewed session.
+    path.write_text(json.dumps({**old, "role": "admin", "provider": "claude"}))
+
+    result = runner.invoke(auth, ["renew", "--agent", "grok"])
+
+    assert result.exit_code == 0, result.output
+    new = json.loads(path.read_text())
+    assert new["token"] != old["token"] and new["expires_at"] > old["expires_at"]
+    assert (new["role"], new["provider"]) == ("agent", "grok")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert new["token"] not in result.output
+    assert runner.invoke(auth, ["renew", "--agent", "stranger"]).exit_code != 0
+    assert not (tmp_path / "credentials/stranger.json").exists()

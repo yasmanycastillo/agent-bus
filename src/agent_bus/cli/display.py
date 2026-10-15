@@ -206,13 +206,17 @@ def print_agents_table(agents: list[dict]) -> None:
     table.add_column("ID", style="cyan")
     table.add_column("Nombre", style="green")
     table.add_column("Status", style="yellow")
+    table.add_column("Credencial")
     table.add_column("Capacidades", style="magenta")
     status_colors = {"online": "green", "away": "yellow", "offline": "red", "busy": "blue"}
+    credential_colors = {"valid": "green", "expired": "red", "revoked": "red", "none": "dim"}
     for a in agents:
         st = a.get("status", "offline")
         colored = f"[{status_colors.get(st, 'white')}]{st}[/{status_colors.get(st, 'white')}]"
         caps = ", ".join(a.get("capabilities", []))
-        table.add_row(a["agent_id"], a["display_name"], colored, caps or "-")
+        cred = a.get("credential", "none")
+        cred_color = credential_colors.get(cred, "white")
+        table.add_row(a["agent_id"], a["display_name"], colored, f"[{cred_color}]{cred}[/{cred_color}]", caps or "-")
     console.print(table)
 
 

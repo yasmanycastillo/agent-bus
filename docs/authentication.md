@@ -100,6 +100,14 @@ uv run agent-bus auth revoke --session ID_DE_SESION
 
 La sesión revocada deja de autorizar requests. SSE y WebSocket revalidan la sesión mientras permanecen conectados. Para renovar, provisionar una nueva sesión y configurar su archivo en el cliente; usar `auth create --output /ruta/nueva.json` para conservar el archivo anterior durante la transición. El comando no sobrescribe archivos existentes; `--ttl` indica segundos (hasta 30 días). Reiniciar el cliente MCP para cargar su nueva sesión.
 
+Un agente cuya sesión venció la renueva al llamar `bootstrap_agent`; una sesión revocada no se renueva. Si un agente queda inactivo, `agent-bus show agents` (o `get_project_status`) indica el estado de su credencial: `valid`, `expired`, `revoked` o `none`. El coordinador la regenera en el mismo archivo y le pide retomar el trabajo:
+
+```bash
+uv run agent-bus auth renew --agent grok --notify
+```
+
+La renovación conserva el proveedor registrado en el hub y siempre emite rol `agent`. El watcher relee el archivo en cada consulta, por lo que se recupera sin reiniciarse y despierta al agente con el aviso.
+
 El token es una credencial reutilizable hasta su vencimiento o revocación. No demuestra posesión de una clave privada por cada operación ni impide repetir solicitudes válidas. La [mensajería](messaging.md) utiliza claves de idempotencia para reconocer reintentos. No se mantiene la garantía de anti-replay de solicitudes firmadas porque ese mecanismo no se utiliza para autenticación HTTP.
 
 ## Compatibilidad y migración
