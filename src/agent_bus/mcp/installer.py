@@ -83,9 +83,12 @@ def build_mcp_server_config(
     command: str = "agent-bus",
     bus_url: str | None = None,
     env: dict[str, str] | None = None,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the JSON configuration object for the agent-bus MCP server."""
     args = ["mcp-server", "--agent", agent_id]
+    if provider:
+        args.extend(["--provider", provider])
     if bus_url:
         args.extend(["--bus-url", bus_url])
     cfg: dict[str, Any] = {
@@ -116,7 +119,7 @@ def install_mcp_config(
     client = client.lower().strip()
     config_path = get_mcp_config_path(client, scope=scope, project_root=project_root)
     resolved_agent = agent_id or DEFAULT_CLIENT_AGENTS.get(client, "agent")
-    server_cfg = build_mcp_server_config(resolved_agent, command=command, bus_url=bus_url, env=env)
+    server_cfg = build_mcp_server_config(resolved_agent, command=command, bus_url=bus_url, env=env, provider=client)
     if client == "codex":
         existed = _install_codex_server(config_path, server_name, server_cfg, dry_run=dry_run)
         return config_path, server_cfg, existed

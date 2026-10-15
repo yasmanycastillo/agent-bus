@@ -21,6 +21,8 @@ from agent_bus.worker.gatekeeper import (
     ReviewDecision,
     ReviewRequest,
     Verdict,
+    allows_test_changes,
+    is_test_path,
 )
 from agent_bus.workspaces.base import Workspace
 from agent_bus.workspaces.worktree import WorktreeWorkspaceBackend
@@ -298,6 +300,13 @@ class BranchIntegrator:
                     metadata={"candidate_sha": candidate_sha, "integration_sha": integration_sha or None},
                 )
 
+        changed_tests: list[str] = []
+        original_tests_output: str | None = None
+        if tests_passed and integration_sha and not allows_test_changes(acceptance_criteria or []):
+            changed_tests, original_tests_output = await self._rerun_original_tests(
+                integration_sha, target_sha, test_cmd
+            )
+
         # Invoke Gatekeeper to evaluate diff and test results. The review stays
         # tied to the author's candidate SHA; the tested combined SHA travels in
         # metadata so audits point at what the author wrote.
@@ -309,6 +318,8 @@ class BranchIntegrator:
             test_output=test_output,
             test_results={"passed": tests_passed, "output_snippet": test_output[:1000]},
             acceptance_criteria=acceptance_criteria or [],
+            changed_tests=changed_tests,
+            original_tests_output=original_tests_output,
             reviewer_agent_id=self.agent_id,
         )
         decision = self.gatekeeper.evaluate(review_request)
@@ -739,6 +750,47 @@ class BranchIntegrator:
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 )
                 await prune.communicate()
+            shutil.rmtree(work_root, ignore_errors=True)
+
+    async def _rerun_original_tests(
+        self, integration_sha: str, target_sha: str, test_cmd: list[str] | None,
+    ) -> tuple[list[str], str | None]:
+        """Run the target's own versions of existing tests the candidate modified or deleted.
+
+        Returns ``(changed_tests, failure_output)``; ``failure_output`` is None when
+        no existing test changed or their original versions pass on the candidate.
+        """
+        listed = await self._git_output(
+            "diff", "--no-renames", "--name-only", "--diff-filter=MD", target_sha, integration_sha,
+        )
+        changed = [path for path in listed.splitlines() if is_test_path(path)]
+        if not changed:
+            return [], None
+        work_root = Path(tempfile.mkdtemp(prefix="integrator-original-tests-"))
+        path = work_root / "original"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "worktree", "add", "--detach", str(path), integration_sha,
+                cwd=str(self.repo_dir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await proc.communicate()
+            if proc.returncode != 0:
+                return changed, f"Failed to prepare original-tests worktree: {(out + err).decode(errors='replace')}"
+            proc = await asyncio.create_subprocess_exec(
+                "git", "checkout", target_sha, "--", *changed,
+                cwd=str(path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await proc.communicate()
+            if proc.returncode != 0:
+                return changed, f"Failed to restore original tests: {(out + err).decode(errors='replace')}"
+            passed, output = await self.run_tests(path, test_cmd)
+            return changed, None if passed else output
+        finally:
+            prune = await asyncio.create_subprocess_exec(
+                "git", "worktree", "remove", "--force", str(path),
+                cwd=str(self.repo_dir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await prune.communicate()
             shutil.rmtree(work_root, ignore_errors=True)
 
     async def _merge_in_worktree(self, worktree: Path, sha: str) -> tuple[bool, str]:

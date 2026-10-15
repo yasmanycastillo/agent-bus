@@ -69,9 +69,7 @@ def write_session(agent: str, role: str, ttl: int, target: Path, *, provider: st
         await db.initialize()
         try:
             store = SessionStore(db, config.bus.project_id)
-            session = await store.create(agent, role, ttl)
-            if provider is not None:
-                session["provider"] = provider
+            session = await store.create(agent, role, ttl, provider=provider)
             try:
                 with os.fdopen(fd, "w") as stream:
                     json.dump(session, stream)

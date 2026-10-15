@@ -70,6 +70,9 @@ class ReviewLog:
                 raise VerdictError(
                     "implementation attempt is missing: the implementer must hand off with candidate_sha"
                 )
+        conflict = await self._provider_conflict(chosen, reviewer)
+        if conflict:
+            raise VerdictError(conflict)
         decision = ReviewDecision(
             task_id=task_id, sha=candidates[chosen], verdict=Verdict(verdict), reason=reason or verdict,
             reviewer_agent_id=reviewer, reviewer_session_id="",
@@ -78,6 +81,33 @@ class ReviewLog:
         return await self.add(decision, after=lambda conn: close_approved_review(
             conn, task_id, decision.created_at.isoformat(),
         ))
+
+    async def _provider_conflict(self, implementation_id: str, reviewer: str) -> str | None:
+        """Under require_distinct_provider, the same model under another agent_id cannot approve itself."""
+        policy = list(await self._db.conn.execute_fetchall(
+            "SELECT require_distinct_provider FROM evidence_policies WHERE task_id = ?", (implementation_id,),
+        ))
+        if not policy or not policy[0]["require_distinct_provider"]:
+            return None
+        owner = list(await self._db.conn.execute_fetchall(
+            "SELECT owner FROM tasks WHERE task_id = ?", (implementation_id,),
+        ))
+        implementer = await self._providers(owner[0]["owner"]) if owner else set()
+        reviewing = await self._providers(reviewer)
+        if not implementer or not reviewing:
+            return ("policy requires a reviewer from another provider, but a provider is unknown: "
+                    "reinstall the MCP (mcp install --client) or create the session with auth create --provider")
+        shared = implementer & reviewing
+        if shared:
+            return f"policy requires a reviewer from another provider; both use {', '.join(sorted(shared))}"
+        return None
+
+    async def _providers(self, agent_id: str) -> set[str]:
+        """Every provider that has held a session for this identity."""
+        rows = await self._db.conn.execute_fetchall(
+            "SELECT DISTINCT provider FROM sessions WHERE agent_id = ? AND provider IS NOT NULL", (agent_id,),
+        )
+        return {row["provider"] for row in rows}
 
     async def _candidate(self, implementation_id: str) -> str | None:
         """Latest completed candidate SHA of one implementation."""

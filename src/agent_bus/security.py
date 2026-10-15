@@ -42,8 +42,11 @@ class SessionStore:
         self.db = db
         self.project_id = validate_id(project_id)
 
-    async def create(self, agent_id: str, role: str = "agent", ttl_seconds: int = 86400) -> dict:
+    async def create(self, agent_id: str, role: str = "agent", ttl_seconds: int = 86400,
+                     provider: str | None = None) -> dict:
         validate_id(agent_id)
+        if provider is not None:
+            validate_id(provider)
         if agent_id == "free":
             raise AuthenticationError("Agent identity is reserved")
         if role not in ("agent", "admin"):
@@ -55,13 +58,17 @@ class SessionStore:
         session_id = secrets.token_hex(16)
         expires_at = time.time() + ttl_seconds
         await self.db.conn.execute(
-            "INSERT INTO sessions (session_id, token_hash, agent_id, project_id, role, expires_at, revoked) "
-            "VALUES (?, ?, ?, ?, ?, ?, 0)",
-            (session_id, hashlib.sha256(token.encode()).hexdigest(), agent_id, self.project_id, role, expires_at),
+            "INSERT INTO sessions (session_id, token_hash, agent_id, project_id, role, expires_at, revoked, provider) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+            (session_id, hashlib.sha256(token.encode()).hexdigest(), agent_id, self.project_id, role, expires_at,
+             provider),
         )
         await self.db.conn.commit()
-        return dict(token=token, agent_id=agent_id, session_id=session_id,
-                    project_id=self.project_id, role=role, expires_at=expires_at)
+        session = dict(token=token, agent_id=agent_id, session_id=session_id,
+                       project_id=self.project_id, role=role, expires_at=expires_at)
+        if provider is not None:
+            session["provider"] = provider
+        return session
 
     async def authenticate(self, token: str) -> Principal:
         await self.db.bind_project(self.project_id)
