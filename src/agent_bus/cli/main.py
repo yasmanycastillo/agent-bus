@@ -1279,13 +1279,14 @@ def start(host: str, port: int):
 @app.command("mcp-server")
 @click.option("--bus-url", envvar="AGENT_BUS_URL", default=None, help="URL del hub agent-bus")
 @click.option("--agent", "agent_id", default=None, help="Identidad de la sesión MCP")
-def mcp_server_cmd(bus_url: str, agent_id: str | None):
+@click.option("--provider", default=None, help="Proveedor (cliente) que firma la credencial que crea bootstrap")
+def mcp_server_cmd(bus_url: str, agent_id: str | None, provider: str | None):
     """Iniciar el servidor MCP de agent-bus sobre stdio (JSON-RPC 2.0)."""
     import asyncio
     from agent_bus.mcp.server import run_mcp_server
 
     try:
-        asyncio.run(run_mcp_server(bus_url=bus_url, agent_id=agent_id))
+        asyncio.run(run_mcp_server(bus_url=bus_url, agent_id=agent_id, provider=provider))
     except AuthenticationError as exc:
         raise click.ClickException(str(exc)) from exc
 
