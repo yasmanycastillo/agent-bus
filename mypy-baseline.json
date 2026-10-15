@@ -5,8 +5,7 @@
     "src/agent_bus/cli/auth_cmds.py:attr-defined:Module \"agent_bus.security\" does not explicitly export attribute \"AuthenticationError\"": 1,
     "src/agent_bus/cli/auth_cmds.py:attr-defined:Module \"agent_bus.security\" does not explicitly export attribute \"validate_id\"": 1,
     "src/agent_bus/cli/auth_cmds.py:no-untyped-call:Call to untyped function \"perform\" in typed context": 1,
-    "src/agent_bus/cli/auth_cmds.py:no-untyped-call:Call to untyped function \"provision\" in typed context": 1,
-    "src/agent_bus/cli/auth_cmds.py:no-untyped-def:Function is missing a return type annotation": 5,
+    "src/agent_bus/cli/auth_cmds.py:no-untyped-def:Function is missing a return type annotation": 4,
     "src/agent_bus/cli/demo_cmds.py:index:Value of type \"Any | None\" is not indexable": 1,
     "src/agent_bus/cli/demo_cmds.py:no-untyped-call:Call to untyped function \"http\" in typed context": 5,
     "src/agent_bus/cli/demo_cmds.py:no-untyped-call:Call to untyped function \"run_tests\" in typed context": 4,
@@ -65,7 +64,6 @@
     "src/agent_bus/cli/worker_cmds.py:attr-defined:Module \"agent_bus.security\" does not explicitly export attribute \"AuthenticationError\"": 1,
     "src/agent_bus/cli/worker_cmds.py:no-untyped-def:Function is missing a return type annotation": 7,
     "src/agent_bus/config.py:var-annotated:Need type annotation for \"project\" (hint: \"project: dict[<type>, <type>] = ...\")": 2,
-    "src/agent_bus/consensus/bft.py:arg-type:Argument \"key\" to \"max\" has incompatible type overloaded function; expected \"Callable[[str], SupportsDunderLT[Any] | SupportsDunderGT[Any]]\"": 1,
     "src/agent_bus/core/artifacts.py:index:Value of type \"Iterable[Row]\" is not indexable": 1,
     "src/agent_bus/core/artifacts.py:no-untyped-def:Function is missing a type annotation for one or more parameters": 2,
     "src/agent_bus/core/artifacts.py:type-arg:Missing type arguments for generic type \"dict\"": 1,
@@ -227,9 +225,6 @@
     "src/agent_bus/reputation/database.py:no-untyped-def:Function is missing a return type annotation": 3,
     "src/agent_bus/reputation/database.py:no-untyped-def:Function is missing a type annotation": 3,
     "src/agent_bus/reputation/database.py:type-arg:Missing type arguments for generic type \"Task\"": 2,
-    "src/agent_bus/reputation/endorsement.py:type-arg:Missing type arguments for generic type \"dict\"": 2,
-    "src/agent_bus/reputation/manager.py:index:Value of type \"Iterable[Row]\" is not indexable": 1,
-    "src/agent_bus/reputation/manager.py:no-any-return:Returning Any from function declared to return \"float\"": 1,
     "src/agent_bus/runtimes/external.py:arg-type:Argument 2 to \"_diff\" of \"ExternalCommandRuntime\" has incompatible type \"str | None\"; expected \"str\"": 1,
     "src/agent_bus/runtimes/external.py:index:Value of type \"Iterable[Row]\" is not indexable": 5,
     "src/agent_bus/runtimes/native.py:index:Value of type \"Iterable[Row]\" is not indexable": 4,
@@ -279,5 +274,5 @@
     "src/agent_bus/workflows/runner.py:type-arg:Missing type arguments for generic type \"dict\"": 1,
     "src/agent_bus/workspaces/direct.py:no-untyped-def:Function is missing a type annotation for one or more parameters": 1
   },
-  "total_errors": 821
+  "total_errors": 814
 }
