@@ -194,6 +194,22 @@ async def test_handoff_in_review_starts_the_held_review(flow):
     assert (await bus.tasks.get(review)).status.value == 'in_progress'
 
 
+async def test_each_assignment_carries_its_role_guidance(flow):
+    from agent_bus.core.instructions import ROLE_GUIDANCE, ROLES, InstructionLog, assign_work
+    bus, client, alice, bob = flow
+    assert set(ROLE_GUIDANCE) == ROLES
+    log = InstructionLog(bus.db)
+    await log.ensure_schema()
+    instruction = await log.submit('coordinator', 'Fix taxes', True, [
+        {'agent_id': 'alice', 'provider': 'codex'}, {'agent_id': 'bob', 'provider': 'claude'},
+    ])
+    written = (await assign_work(bus, instruction['instruction_id'], 'alice', 'implement', 'Write'))['task_id']
+    review = (await assign_work(bus, instruction['instruction_id'], 'bob', 'review', 'Review'))['task_id']
+    assert ROLE_GUIDANCE['implement'] in (await bus.tasks.get(written)).description
+    assert ROLE_GUIDANCE['review'] in (await bus.tasks.get(review)).description
+    assert ROLE_GUIDANCE['review'] not in (await bus.tasks.get(written)).description
+
+
 async def test_revoked_unsigned_and_forged_identities_rejected(flow, monkeypatch):
     bus, client, alice, bob = flow
     assert (await client.post('/coordination/bootstrap', headers=headers(alice), json={'agent_id': 'bob'})).status_code == 422

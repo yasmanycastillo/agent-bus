@@ -107,7 +107,7 @@ RESUME_TEXT = ("Tu credencial de agent-bus fue renovada. Llama bootstrap_agent c
 @click.option("--agent", required=True, help="Agente cuya credencial venció o se perdió.")
 @click.option("--ttl", type=click.IntRange(1, 2592000), default=86400, show_default=True)
 @click.option("--notify", is_flag=True, help="Avisar al agente por el bus para que retome su trabajo.")
-def renew(agent: str, ttl: int, notify: bool):
+def renew(agent: str, ttl: int, notify: bool) -> None:
     """Reissue an agent credential in place; its watcher and bootstrap_agent pick it up."""
     try:
         validate_id(agent)

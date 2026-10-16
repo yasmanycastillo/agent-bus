@@ -15,6 +15,23 @@ ROLE_REQUIREMENTS = {
     "implement": ["implementation"],
     "review": ["code-review"],
 }
+# Appended to each assigned task so the agent learns what its role expects when it claims it.
+ROLE_GUIDANCE = {
+    "plan": (
+        "Como planificador: entrega un plan o una decisión, no código. Registra los acuerdos "
+        "con record_decision y entrega con complete_handoff. Una decisión no asigna a nadie."
+    ),
+    "implement": (
+        "Como implementador: limita los cambios a esta parte, usa prepare_edit antes de editar "
+        "y entrega con complete_handoff, incluyendo la evidencia de validación y candidate_sha "
+        "(git rev-parse HEAD). No apruebes tu propio trabajo."
+    ),
+    "review": (
+        "Como revisor: no corrijas el código tú mismo. Verifica el candidate_sha entregado "
+        "contra lo pedido, ejecuta las pruebas y emite record_verdict: approve autoriza la "
+        "integración de ese SHA; changes_requested la devuelve con motivos concretos."
+    ),
+}
 
 
 class InstructionError(ValueError):
@@ -190,6 +207,7 @@ async def assign_work(
     task_id = f"{instruction_id}-{role}-{assignee}"
     description = (
         f"{stored['body']}\n\nParte: {name}\nPapel: {role}\nAgente: {assignee} ({roster[assignee]})"
+        f"\n\n{ROLE_GUIDANCE[role]}"
     )
     await bus.tasks.create(
         task_id, name, description, owner=assignee,
